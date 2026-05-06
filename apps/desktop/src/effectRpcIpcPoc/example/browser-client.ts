@@ -2,12 +2,12 @@ import { Effect, Scope, Stream } from "effect";
 import { RpcClient } from "effect/unstable/rpc";
 
 import {
-  getEffectRpcIpcRendererBridge,
-  makeEffectRpcIpcRendererPort,
-  makeEffectRpcIpcRendererProtocol,
-  type EffectRpcIpcBrowserGlobal,
-} from "../library/client.ts";
-import type { EffectRpcIpcRendererBridge } from "../library/ipc.ts";
+  getEffectElectronRpcRendererBridge,
+  makeEffectElectronRpcRendererPort,
+  makeEffectElectronRpcRendererProtocol,
+  type EffectElectronRpcBrowserGlobal,
+} from "effect-electron-rpc/client";
+import type { EffectElectronRpcRendererBridge } from "effect-electron-rpc/ipc";
 import {
   DESKTOP_IPC_POC_METHODS,
   makeDesktopIpcPocClient,
@@ -15,8 +15,8 @@ import {
 } from "./protocol.ts";
 
 export interface DesktopIpcPocBrowserClientOptions {
-  readonly bridge?: EffectRpcIpcRendererBridge;
-  readonly globalObject?: EffectRpcIpcBrowserGlobal;
+  readonly bridge?: EffectElectronRpcRendererBridge;
+  readonly globalObject?: EffectElectronRpcBrowserGlobal;
 }
 
 export interface DesktopIpcPocSnapshotOptions extends DesktopIpcPocBrowserClientOptions {
@@ -28,9 +28,9 @@ export const makeDesktopIpcPocBrowserClient = (
   options: DesktopIpcPocBrowserClientOptions = {},
 ): Effect.Effect<DesktopIpcPocClient, never, Scope.Scope> =>
   Effect.gen(function* () {
-    const bridge = options.bridge ?? getEffectRpcIpcRendererBridge(options.globalObject);
-    const rendererProtocol = yield* makeEffectRpcIpcRendererProtocol(
-      makeEffectRpcIpcRendererPort(bridge),
+    const bridge = options.bridge ?? getEffectElectronRpcRendererBridge(options.globalObject);
+    const rendererProtocol = yield* makeEffectElectronRpcRendererProtocol(
+      makeEffectElectronRpcRendererPort(bridge),
     );
 
     return yield* makeDesktopIpcPocClient.pipe(

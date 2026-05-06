@@ -1,18 +1,22 @@
-import { Effect, Layer, Option, Queue, Scope } from "effect";
-import { RpcServer } from "effect/unstable/rpc";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
+import * as Scope from "effect/Scope";
+import * as RpcServer from "effect/unstable/rpc/RpcServer";
 import type { FromClientEncoded } from "effect/unstable/rpc/RpcMessage";
 
 import {
-  EFFECT_RPC_IPC_CHANNELS,
-  type EffectRpcIpcMainFrame,
-  type EffectRpcIpcMainPort,
-  type EffectRpcIpcMainSource,
-  isEffectRpcIpcRendererFrame,
+  EFFECT_ELECTRON_RPC_CHANNELS,
+  type EffectElectronRpcMainFrame,
+  type EffectElectronRpcMainPort,
+  type EffectElectronRpcMainSource,
+  isEffectElectronRpcRendererFrame,
 } from "./ipc.ts";
 
 export interface ElectronLikeWebContents {
   readonly id: number;
-  readonly send: (channel: string, frame: EffectRpcIpcMainFrame) => void;
+  readonly send: (channel: string, frame: EffectElectronRpcMainFrame) => void;
   readonly isDestroyed?: () => boolean;
   readonly once?: (event: "destroyed", listener: () => void) => ElectronLikeWebContents;
   readonly off?: (event: "destroyed", listener: () => void) => ElectronLikeWebContents;
@@ -40,16 +44,16 @@ export interface ElectronLikeIpcMain {
 
 export function makeElectronIpcMainPort(
   ipcMain: ElectronLikeIpcMain,
-  channels = EFFECT_RPC_IPC_CHANNELS,
-): EffectRpcIpcMainPort {
+  channels = EFFECT_ELECTRON_RPC_CHANNELS,
+): EffectElectronRpcMainPort {
   return {
     subscribe: (listener) => {
       const wrapped = (event: ElectronLikeIpcMainEvent, frame: unknown) => {
-        if (!isEffectRpcIpcRendererFrame(frame)) {
+        if (!isEffectElectronRpcRendererFrame(frame)) {
           return;
         }
 
-        const source: EffectRpcIpcMainSource = {
+        const source: EffectElectronRpcMainSource = {
           id: event.sender.id,
           send: (responseFrame) => {
             event.sender.send(channels.mainToRenderer, responseFrame);
@@ -78,8 +82,8 @@ export function makeElectronIpcMainPort(
   };
 }
 
-export const makeEffectRpcIpcMainProtocol = (
-  port: EffectRpcIpcMainPort,
+export const makeEffectElectronRpcMainProtocol = (
+  port: EffectElectronRpcMainPort,
 ): Effect.Effect<RpcServer.Protocol["Service"], never, Scope.Scope> =>
   Effect.gen(function* () {
     const scope = yield* Effect.scope;
@@ -115,7 +119,10 @@ export const makeEffectRpcIpcMainProtocol = (
       }
     };
 
-    const registerClient = (source: EffectRpcIpcMainSource, rendererClientId: number): number => {
+    const registerClient = (
+      source: EffectElectronRpcMainSource,
+      rendererClientId: number,
+    ): number => {
       const key = `${source.id}:${rendererClientId}`;
       const existingMainClientId = mainClientIdByRendererKey.get(key);
       if (existingMainClientId !== undefined) {
@@ -212,13 +219,13 @@ export const makeEffectRpcIpcMainProtocol = (
     });
   });
 
-export const layerEffectRpcIpcMainProtocol = (port: EffectRpcIpcMainPort) =>
-  Layer.effect(RpcServer.Protocol, makeEffectRpcIpcMainProtocol(port));
+export const layerEffectElectronRpcMainProtocol = (port: EffectElectronRpcMainPort) =>
+  Layer.effect(RpcServer.Protocol, makeEffectElectronRpcMainProtocol(port));
 
 interface MainClientRecord {
   readonly key: string;
   readonly rendererClientId: number;
-  readonly source: EffectRpcIpcMainSource;
+  readonly source: EffectElectronRpcMainSource;
 }
 
 type MainProtocolRequest =

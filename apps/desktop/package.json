@@ -17,6 +17,7 @@
   "dependencies": {
     "@effect/platform-node": "catalog:",
     "effect": "catalog:",
+    "effect-electron-rpc": "workspace:*",
     "electron": "40.9.3",
     "electron-updater": "^6.6.2"
   },

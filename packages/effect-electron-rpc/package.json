@@ -1,0 +1,38 @@
+{
+  "name": "effect-electron-rpc",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./client": {
+      "types": "./src/client.ts",
+      "import": "./src/client.ts"
+    },
+    "./ipc": {
+      "types": "./src/ipc.ts",
+      "import": "./src/ipc.ts"
+    },
+    "./main": {
+      "types": "./src/main.ts",
+      "import": "./src/main.ts"
+    },
+    "./preload": {
+      "types": "./src/preload.ts",
+      "import": "./src/preload.ts"
+    }
+  },
+  "scripts": {
+    "dev": "tsdown src/client.ts src/ipc.ts src/main.ts src/preload.ts --format esm,cjs --dts --watch --clean",
+    "build": "tsdown src/client.ts src/ipc.ts src/main.ts src/preload.ts --format esm,cjs --dts --clean",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/language-service": "catalog:",
+    "tsdown": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
