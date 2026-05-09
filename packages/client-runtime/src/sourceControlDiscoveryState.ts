@@ -17,6 +17,11 @@ export interface SourceControlDiscoveryClient {
   readonly discoverSourceControl: () => Promise<SourceControlDiscoveryResult>;
 }
 
+interface WatchedEntry {
+  refCount: number;
+  teardown: () => void;
+}
+
 /* --- Constants ------------------------------------------------------ */
 
 export const EMPTY_SOURCE_CONTROL_DISCOVERY_STATE = Object.freeze<SourceControlDiscoveryState>({
@@ -71,13 +76,29 @@ export interface SourceControlDiscoveryManagerConfig<TKey extends string = strin
    * clients without changing the state primitive.
    */
   readonly getClient: (key: TKey) => SourceControlDiscoveryClient | null;
+  /**
+   * Optional: subscribe to environment/client availability changes.
+   *
+   * When provided, `watch` refreshes as clients appear or are replaced
+   * instead of relying on React hooks to manually kick discovery.
+   */
+  readonly subscribeClientChanges?: (listener: () => void) => () => void;
 }
+
+const NOOP: () => void = () => undefined;
 
 export function createSourceControlDiscoveryManager<TKey extends string = string>(
   config: SourceControlDiscoveryManagerConfig<TKey>,
 ) {
-  const refreshInFlight = new Map<string, Promise<SourceControlDiscoveryResult | null>>();
+  const refreshInFlight = new Map<
+    string,
+    {
+      readonly client: SourceControlDiscoveryClient;
+      readonly promise: Promise<SourceControlDiscoveryResult | null>;
+    }
+  >();
   const refreshVersions = new Map<string, number>();
+  const watched = new Map<string, WatchedEntry>();
 
   function getRefreshVersion(targetKey: string): number {
     return refreshVersions.get(targetKey) ?? 0;
@@ -154,16 +175,20 @@ export function createSourceControlDiscoveryManager<TKey extends string = string
       return Promise.resolve(null);
     }
 
-    const existing = refreshInFlight.get(targetKey);
-    if (existing) {
-      return existing;
-    }
-
     const resolvedClient = client ?? config.getClient(targetKey);
     if (!resolvedClient) {
       const error = new Error("Source control discovery client is unavailable.");
       setError(targetKey, error);
       return Promise.resolve(getSnapshot(target).data);
+    }
+
+    const existing = refreshInFlight.get(targetKey);
+    if (existing) {
+      if (!client || existing.client === resolvedClient) {
+        return existing.promise;
+      }
+
+      return existing.promise.then(() => refresh(target, resolvedClient));
     }
 
     markPending(targetKey);
@@ -184,11 +209,14 @@ export function createSourceControlDiscoveryManager<TKey extends string = string
     );
     let tracked: Promise<SourceControlDiscoveryResult | null>;
     tracked = promise.finally(() => {
-      if (refreshInFlight.get(targetKey) === tracked) {
+      if (refreshInFlight.get(targetKey)?.promise === tracked) {
         refreshInFlight.delete(targetKey);
       }
     });
-    refreshInFlight.set(targetKey, tracked);
+    refreshInFlight.set(targetKey, {
+      client: resolvedClient,
+      promise: tracked,
+    });
     return tracked;
   }
 
@@ -229,11 +257,92 @@ export function createSourceControlDiscoveryManager<TKey extends string = string
   }
 
   /**
+   * Keep discovery warm for `target`.
+   *
+   * Multiple callers sharing a target key are ref-counted. With
+   * `subscribeClientChanges`, the manager refreshes whenever a client first
+   * appears or is replaced after reconnect.
+   */
+  function watch(
+    target: SourceControlDiscoveryTarget<TKey>,
+    client?: SourceControlDiscoveryClient,
+  ): () => void {
+    const targetKey = getSourceControlDiscoveryTargetKey(target);
+    if (targetKey === null) {
+      return NOOP;
+    }
+
+    const existing = watched.get(targetKey);
+    if (existing) {
+      existing.refCount += 1;
+      return () => unwatch(targetKey);
+    }
+
+    let teardown: () => void;
+
+    if (client) {
+      void refresh(target, client);
+      teardown = NOOP;
+    } else if (config.subscribeClientChanges) {
+      let currentClient: SourceControlDiscoveryClient | null = null;
+
+      const sync = () => {
+        const resolved = config.getClient(targetKey);
+        if (!resolved) {
+          currentClient = null;
+          markPending(targetKey);
+          return;
+        }
+
+        if (currentClient === resolved) {
+          return;
+        }
+
+        currentClient = resolved;
+        void refresh(target, resolved);
+      };
+
+      const unsubChanges = config.subscribeClientChanges(sync);
+      sync();
+      teardown = unsubChanges;
+    } else {
+      const resolved = config.getClient(targetKey);
+      if (!resolved) {
+        return NOOP;
+      }
+      void refresh(target, resolved);
+      teardown = NOOP;
+    }
+
+    watched.set(targetKey, { refCount: 1, teardown });
+    return () => unwatch(targetKey);
+  }
+
+  function unwatch(targetKey: string): void {
+    const entry = watched.get(targetKey);
+    if (!entry) {
+      return;
+    }
+
+    entry.refCount -= 1;
+    if (entry.refCount > 0) {
+      return;
+    }
+
+    entry.teardown();
+    watched.delete(targetKey);
+  }
+
+  /**
    * Clear in-flight refresh tracking and reset every known discovery atom.
    * Primarily used by tests and runtime teardown.
    */
   function reset(): void {
     const keys = new Set([...knownSourceControlDiscoveryKeys, ...refreshInFlight.keys()]);
+    for (const entry of watched.values()) {
+      entry.teardown();
+    }
+    watched.clear();
     refreshInFlight.clear();
     for (const key of keys) {
       bumpRefreshVersion(key);
@@ -242,6 +351,7 @@ export function createSourceControlDiscoveryManager<TKey extends string = string
   }
 
   return {
+    watch,
     refresh,
     getSnapshot,
     invalidate,

@@ -1,6 +1,6 @@
 import { sanitizeFeatureBranchName } from "@t3tools/shared/git";
 import { useRouter } from "expo-router";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Pressable, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useThemeColor } from "../../../lib/useThemeColor";
@@ -51,10 +51,6 @@ export function GitBranchesSheet() {
       )
       .map((branch) => branch.name),
   );
-
-  useEffect(() => {
-    void gitActions.refreshSelectedThreadBranches();
-  }, [gitActions]);
 
   return (
     <ScrollView

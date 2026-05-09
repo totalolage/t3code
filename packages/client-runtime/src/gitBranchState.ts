@@ -82,10 +82,22 @@ function mergeBranches(
 export interface GitBranchManagerConfig {
   readonly getRegistry: () => AtomRegistry.AtomRegistry;
   readonly getClient: (environmentId: EnvironmentId) => GitBranchClient | null;
+  readonly subscribeClientChanges?: (listener: () => void) => () => void;
+  readonly watchLimit?: number;
 }
+
+interface WatchedEntry {
+  refCount: number;
+  teardown: () => void;
+}
+
+const NOOP: () => void = () => undefined;
 
 export function createGitBranchManager(config: GitBranchManagerConfig) {
   const inFlight = new Map<string, Promise<GitListBranchesResult | null>>();
+  const watched = new Map<string, WatchedEntry>();
+  const watchLoadOptions =
+    config.watchLimit === undefined ? undefined : { limit: config.watchLimit };
 
   function getSnapshot(target: GitBranchTarget): GitBranchState {
     const targetKey = getGitBranchTargetKey(target);
@@ -204,6 +216,70 @@ export function createGitBranchManager(config: GitBranchManagerConfig) {
     });
   }
 
+  function watch(target: GitBranchTarget, client?: GitBranchClient): () => void {
+    const targetKey = getGitBranchTargetKey(target);
+    if (targetKey === null || target.environmentId === null || target.cwd === null) {
+      return NOOP;
+    }
+
+    const existing = watched.get(targetKey);
+    if (existing) {
+      existing.refCount += 1;
+      return () => unwatch(targetKey);
+    }
+
+    let teardown: () => void;
+
+    if (client) {
+      void load(target, client, watchLoadOptions);
+      teardown = NOOP;
+    } else if (config.subscribeClientChanges) {
+      let currentClient: GitBranchClient | null = null;
+      const sync = () => {
+        const resolved = config.getClient(target.environmentId!);
+        if (!resolved) {
+          currentClient = null;
+          return;
+        }
+        if (currentClient === resolved) {
+          return;
+        }
+
+        currentClient = resolved;
+        void load(target, resolved, watchLoadOptions);
+      };
+
+      const unsubscribe = config.subscribeClientChanges(sync);
+      sync();
+      teardown = unsubscribe;
+    } else {
+      const resolved = config.getClient(target.environmentId);
+      if (!resolved) {
+        return NOOP;
+      }
+      void load(target, resolved, watchLoadOptions);
+      teardown = NOOP;
+    }
+
+    watched.set(targetKey, { refCount: 1, teardown });
+    return () => unwatch(targetKey);
+  }
+
+  function unwatch(targetKey: string): void {
+    const entry = watched.get(targetKey);
+    if (!entry) {
+      return;
+    }
+
+    entry.refCount -= 1;
+    if (entry.refCount > 0) {
+      return;
+    }
+
+    entry.teardown();
+    watched.delete(targetKey);
+  }
+
   function invalidate(target?: GitBranchTarget): void {
     if (target) {
       const targetKey = getGitBranchTargetKey(target);
@@ -219,11 +295,16 @@ export function createGitBranchManager(config: GitBranchManagerConfig) {
   }
 
   function reset(): void {
+    for (const entry of watched.values()) {
+      entry.teardown();
+    }
+    watched.clear();
     invalidate();
   }
 
   return {
     getSnapshot,
+    watch,
     load,
     loadNext,
     invalidate,

@@ -35,7 +35,7 @@ function sourceControlDiscoveryTarget(
     : { key: environmentId };
 }
 
-export const sourceControlDiscoveryManager = createSourceControlDiscoveryManager({
+const sourceControlDiscoveryManager = createSourceControlDiscoveryManager({
   getRegistry: () => appAtomRegistry,
   getClient: (key) => {
     if (key === SOURCE_CONTROL_DISCOVERY_TARGET.key) {

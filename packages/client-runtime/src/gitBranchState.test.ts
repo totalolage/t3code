@@ -16,6 +16,8 @@ function resetAtomRegistry() {
   atomRegistry = AtomRegistry.make();
 }
 
+const noop = () => undefined;
+
 const TARGET = { environmentId: EnvironmentId.make("env-local"), cwd: "/repo" } as const;
 
 const FIRST_PAGE: GitListBranchesResult = {
@@ -157,5 +159,36 @@ describe("createGitBranchManager", () => {
     manager.reset();
 
     expect(manager.getSnapshot(TARGET)).toEqual(EMPTY_GIT_BRANCH_STATE);
+  });
+
+  it("watches branches with a ref-counted client-change subscription", async () => {
+    const mock = createMockClient();
+    let listener: () => void = noop;
+    const unsubscribe = vi.fn();
+    const manager = createGitBranchManager({
+      getRegistry: () => atomRegistry,
+      getClient: () => mock.client,
+      subscribeClientChanges: (nextListener) => {
+        listener = nextListener;
+        return unsubscribe;
+      },
+      watchLimit: 100,
+    });
+
+    const firstUnwatch = manager.watch(TARGET);
+    const secondUnwatch = manager.watch(TARGET);
+    await Promise.resolve();
+
+    expect(mock.listRefs).toHaveBeenCalledTimes(1);
+    expect(mock.listRefs).toHaveBeenCalledWith({ cwd: "/repo", limit: 100 });
+
+    listener();
+    await Promise.resolve();
+    expect(mock.listRefs).toHaveBeenCalledTimes(1);
+
+    firstUnwatch();
+    expect(unsubscribe).not.toHaveBeenCalled();
+    secondUnwatch();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
   });
 });

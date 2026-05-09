@@ -39,7 +39,7 @@ function shouldKeepThreadDetailWarm(state: ThreadDetailState): boolean {
   );
 }
 
-export const threadDetailManager = createThreadDetailManager({
+const threadDetailManager = createThreadDetailManager({
   getRegistry: () => appAtomRegistry,
   getClient: (environmentId) => {
     const client = getEnvironmentClient(environmentId);

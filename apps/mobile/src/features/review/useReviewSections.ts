@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import type { EnvironmentId, OrchestrationCheckpointSummary, ThreadId } from "@t3tools/contracts";
 
@@ -12,8 +12,11 @@ import {
   getReviewSectionIdForCheckpoint,
 } from "./reviewModel";
 import {
+  setReviewAsyncError,
+  setReviewGitDiffsLoading,
   setReviewGitSections,
   setReviewSelectedSectionId,
+  setReviewTurnDiffLoading,
   setReviewTurnDiff,
   type ReviewCacheForThread,
 } from "./reviewState";
@@ -26,9 +29,7 @@ export function useReviewSections(input: {
   const { environmentId, reviewCache, threadId } = input;
   const selectedThread = useSelectedThreadDetail();
   const { selectedThreadCwd } = useSelectedThreadWorktree();
-  const [loadingTurnIds, setLoadingTurnIds] = useState<Record<string, boolean>>({});
-  const [loadingGitDiffs, setLoadingGitDiffs] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { error, loadingGitDiffs, loadingTurnIds } = reviewCache.asyncState;
   const turnDiffByIdRef = useRef(reviewCache.turnDiffById);
 
   useEffect(() => {
@@ -84,21 +85,32 @@ export function useReviewSections(input: {
 
     const client = getEnvironmentClient(environmentId);
     if (!client) {
-      setError("Remote connection is not ready.");
+      if (reviewCache.threadKey) {
+        setReviewAsyncError(reviewCache.threadKey, "Remote connection is not ready.");
+      }
       return;
     }
 
-    setLoadingGitDiffs(true);
-    setError(null);
+    if (reviewCache.threadKey) {
+      setReviewGitDiffsLoading(reviewCache.threadKey, true);
+      setReviewAsyncError(reviewCache.threadKey, null);
+    }
     try {
       const result = await client.review.getDiffPreview({ cwd: selectedThreadCwd });
       if (reviewCache.threadKey) {
         setReviewGitSections(reviewCache.threadKey, result.sources);
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Failed to load review diffs.");
+      if (reviewCache.threadKey) {
+        setReviewAsyncError(
+          reviewCache.threadKey,
+          cause instanceof Error ? cause.message : "Failed to load review diffs.",
+        );
+      }
     } finally {
-      setLoadingGitDiffs(false);
+      if (reviewCache.threadKey) {
+        setReviewGitDiffsLoading(reviewCache.threadKey, false);
+      }
     }
   }, [environmentId, reviewCache.threadKey, selectedThreadCwd]);
 
@@ -119,12 +131,16 @@ export function useReviewSections(input: {
 
       const client = getEnvironmentClient(environmentId);
       if (!client) {
-        setError("Remote connection is not ready.");
+        if (reviewCache.threadKey) {
+          setReviewAsyncError(reviewCache.threadKey, "Remote connection is not ready.");
+        }
         return;
       }
 
-      setLoadingTurnIds((current) => ({ ...current, [sectionId]: true }));
-      setError(null);
+      if (reviewCache.threadKey) {
+        setReviewTurnDiffLoading(reviewCache.threadKey, sectionId, true);
+        setReviewAsyncError(reviewCache.threadKey, null);
+      }
       try {
         const result = await client.orchestration.getTurnDiff({
           threadId,
@@ -135,13 +151,16 @@ export function useReviewSections(input: {
           setReviewTurnDiff(reviewCache.threadKey, sectionId, result.diff);
         }
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : "Failed to load turn diff.");
+        if (reviewCache.threadKey) {
+          setReviewAsyncError(
+            reviewCache.threadKey,
+            cause instanceof Error ? cause.message : "Failed to load turn diff.",
+          );
+        }
       } finally {
-        setLoadingTurnIds((current) => {
-          const next = { ...current };
-          delete next[sectionId];
-          return next;
-        });
+        if (reviewCache.threadKey) {
+          setReviewTurnDiffLoading(reviewCache.threadKey, sectionId, false);
+        }
       }
     },
     [environmentId, reviewCache.threadKey, threadId],

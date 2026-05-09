@@ -31,7 +31,7 @@ import { type ConnectedEnvironmentSummary } from "./remote-runtime-types";
 import {
   invalidateSourceControlDiscoveryForEnvironment,
   resetSourceControlDiscoveryState,
-} from "./source-control-discovery-manager";
+} from "./use-source-control-discovery";
 import { environmentRuntimeManager, useEnvironmentRuntimeStates } from "./use-environment-runtime";
 import { shellSnapshotManager } from "./use-shell-snapshot";
 import { subscribeTerminalMetadata, terminalSessionManager } from "./use-terminal-session";

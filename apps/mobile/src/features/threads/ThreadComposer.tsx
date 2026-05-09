@@ -42,7 +42,7 @@ import {
   normalizeSearchQuery,
   scoreQueryMatch,
 } from "@t3tools/shared/searchRanking";
-import { getEnvironmentClient } from "../../state/environment-session-registry";
+import { useComposerPathSearch } from "../../state/use-composer-path-search";
 import { CLAUDE_AGENT_EFFORT_OPTIONS, type ClaudeAgentEffort } from "./claudeEffortOptions";
 import { ComposerCommandPopover, type ComposerCommandItem } from "./ComposerCommandPopover";
 
@@ -209,12 +209,6 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
 
   // ── Trigger detection ────────────────────────────────────
   const [cursorPosition, setCursorPosition] = useState(0);
-  const [composerTrigger, setComposerTrigger] = useState<ComposerTrigger | null>(null);
-  const [pathSearchResults, setPathSearchResults] = useState<
-    ReadonlyArray<{ path: string; kind: "file" | "directory" }>
-  >([]);
-  const [pathSearchLoading, setPathSearchLoading] = useState(false);
-  const pathSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleSelectionChange = useCallback(
     (event: NativeSyntheticEvent<TextInputSelectionChangeEventData>) => {
@@ -224,60 +218,15 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     [],
   );
 
-  useEffect(() => {
-    const trigger = detectComposerTrigger(props.draftMessage, cursorPosition);
-    setComposerTrigger(trigger);
-  }, [props.draftMessage, cursorPosition]);
-
-  // ── File search (debounced) ──────────────────────────────
-  useEffect(() => {
-    if (pathSearchTimerRef.current) {
-      clearTimeout(pathSearchTimerRef.current);
-      pathSearchTimerRef.current = null;
-    }
-
-    if (composerTrigger?.kind !== "path" || !composerTrigger.query || !props.projectCwd) {
-      setPathSearchResults([]);
-      setPathSearchLoading(false);
-      return;
-    }
-
-    setPathSearchLoading(true);
-    const query = composerTrigger.query;
-    const cwd = props.projectCwd;
-    const envId = props.environmentId;
-
-    pathSearchTimerRef.current = setTimeout(() => {
-      const client = getEnvironmentClient(envId);
-      if (!client) {
-        setPathSearchLoading(false);
-        return;
-      }
-
-      void client.projects
-        .searchEntries({ cwd, query, limit: 20 })
-        .then((result) => {
-          setPathSearchResults(
-            result.entries.map((entry) => ({
-              path: entry.path,
-              kind: entry.kind === "directory" ? ("directory" as const) : ("file" as const),
-            })),
-          );
-        })
-        .catch(() => {
-          setPathSearchResults([]);
-        })
-        .finally(() => {
-          setPathSearchLoading(false);
-        });
-    }, 200);
-
-    return () => {
-      if (pathSearchTimerRef.current) {
-        clearTimeout(pathSearchTimerRef.current);
-      }
-    };
-  }, [composerTrigger?.kind, composerTrigger?.query, props.projectCwd, props.environmentId]);
+  const composerTrigger = useMemo<ComposerTrigger | null>(
+    () => detectComposerTrigger(props.draftMessage, cursorPosition),
+    [cursorPosition, props.draftMessage],
+  );
+  const pathSearch = useComposerPathSearch({
+    environmentId: props.environmentId,
+    cwd: composerTrigger?.kind === "path" ? props.projectCwd : null,
+    query: composerTrigger?.kind === "path" ? composerTrigger.query : null,
+  });
 
   // ── Build menu items ─────────────────────────────────────
   const selectedProviderStatus = useMemo(() => {
@@ -416,7 +365,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     }
 
     if (composerTrigger.kind === "path") {
-      return pathSearchResults.map((entry) => {
+      return pathSearch.entries.map((entry) => {
         const parts = entry.path.split("/");
         return {
           id: `path:${entry.path}`,
@@ -430,7 +379,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     }
 
     return [];
-  }, [composerTrigger, selectedProviderStatus, pathSearchResults]);
+  }, [composerTrigger, pathSearch.entries, selectedProviderStatus]);
 
   // ── Handle command selection ──────────────────────────────
   const { onChangeDraftMessage, onUpdateInteractionMode, draftMessage, onSendMessage } = props;
@@ -680,7 +629,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
             <ComposerCommandPopover
               items={composerMenuItems}
               triggerKind={composerTrigger.kind}
-              isLoading={pathSearchLoading}
+              isLoading={pathSearch.isPending}
               onSelect={handleCommandSelect}
             />
           </View>

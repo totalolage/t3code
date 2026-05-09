@@ -7,6 +7,8 @@
     "bun.lock",
     "*.tsbuildinfo",
     "**/routeTree.gen.ts",
+    "apps/mobile/android/**",
+    "apps/mobile/ios/**",
     "apps/mobile/uniwind-types.d.ts"
   ],
   "plugins": ["eslint", "oxc", "react", "unicorn", "typescript"],

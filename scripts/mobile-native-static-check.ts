@@ -40,8 +40,10 @@ const sourceExtensions = new Set([".swift", ".kt", ".kts"]);
 const excludedDirectories = new Set([
   ".expo",
   ".git",
+  "android",
   "build",
   "DerivedData",
+  "ios",
   "node_modules",
   "Pods",
   "Vendor",
@@ -188,19 +190,7 @@ const runNativeStaticChecks = Effect.fn("runNativeStaticChecks")(function* () {
     }
   }
 
-  const androidProject = path.join(root, "android");
-  const gradlew = path.join(
-    androidProject,
-    process.platform === "win32" ? "gradlew.bat" : "gradlew",
-  );
-  const fs = yield* FileSystem.FileSystem;
-
-  if (yield* fs.exists(gradlew)) {
-    const stat = yield* fs.stat(gradlew);
-    if (stat.type === "File") {
-      yield* runCommand(gradlew, ["lint"], androidProject);
-    }
-  }
+  yield* Console.log("Skipping generated native project folders: android/, ios/.");
 });
 
 export const mobileNativeStaticCheckCommand = Command.make("mobile-native-static-check", {}, () =>

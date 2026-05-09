@@ -9,6 +9,12 @@ import { buildReviewParsedDiff, type ReviewParsedDiff } from "./reviewModel";
 
 const EMPTY_GIT_REVIEW_SECTIONS = Object.freeze<ReadonlyArray<ReviewDiffPreviewSource>>([]);
 const EMPTY_REVIEW_TURN_DIFFS = Object.freeze<Readonly<Record<string, string>>>({});
+const EMPTY_REVIEW_LOADING_TURN_IDS = Object.freeze<Readonly<Record<string, boolean>>>({});
+const EMPTY_REVIEW_ASYNC_STATE = Object.freeze<ReviewAsyncState>({
+  loadingGitDiffs: false,
+  loadingTurnIds: EMPTY_REVIEW_LOADING_TURN_IDS,
+  error: null,
+});
 const EMPTY_REVIEW_SECTION_FILE_IDS = Object.freeze<
   Readonly<Record<string, ReadonlyArray<string> | undefined>>
 >({});
@@ -23,6 +29,10 @@ const EMPTY_REVIEW_TURN_DIFFS_ATOM = Atom.make(EMPTY_REVIEW_TURN_DIFFS).pipe(
 const EMPTY_REVIEW_SELECTED_SECTION_ID_ATOM = Atom.make<string | null>(null).pipe(
   Atom.keepAlive,
   Atom.withLabel("mobile:review:selected-section-id:null"),
+);
+const EMPTY_REVIEW_ASYNC_STATE_ATOM = Atom.make(EMPTY_REVIEW_ASYNC_STATE).pipe(
+  Atom.keepAlive,
+  Atom.withLabel("mobile:review:async-state:null"),
 );
 const EMPTY_REVIEW_SECTION_FILE_IDS_ATOM = Atom.make(EMPTY_REVIEW_SECTION_FILE_IDS).pipe(
   Atom.keepAlive,
@@ -47,6 +57,13 @@ const reviewSelectedSectionIdByThreadKeyAtom = Atom.family((threadKey: string) =
   Atom.make<string | null>(null).pipe(
     Atom.keepAlive,
     Atom.withLabel(`mobile:review:selected-section-id:${threadKey}`),
+  ),
+);
+
+const reviewAsyncStateByThreadKeyAtom = Atom.family((threadKey: string) =>
+  Atom.make(EMPTY_REVIEW_ASYNC_STATE).pipe(
+    Atom.keepAlive,
+    Atom.withLabel(`mobile:review:async-state:${threadKey}`),
   ),
 );
 
@@ -83,11 +100,18 @@ export interface ReviewCacheForThread {
   readonly gitSections: ReadonlyArray<ReviewDiffPreviewSource>;
   readonly turnDiffById: Readonly<Record<string, string>>;
   readonly selectedSectionId: string | null;
+  readonly asyncState: ReviewAsyncState;
   readonly expandedFileIdsBySection: Readonly<Record<string, ReadonlyArray<string> | undefined>>;
   readonly revealedLargeFileIdsBySection: Readonly<
     Record<string, ReadonlyArray<string> | undefined>
   >;
   readonly viewedFileIdsBySection: Readonly<Record<string, ReadonlyArray<string> | undefined>>;
+}
+
+export interface ReviewAsyncState {
+  readonly loadingGitDiffs: boolean;
+  readonly loadingTurnIds: Readonly<Record<string, boolean>>;
+  readonly error: string | null;
 }
 
 function buildThreadKey(input: {
@@ -119,6 +143,9 @@ export function useReviewCacheForThread(input: {
       ? reviewSelectedSectionIdByThreadKeyAtom(threadKey)
       : EMPTY_REVIEW_SELECTED_SECTION_ID_ATOM,
   );
+  const asyncState = useAtomValue(
+    threadKey ? reviewAsyncStateByThreadKeyAtom(threadKey) : EMPTY_REVIEW_ASYNC_STATE_ATOM,
+  );
   const expandedFileIdsBySection = useAtomValue(
     threadKey
       ? reviewExpandedFileIdsByThreadKeyAtom(threadKey)
@@ -138,6 +165,7 @@ export function useReviewCacheForThread(input: {
     gitSections,
     turnDiffById,
     selectedSectionId,
+    asyncState,
     expandedFileIdsBySection,
     revealedLargeFileIdsBySection,
     viewedFileIdsBySection,
@@ -162,6 +190,51 @@ export function setReviewTurnDiff(threadKey: string, sectionId: string, diff: st
 
 export function setReviewSelectedSectionId(threadKey: string, sectionId: string | null): void {
   appAtomRegistry.set(reviewSelectedSectionIdByThreadKeyAtom(threadKey), sectionId);
+}
+
+function updateReviewAsyncState(
+  threadKey: string,
+  update: (current: ReviewAsyncState) => ReviewAsyncState,
+): void {
+  const atom = reviewAsyncStateByThreadKeyAtom(threadKey);
+  appAtomRegistry.set(atom, update(appAtomRegistry.get(atom)));
+}
+
+export function setReviewGitDiffsLoading(threadKey: string, loadingGitDiffs: boolean): void {
+  updateReviewAsyncState(threadKey, (current) => ({
+    ...current,
+    loadingGitDiffs,
+  }));
+}
+
+export function setReviewTurnDiffLoading(
+  threadKey: string,
+  sectionId: string,
+  isLoading: boolean,
+): void {
+  updateReviewAsyncState(threadKey, (current) => {
+    const loadingTurnIds = { ...current.loadingTurnIds };
+    if (isLoading) {
+      loadingTurnIds[sectionId] = true;
+    } else {
+      delete loadingTurnIds[sectionId];
+    }
+    return {
+      ...current,
+      loadingTurnIds,
+    };
+  });
+}
+
+export function setReviewAsyncError(threadKey: string, error: string | null): void {
+  updateReviewAsyncState(threadKey, (current) => ({
+    ...current,
+    error,
+  }));
+}
+
+export function getReviewAsyncStateSnapshot(threadKey: string): ReviewAsyncState {
+  return appAtomRegistry.get(reviewAsyncStateByThreadKeyAtom(threadKey));
 }
 
 export function updateReviewExpandedFileIds(
