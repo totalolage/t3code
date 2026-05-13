@@ -39,6 +39,7 @@ type ProviderCompatibilitySnapshot = Pick<ServerProvider, "enabled" | "status" |
 
 const T3_CODE_VERSION = packageJson.version;
 const REMOTE_COMPATIBILITY_CACHE_TTL_MS = 15 * 60 * 1_000;
+const REMOTE_COMPATIBILITY_NEGATIVE_CACHE_TTL_MS = 60 * 1_000;
 const REMOTE_COMPATIBILITY_TIMEOUT_MS = 2_500;
 
 export const DEFAULT_PROVIDER_COMPATIBILITY_MAP_URL =
@@ -290,8 +291,11 @@ export const resolveRemoteProviderCompatibilityDocument = Effect.fn(
     }
 
     const document = yield* fetchRemoteCompatibilityDocument(url);
+    const ttl = document
+      ? REMOTE_COMPATIBILITY_CACHE_TTL_MS
+      : REMOTE_COMPATIBILITY_NEGATIVE_CACHE_TTL_MS;
     remoteCompatibilityCache.set(url, {
-      expiresAt: now + REMOTE_COMPATIBILITY_CACHE_TTL_MS,
+      expiresAt: now + ttl,
       document,
     });
     if (document) {
