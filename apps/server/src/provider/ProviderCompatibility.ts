@@ -20,7 +20,7 @@ import packageJson from "../../package.json" with { type: "json" };
 
 const T3_CODE_VERSION = packageJson.version;
 const REMOTE_COMPATIBILITY_CACHE_TTL = Duration.minutes(15);
-const REMOTE_COMPATIBILITY_TIMEOUT_MS = 2_500;
+const REMOTE_COMPATIBILITY_TIMEOUT = "2500 millis";
 const REMOTE_COMPATIBILITY_CACHE_CAPACITY = 8;
 
 export const DEFAULT_PROVIDER_COMPATIBILITY_MAP_URL =
@@ -204,7 +204,7 @@ const fetchRemoteCompatibilityDocument = Effect.fn("fetchRemoteCompatibilityDocu
           HttpClientRequest.setHeader("user-agent", `t3code/${T3_CODE_VERSION}`),
         ),
       )
-      .pipe(Effect.timeoutOption(REMOTE_COMPATIBILITY_TIMEOUT_MS));
+      .pipe(Effect.timeoutOption(REMOTE_COMPATIBILITY_TIMEOUT));
 
     if (Option.isNone(response)) {
       return null;
