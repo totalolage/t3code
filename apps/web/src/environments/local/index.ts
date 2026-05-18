@@ -29,17 +29,23 @@
 
 import {
   PRIMARY_LOCAL_ENVIRONMENT_ID,
+  type AuthSessionRole,
   type DesktopEnvironmentBootstrap,
   type EnvironmentId,
 } from "@t3tools/contracts";
 
-import { bootstrapRemoteBearerSession, fetchRemoteEnvironmentDescriptor } from "../remote/api";
+import {
+  bootstrapRemoteBearerSession,
+  fetchRemoteEnvironmentDescriptor,
+  fetchRemoteSessionState,
+} from "../remote/api";
 import {
   ensureSavedEnvironmentConnection,
   removeSavedEnvironmentByInstance,
 } from "../runtime/service";
 import {
   getSavedEnvironmentRecord,
+  readSavedEnvironmentBearerToken,
   useSavedEnvironmentRegistryStore,
   writeSavedEnvironmentBearerToken,
   type SavedEnvironmentRecord,
@@ -52,12 +58,25 @@ interface PendingRegistration {
 const pendingByInstanceId = new Map<string, PendingRegistration>();
 let pendingReconcileRun: Promise<void> | null = null;
 
+// Backoff schedule for the auto-retry loop. WSL cold boot routinely
+// takes 30-60 seconds (distro spin-up + node-pty preflight + node
+// startup + migrations), and the backend's desktop-bootstrap grant
+// has a 5-minute TTL after seeding. This schedule comfortably covers
+// the cold-boot window while leaving headroom inside the TTL.
+const AUTO_RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 16_000, 30_000, 45_000, 60_000, 60_000] as const;
+let autoRetryHandle: ReturnType<typeof setTimeout> | null = null;
+let autoRetryAttempt = 0;
+
 function readBootstraps(): readonly DesktopEnvironmentBootstrap[] {
+  // Guard against test environments that import this module under
+  // Node (no window) but exercise the service entrypoint that boots
+  // the reconciler.
+  if (typeof window === "undefined") return [];
   return window.desktopBridge?.getLocalEnvironmentBootstraps() ?? [];
 }
 
 function findRecordByInstanceId(instanceId: string): SavedEnvironmentRecord | null {
-  const byId = useSavedEnvironmentRegistryStore.getState().byId;
+  const byId = useSavedEnvironmentRegistryStore.getState().byId ?? {};
   for (const record of Object.values(byId)) {
     if (record.desktopLocal?.instanceId === instanceId) {
       return record;
@@ -78,6 +97,32 @@ function isRegisteredForBootstrap(
     record.httpBaseUrl === bootstrap.httpBaseUrl &&
     record.wsBaseUrl === bootstrap.wsBaseUrl
   );
+}
+
+async function tryReuseStoredBearer(input: {
+  readonly environmentId: EnvironmentId;
+  readonly httpBaseUrl: string;
+}): Promise<{ readonly bearerToken: string; readonly role: AuthSessionRole } | null> {
+  // The bearer session token we got from the first bootstrap is
+  // persisted in the desktop secret store keyed by environmentId, and
+  // it stays valid for 30 days. Check the backend's view of the bearer
+  // before re-bootstrapping: if it's still good we skip the bootstrap
+  // exchange entirely (the bootstrap path is also safe to repeat now
+  // that the desktop-bootstrap grant is reusable, but reusing the
+  // existing bearer keeps the auth log cleaner and avoids spending a
+  // round-trip on every page reload).
+  const stored = await readSavedEnvironmentBearerToken(input.environmentId);
+  if (!stored) return null;
+  try {
+    const session = await fetchRemoteSessionState({
+      httpBaseUrl: input.httpBaseUrl,
+      bearerToken: stored,
+    });
+    if (!session.authenticated || !session.role) return null;
+    return { bearerToken: stored, role: session.role };
+  } catch {
+    return null;
+  }
 }
 
 async function registerSecondaryLocalEnvironment(
@@ -109,10 +154,26 @@ async function registerSecondaryLocalEnvironment(
     await removeSavedEnvironmentByInstance(stale.environmentId);
   }
 
-  const bearerSession = await bootstrapRemoteBearerSession({
+  let bearerToken: string;
+  let role: AuthSessionRole;
+  const reused = await tryReuseStoredBearer({
+    environmentId,
     httpBaseUrl: bootstrap.httpBaseUrl,
-    credential,
   });
+  if (reused) {
+    bearerToken = reused.bearerToken;
+    role = reused.role;
+  } else {
+    const bearerSession = await bootstrapRemoteBearerSession({
+      httpBaseUrl: bootstrap.httpBaseUrl,
+      credential,
+    });
+    bearerToken = bearerSession.sessionToken;
+    role = bearerSession.role;
+    // Only the fresh-bootstrap path needs to write the token: the
+    // reuse path already had it in the secret store.
+    await writeSavedEnvironmentBearerToken(environmentId, bearerToken);
+  }
 
   const existing = getSavedEnvironmentRecord(environmentId);
   const record: SavedEnvironmentRecord = {
@@ -125,18 +186,17 @@ async function registerSecondaryLocalEnvironment(
     desktopLocal: { instanceId: bootstrap.id },
   };
 
-  // Order is load-bearing: write the bearer to the secret store before
-  // upserting the record. The zustand subscriber on the registry fires
-  // a saved-env sync as soon as upsert lands, and that path reads the
-  // bearer back out of the secret store via readSavedEnvironmentBearerToken.
-  // If we upserted first, the sync could race ahead, find no bearer,
-  // and flip the runtime state to "requires-auth" before our explicit
+  // Order is load-bearing: the bearer must be in the secret store
+  // before we upsert. The zustand subscriber on the registry fires a
+  // saved-env sync as soon as upsert lands, and that path reads the
+  // bearer back out via readSavedEnvironmentBearerToken; without the
+  // earlier write the sync would race ahead, find no bearer, and flip
+  // the runtime state to "requires-auth" before the explicit
   // ensureSavedEnvironmentConnection call below runs.
-  await writeSavedEnvironmentBearerToken(environmentId, bearerSession.sessionToken);
   useSavedEnvironmentRegistryStore.getState().upsert(record);
   await ensureSavedEnvironmentConnection(record, {
-    bearerToken: bearerSession.sessionToken,
-    role: bearerSession.role,
+    bearerToken,
+    role,
   });
   return record;
 }
@@ -148,8 +208,10 @@ async function reconcileOnce(): Promise<void> {
 
   // Drop registry entries whose backend instance is gone (user toggled
   // the WSL backend off, switched distros, or the orchestrator
-  // unregistered for any other reason).
-  const registry = useSavedEnvironmentRegistryStore.getState().byId;
+  // unregistered for any other reason). The `?? {}` keeps this safe in
+  // test environments that hand back a partially-populated registry
+  // state.
+  const registry = useSavedEnvironmentRegistryStore.getState().byId ?? {};
   const stale: EnvironmentId[] = [];
   for (const record of Object.values(registry)) {
     const instanceId = record.desktopLocal?.instanceId;
@@ -190,18 +252,63 @@ async function reconcileOnce(): Promise<void> {
   );
 }
 
-// Public entry point. Idempotent and never throws — internal failures
-// get logged and the caller can retry by calling again. Multiple
-// concurrent calls share a single underlying reconcile pass.
-export function reconcileLocalSecondaryEnvironments(): Promise<void> {
+function hasPendingSecondary(): boolean {
+  const bootstraps = readBootstraps();
+  for (const bootstrap of bootstraps) {
+    if (bootstrap.id === PRIMARY_LOCAL_ENVIRONMENT_ID) continue;
+    if (!findRecordByInstanceId(bootstrap.id)) return true;
+  }
+  return false;
+}
+
+function scheduleAutoRetry(): void {
+  if (autoRetryHandle !== null) return;
+  if (autoRetryAttempt >= AUTO_RETRY_DELAYS_MS.length) return;
+  if (!hasPendingSecondary()) return;
+  const delay = AUTO_RETRY_DELAYS_MS[autoRetryAttempt];
+  autoRetryAttempt += 1;
+  autoRetryHandle = setTimeout(() => {
+    autoRetryHandle = null;
+    void runReconcile({ resetBudget: false });
+  }, delay);
+}
+
+function runReconcile(options: { readonly resetBudget: boolean }): Promise<void> {
   if (pendingReconcileRun) {
     return pendingReconcileRun;
   }
-  const next = reconcileOnce().finally(() => {
-    if (pendingReconcileRun === next) {
-      pendingReconcileRun = null;
+  if (options.resetBudget) {
+    // A user-driven reconcile (or the boot path) resets the backoff
+    // counter so the auto-retry loop gets a fresh shot. Without this
+    // reset, toggling WSL off/on after exhausting the budget wouldn't
+    // resume retries. Internal retries pass resetBudget: false so the
+    // backoff actually advances each tick.
+    autoRetryAttempt = 0;
+    if (autoRetryHandle !== null) {
+      clearTimeout(autoRetryHandle);
+      autoRetryHandle = null;
     }
-  });
+  }
+  const next = reconcileOnce()
+    .finally(() => {
+      if (pendingReconcileRun === next) {
+        pendingReconcileRun = null;
+      }
+    })
+    .then(() => {
+      scheduleAutoRetry();
+    });
   pendingReconcileRun = next;
   return next;
+}
+
+// Public entry point. Idempotent and never throws: internal failures
+// get logged and the caller can retry by calling again. Multiple
+// concurrent calls share a single underlying reconcile pass. When a
+// secondary's registration fails (typical cause: WSL backend still
+// cold-booting), an internal backoff loop keeps retrying until either
+// the secondary lands in the registry or the desktop-bootstrap TTL
+// runs out and we give up.
+export function reconcileLocalSecondaryEnvironments(): Promise<void> {
+  return runReconcile({ resetBudget: true });
 }
