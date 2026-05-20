@@ -2,7 +2,6 @@
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -13,6 +12,7 @@ const decodeJson = Schema.decodeEffect(Schema.UnknownFromJsonString);
 const program = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+
   const repoRoot = path.resolve(import.meta.dirname, "..");
   const sourcePath = path.join(repoRoot, "provider-compatibility.v1.json");
   const destinationPath = path.join(
@@ -23,13 +23,12 @@ const program = Effect.gen(function* () {
     "provider-compatibility.v1.json",
   );
 
-  const source = yield* fs.readFileString(sourcePath);
-  yield* decodeJson(source);
+  yield* Effect.flatMap(fs.readFileString(sourcePath), decodeJson);
 
   yield* fs.makeDirectory(path.dirname(destinationPath), { recursive: true });
   yield* fs.copyFile(sourcePath, destinationPath);
 
-  yield* Console.log(
+  yield* Effect.logInfo(
     `Mirrored ${path.relative(repoRoot, sourcePath)} to ${path.relative(repoRoot, destinationPath)}.`,
   );
 });
