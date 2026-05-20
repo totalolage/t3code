@@ -239,7 +239,7 @@ function createBaseServerConfig(): ServerConfig {
 
 function createOutdatedProvider(
   driver: string,
-  updateCommand = "npm install -g openai/codex@latest",
+  updateCommand = "npm install -g @openai/codex@latest",
 ): ServerProvider {
   return {
     instanceId: ProviderInstanceId.make(driver),
