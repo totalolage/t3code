@@ -88,15 +88,11 @@ function isRecordObject(value: unknown): value is Readonly<Record<string, unknow
 }
 
 function toStringValue(value: unknown): Option.Option<string> {
-  return typeof value === "string" && value.trim().length > 0
-    ? Option.some(value)
-    : Option.none();
+  return typeof value === "string" && value.trim().length > 0 ? Option.some(value) : Option.none();
 }
 
 function toNumberValue(value: unknown): Option.Option<number> {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Option.some(value)
-    : Option.none();
+  return typeof value === "number" && Number.isFinite(value) ? Option.some(value) : Option.none();
 }
 
 function unixNanoToDateTime(value: unknown): Option.Option<DateTime.Utc> {
