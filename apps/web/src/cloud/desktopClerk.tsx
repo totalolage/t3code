@@ -210,6 +210,8 @@ function getDesktopClerkInstance(publishableKey: string): Clerk {
   const onAfterResponse =
     nextClerk.__internal_onAfterResponse ?? nextClerk.__unstable__onAfterResponse;
 
+  // Keep this aligned with Clerk Expo's native FAPI adapter:
+  // https://github.com/clerk/javascript/blob/52861184477bee99c71552000311a289e91d3b59/packages/expo/src/provider/singleton/createClerkInstance.ts
   onBeforeRequest(async (request) => {
     request.credentials = "omit";
     request.url?.searchParams.append("_is_native", "1");
