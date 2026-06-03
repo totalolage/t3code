@@ -1,57 +1,44 @@
 #!/usr/bin/env node
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
-import * as NodeServices from "@effect/platform-node/NodeServices";
+import { AdoptPolicy } from "alchemy/AdoptPolicy";
+import { AlchemyContext, AlchemyContextLive } from "alchemy/AlchemyContext";
+import { apply } from "alchemy/Apply";
+import { provideFreshArtifactStore } from "alchemy/Artifacts";
+import { AuthProviders } from "alchemy/Auth/AuthProvider";
+import { CredentialsStoreLive } from "alchemy/Auth/Credentials";
+import { ProfileLive } from "alchemy/Auth/Profile";
+import { Cli } from "alchemy/Cli/Cli";
+import { LoggingCli } from "alchemy/Cli/LoggingCli";
+import * as Plan from "alchemy/Plan";
+import { Stage } from "alchemy/Stage";
+import { TelemetryLive } from "alchemy/Telemetry/Layer";
+import { PlatformServices } from "alchemy/Util/PlatformServices";
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Console from "effect/Console";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import { ChildProcess } from "effect/unstable/process";
+import { Command, Flag, Prompt } from "effect/unstable/cli";
+import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
-import { relayPublicDomainForStage } from "../src/deploymentConfig.ts";
+import RelayStack from "../alchemy.run.ts";
 
 export class RelayDeployError extends Data.TaggedError("RelayDeployError")<{
   readonly message: string;
 }> {}
 
-export function readEnvFileArgument(args: ReadonlyArray<string>): string | undefined {
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
-    if (argument === "--env-file") {
-      return args[index + 1];
-    }
-    if (argument?.startsWith("--env-file=")) {
-      return argument.slice("--env-file=".length);
-    }
-  }
-  return undefined;
-}
-
-export function readStageArgument(args: ReadonlyArray<string>): string | undefined {
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
-    if (argument === "--stage") {
-      return args[index + 1];
-    }
-    if (argument?.startsWith("--stage=")) {
-      return argument.slice("--stage=".length);
-    }
-  }
-  return undefined;
-}
-
-export function resolveRelayDeployDomain(input: {
-  readonly relayDomainOverride: Option.Option<string>;
-  readonly stage: string;
-  readonly zoneName: string;
-}): string {
-  return Option.getOrElse(input.relayDomainOverride, () =>
-    relayPublicDomainForStage(input.stage, input.zoneName),
-  );
+export interface RelayDeployOptions {
+  readonly dryRun: boolean;
+  readonly force: boolean;
+  readonly envFile: Option.Option<string>;
+  readonly stage: Option.Option<string>;
+  readonly yes: boolean;
+  readonly adopt: boolean;
 }
 
 export function reconcileRootEnvRelayUrl(contents: string, relayUrl: string): string {
@@ -74,6 +61,16 @@ export function makeDeployConfigProvider(
     : environmentProvider;
 }
 
+export function hasDeployChanges(plan: Plan.Plan): boolean {
+  return (
+    Object.keys(plan.deletions).length > 0 ||
+    Object.values(plan.resources).some(
+      (node) =>
+        node.action !== "noop" || node.bindings.some((binding) => binding.action !== "noop"),
+    )
+  );
+}
+
 const relayRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("..", import.meta.url))),
 );
@@ -82,12 +79,12 @@ const repoRoot = Effect.service(Path.Path).pipe(
 );
 
 const loadDeployConfigProvider = Effect.fn("relay.deploy.loadConfigProvider")(function* (
-  args: ReadonlyArray<string>,
+  envFileOverride: Option.Option<string>,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = yield* relayRoot;
-  const selectedEnvFile = readEnvFileArgument(args);
+  const selectedEnvFile = Option.getOrUndefined(envFileOverride);
   const envFile = selectedEnvFile ? path.resolve(root, selectedEnvFile) : path.join(root, ".env");
   if (!(yield* fs.exists(envFile))) {
     return makeDeployConfigProvider(ConfigProvider.fromEnv());
@@ -98,47 +95,17 @@ const loadDeployConfigProvider = Effect.fn("relay.deploy.loadConfigProvider")(fu
   );
 });
 
-const runAlchemyDeploy = Effect.fn("relay.deploy.runAlchemy")(function* (
-  args: ReadonlyArray<string>,
-) {
-  const root = yield* relayRoot;
-  const child = yield* ChildProcess.make("alchemy", ["deploy", ...args], {
-    cwd: root,
-    detached: false,
-    stderr: "inherit",
-    stdin: "inherit",
-    stdout: "inherit",
-  });
-  const exitCode = yield* child.exitCode;
-  if (exitCode !== 0) {
-    return yield* new RelayDeployError({
-      message: `alchemy deploy exited with code ${exitCode}`,
-    });
-  }
-});
+const relayDeployStage = Config.nonEmptyString("stage").pipe(
+  Config.option,
+  Config.map(
+    Option.getOrElse(() => `dev_${process.env.USER ?? process.env.USERNAME ?? "unknown"}`),
+  ),
+);
 
-const reconcileRootEnv = Effect.fn("relay.deploy.reconcileRootEnv")(function* (
-  args: ReadonlyArray<string>,
-) {
+const reconcileRootEnv = Effect.fn("relay.deploy.reconcileRootEnv")(function* (relayUrl: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = yield* repoRoot;
-  const provider = yield* loadDeployConfigProvider(args);
-  const config = yield* Config.all({
-    relayDomainOverride: Config.nonEmptyString("T3_RELAY_DOMAIN").pipe(Config.option),
-    stage: Config.nonEmptyString("stage").pipe(
-      Config.option,
-      Config.map(
-        Option.getOrElse(() => `dev_${process.env.USER ?? process.env.USERNAME ?? "unknown"}`),
-      ),
-    ),
-    zoneName: Config.nonEmptyString("T3_RELAY_ZONE_NAME"),
-  }).pipe(Effect.provide(ConfigProvider.layer(provider)));
-  const relayDomain = resolveRelayDeployDomain({
-    ...config,
-    stage: readStageArgument(args) ?? config.stage,
-  });
-  const relayUrl = `https://${relayDomain}`;
   const rootEnvPath = path.join(root, ".env");
   const contents = (yield* fs.exists(rootEnvPath)) ? yield* fs.readFileString(rootEnvPath) : "";
 
@@ -146,11 +113,112 @@ const reconcileRootEnv = Effect.fn("relay.deploy.reconcileRootEnv")(function* (
   yield* Console.log(`Updated ${rootEnvPath} with T3_RELAY_URL=${relayUrl}`);
 });
 
-export const deploy = Effect.fn("relay.deploy")(function* (args: ReadonlyArray<string>) {
-  yield* runAlchemyDeploy(args);
-  yield* reconcileRootEnv(args);
+const deployServices = Layer.mergeAll(
+  Layer.provideMerge(AlchemyContextLive, PlatformServices),
+  Layer.provide(ProfileLive, PlatformServices),
+  Layer.provide(CredentialsStoreLive, PlatformServices),
+  FetchHttpClient.layer,
+  TelemetryLive,
+  LoggingCli,
+);
+
+const runRelayDeploy = Effect.fn("relay.deploy.run")(function* (
+  options: RelayDeployOptions,
+  configProvider: ConfigProvider.ConfigProvider,
+  stage: string,
+) {
+  return yield* Effect.gen(function* () {
+    const stack = yield* RelayStack;
+    return yield* Effect.gen(function* () {
+      const cli = yield* Cli;
+      const plan = yield* Plan.make(stack, { force: options.force });
+      if (options.dryRun) {
+        yield* cli.displayPlan(plan);
+        return Option.none<string>();
+      }
+      if (!options.yes && hasDeployChanges(plan)) {
+        yield* cli.displayPlan(plan);
+        const approved = yield* Prompt.run(
+          Prompt.confirm({
+            message: "Apply this relay deployment?",
+          }),
+        );
+        if (!approved) {
+          yield* Console.log("Deployment cancelled.");
+          return Option.none<string>();
+        }
+      }
+      const output = yield* apply(plan);
+      if (output.url === undefined) {
+        return yield* new RelayDeployError({
+          message: "Alchemy relay deploy output did not include a URL",
+        });
+      }
+      return Option.some(output.url);
+    }).pipe(provideFreshArtifactStore, Effect.provide(stack.services));
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.effect(
+          AlchemyContext,
+          AlchemyContext.pipe(Effect.map((context) => ({ ...context, adopt: options.adopt }))),
+        ),
+        Layer.succeed(AdoptPolicy, options.adopt),
+        Layer.succeed(AuthProviders, {}),
+        ConfigProvider.layer(configProvider),
+        Layer.succeed(Stage, stage),
+      ),
+    ),
+  );
 });
 
+export const deploy = Effect.fn("relay.deploy")(function* (options: RelayDeployOptions) {
+  const configProvider = yield* loadDeployConfigProvider(options.envFile);
+  const configuredStage = yield* relayDeployStage.pipe(
+    Effect.provide(ConfigProvider.layer(configProvider)),
+  );
+  const stage = Option.getOrElse(options.stage, () => configuredStage);
+  const relayUrl = yield* runRelayDeploy(options, configProvider, stage);
+  if (Option.isSome(relayUrl)) {
+    yield* reconcileRootEnv(relayUrl.value);
+  }
+});
+
+export const relayDeployCommand = Command.make(
+  "relay-deploy",
+  {
+    dryRun: Flag.boolean("dry-run").pipe(
+      Flag.withDescription("Dry run the deployment without applying changes."),
+      Flag.withDefault(false),
+    ),
+    force: Flag.boolean("force").pipe(
+      Flag.withDescription("Force updates for resources that would otherwise no-op."),
+      Flag.withDefault(false),
+    ),
+    envFile: Flag.string("env-file").pipe(
+      Flag.withDescription("Environment file to load. Defaults to infra/relay/.env."),
+      Flag.optional,
+    ),
+    stage: Flag.string("stage").pipe(
+      Flag.withDescription("Stage to deploy. Defaults to dev_${USER}."),
+      Flag.optional,
+    ),
+    yes: Flag.boolean("yes").pipe(
+      Flag.withDescription("Skip the deployment confirmation prompt."),
+      Flag.withDefault(false),
+    ),
+    adopt: Flag.boolean("adopt").pipe(
+      Flag.withDescription("Adopt pre-existing cloud resources that conflict with this stack."),
+      Flag.withDefault(false),
+    ),
+  },
+  deploy,
+).pipe(Command.withDescription("Deploy the T3 Code relay through Alchemy."));
+
 if (import.meta.main) {
-  deploy(process.argv.slice(2)).pipe(Effect.provide(NodeServices.layer), NodeRuntime.runMain);
+  Command.run(relayDeployCommand, { version: "0.0.0" }).pipe(
+    Effect.provide(deployServices),
+    Effect.scoped,
+    NodeRuntime.runMain,
+  );
 }

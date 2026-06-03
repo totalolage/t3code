@@ -1,52 +1,37 @@
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import { describe, expect, it } from "vitest";
 
-import {
-  makeDeployConfigProvider,
-  readEnvFileArgument,
-  readStageArgument,
-  reconcileRootEnvRelayUrl,
-  resolveRelayDeployDomain,
-} from "./deploy.ts";
+import { hasDeployChanges, makeDeployConfigProvider, reconcileRootEnvRelayUrl } from "./deploy.ts";
 
-describe("readEnvFileArgument", () => {
-  it("supports separated and inline Alchemy env file flags", () => {
-    expect(readEnvFileArgument(["--stage", "preview", "--env-file", ".env.preview"])).toBe(
-      ".env.preview",
-    );
-    expect(readEnvFileArgument(["--env-file=.env.preview"])).toBe(".env.preview");
-  });
-});
-
-describe("readStageArgument", () => {
-  it("supports separated and inline Alchemy stage flags", () => {
-    expect(readStageArgument(["--stage", "dev_julius"])).toBe("dev_julius");
-    expect(readStageArgument(["--stage=dev_julius"])).toBe("dev_julius");
-  });
-});
-
-describe("resolveRelayDeployDomain", () => {
-  it("derives personal stage domains from the imported Cloudflare zone", () => {
+describe("hasDeployChanges", () => {
+  it("detects resource, binding, and deletion changes", () => {
+    expect(hasDeployChanges({ resources: {}, deletions: {} } as never)).toBe(false);
     expect(
-      resolveRelayDeployDomain({
-        relayDomainOverride: Option.none(),
-        stage: "dev_julius",
-        zoneName: "example.test",
-      }),
-    ).toBe("relay-dev-julius.example.test");
-  });
-
-  it("preserves explicit domain overrides", () => {
+      hasDeployChanges({
+        resources: {
+          api: { action: "create", bindings: [] },
+        },
+        deletions: {},
+      } as never),
+    ).toBe(true);
     expect(
-      resolveRelayDeployDomain({
-        relayDomainOverride: Option.some("relay.override.test"),
-        stage: "dev_julius",
-        zoneName: "example.test",
-      }),
-    ).toBe("relay.override.test");
+      hasDeployChanges({
+        resources: {
+          api: { action: "noop", bindings: [{ action: "update" }] },
+        },
+        deletions: {},
+      } as never),
+    ).toBe(true);
+    expect(
+      hasDeployChanges({
+        resources: {},
+        deletions: {
+          api: { action: "delete", bindings: [] },
+        },
+      } as never),
+    ).toBe(true);
   });
 });
 

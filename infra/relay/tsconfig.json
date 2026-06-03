@@ -5,5 +5,5 @@
     "lib": ["ES2023", "WebWorker"],
     "types": ["@cloudflare/workers-types", "node"]
   },
-  "include": ["alchemy.run.ts", "src/**/*.ts"]
+  "include": ["alchemy.run.ts", "scripts/**/*.ts", "src/**/*.ts"]
 }
