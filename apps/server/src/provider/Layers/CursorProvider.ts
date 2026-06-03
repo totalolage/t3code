@@ -1106,12 +1106,8 @@ export const enrichCursorSnapshot = (input: {
   readonly stampIdentity?: (snapshot: ServerProvider) => ServerProvider;
   readonly httpClient: HttpClient.HttpClient;
 }): Effect.Effect<void> => {
-  const { settings, snapshot, publishSnapshot } = input;
+  const { snapshot, publishSnapshot } = input;
   const stampIdentity = input.stampIdentity ?? ((value) => value);
-
-  if (!settings.enabled || snapshot.auth.status === "unauthenticated") {
-    return Effect.void;
-  }
 
   return enrichProviderSnapshotWithVersionAdvisory(snapshot, input.maintenanceCapabilities).pipe(
     Effect.provideService(HttpClient.HttpClient, input.httpClient),
