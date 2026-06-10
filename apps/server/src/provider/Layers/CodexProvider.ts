@@ -54,6 +54,8 @@ const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
   xhigh: "Extra High",
 };
 
+const DEFAULT_SERVICE_TIER_ID = "default";
+
 function reasoningEffortLabel(reasoningEffort: string): string {
   return REASONING_EFFORT_LABELS[reasoningEffort] ?? reasoningEffort;
 }
@@ -114,9 +116,20 @@ export function mapCodexModelCapabilities(
         },
   );
   const defaultReasoning = reasoningOptions.find((option) => option.isDefault)?.id;
-  const fastServiceTier = model.serviceTiers?.find((tier) => tier.id === "fast");
-  const supportsFastMode =
-    fastServiceTier !== undefined || (model.additionalSpeedTiers ?? []).includes("fast");
+  const serviceTiers =
+    model.serviceTiers && model.serviceTiers.length > 0
+      ? model.serviceTiers
+      : (model.additionalSpeedTiers ?? []).map((id) => ({
+          id,
+          name: id === "fast" ? "Fast" : id,
+          description: "",
+        }));
+  const catalogDefaultServiceTier = serviceTiers.some(
+    (tier) => tier.id === model.defaultServiceTier,
+  )
+    ? model.defaultServiceTier
+    : null;
+  const defaultServiceTier = catalogDefaultServiceTier ?? DEFAULT_SERVICE_TIER_ID;
   const optionDescriptors: ProviderOptionDescriptor[] = [];
 
   if (reasoningOptions.length > 0) {
@@ -128,12 +141,25 @@ export function mapCodexModelCapabilities(
       ...(defaultReasoning ? { currentValue: defaultReasoning } : {}),
     });
   }
-  if (supportsFastMode) {
+  if (serviceTiers.length > 0) {
     optionDescriptors.push({
-      id: "fastMode",
-      label: fastServiceTier?.name ?? "Fast Mode",
-      ...(fastServiceTier?.description ? { description: fastServiceTier.description } : {}),
-      type: "boolean",
+      id: "serviceTier",
+      label: "Service Tier",
+      type: "select",
+      options: [
+        {
+          id: DEFAULT_SERVICE_TIER_ID,
+          label: "Standard",
+          ...(defaultServiceTier === DEFAULT_SERVICE_TIER_ID ? { isDefault: true } : {}),
+        },
+        ...serviceTiers.map((tier) => ({
+          id: tier.id,
+          label: tier.name,
+          ...(tier.description ? { description: tier.description } : {}),
+          ...(defaultServiceTier === tier.id ? { isDefault: true } : {}),
+        })),
+      ],
+      currentValue: defaultServiceTier,
     });
   }
 
