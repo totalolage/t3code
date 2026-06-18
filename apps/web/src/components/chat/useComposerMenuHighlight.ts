@@ -63,7 +63,13 @@ export function useComposerMenuHighlight(input: {
       currentSearchKey: input.searchKey,
       highlightedSearchKey: highlightState.searchKey,
     });
-  }, [highlightState.itemId, highlightState.searchKey, input.items, input.menuOpen, input.searchKey]);
+  }, [
+    highlightState.itemId,
+    highlightState.searchKey,
+    input.items,
+    input.menuOpen,
+    input.searchKey,
+  ]);
   const activeItemIdRef = useRef(activeItemId);
   activeItemIdRef.current = activeItemId;
 
