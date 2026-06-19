@@ -6,37 +6,32 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
 import {
-  DpopPublicJwk,
+  DpopPublicJwk as DpopPublicJwkSchema,
   normalizeDpopHtuOption,
   type DpopPublicJwk as DpopPublicJwkType,
 } from "./dpopCommon.ts";
 import { stableStringify } from "./relaySigning.ts";
 
-export { DpopPublicJwk, normalizeDpopHtu, normalizeDpopHtuOption } from "./dpopCommon.ts";
-export type { DpopPublicJwk } from "./dpopCommon.ts";
+export const DpopPublicJwk = DpopPublicJwkSchema;
+export type DpopPublicJwk = DpopPublicJwkType;
+export { normalizeDpopHtu, normalizeDpopHtuOption } from "./dpopCommon.ts";
 
 const DPOP_TYP = "dpop+jwt";
 const DPOP_ALG = "ES256";
 const DEFAULT_MAX_AGE_SECONDS = 300;
-
-interface DpopJwtHeader {
-  readonly typ: string;
-  readonly alg: string;
-  readonly jwk: DpopPublicJwkType;
-}
 
 interface DpopJwtPayload {
   readonly htm: string;
   readonly htu: string;
   readonly jti: string;
   readonly iat: number;
-  readonly ath?: string;
+  readonly ath?: string | undefined;
 }
 
 const DpopJwtHeaderSchema = Schema.Struct({
   typ: Schema.Literal(DPOP_TYP),
   alg: Schema.Literal(DPOP_ALG),
-  jwk: DpopPublicJwk,
+  jwk: DpopPublicJwkSchema,
 });
 const decodeDpopJwtHeader = Schema.decodeUnknownOption(DpopJwtHeaderSchema);
 
