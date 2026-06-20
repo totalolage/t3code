@@ -33,12 +33,23 @@ const LegacyConnectionDocument = Schema.Struct({
 });
 const decodeLegacyConnectionDocument = Schema.decodeUnknownEffect(LegacyConnectionDocument);
 
-export class LegacyConnectionMigrationError extends Schema.TaggedErrorClass<LegacyConnectionMigrationError>()(
-  "LegacyConnectionMigrationError",
-  {
-    message: Schema.String,
-  },
-) {}
+export class LegacyConnectionDocumentParseError extends Schema.TaggedErrorClass<LegacyConnectionDocumentParseError>()(
+  "LegacyConnectionDocumentParseError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Could not parse the legacy mobile connection catalog.";
+  }
+}
+
+export class LegacyConnectionDocumentDecodeError extends Schema.TaggedErrorClass<LegacyConnectionDocumentDecodeError>()(
+  "LegacyConnectionDocumentDecodeError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Could not decode the legacy mobile connection catalog.";
+  }
+}
 
 function isRelayManaged(connection: typeof LegacySavedRemoteConnection.Type): boolean {
   return connection.relayManaged === true || connection.authenticationMethod === "dpop";
@@ -92,18 +103,10 @@ export const migrateLegacyConnectionCatalog = Effect.fn(
 )(function* (raw: string) {
   const parsed = yield* Effect.try({
     try: () => JSON.parse(raw) as unknown,
-    catch: (cause) =>
-      new LegacyConnectionMigrationError({
-        message: `Could not parse the legacy mobile connection catalog: ${String(cause)}`,
-      }),
+    catch: (cause) => new LegacyConnectionDocumentParseError({ cause }),
   });
   const legacy = yield* decodeLegacyConnectionDocument(parsed).pipe(
-    Effect.mapError(
-      (cause) =>
-        new LegacyConnectionMigrationError({
-          message: `Could not decode the legacy mobile connection catalog: ${String(cause)}`,
-        }),
-    ),
+    Effect.mapError((cause) => new LegacyConnectionDocumentDecodeError({ cause })),
   );
 
   return (legacy.connections ?? []).reduce(migrateConnection, EMPTY_CONNECTION_CATALOG_DOCUMENT);

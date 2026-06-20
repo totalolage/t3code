@@ -75,4 +75,30 @@ describe("migrateLegacyConnectionCatalog", () => {
       expect(catalog.targets).toEqual([]);
     }),
   );
+
+  it.effect("preserves the JSON parse failure", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(migrateLegacyConnectionCatalog("{"));
+
+      expect(error).toMatchObject({
+        _tag: "LegacyConnectionDocumentParseError",
+        cause: expect.any(SyntaxError),
+      });
+      expect(error.message).toBe("Could not parse the legacy mobile connection catalog.");
+    }),
+  );
+
+  it.effect("preserves the schema decode failure", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        migrateLegacyConnectionCatalog(JSON.stringify({ connections: "invalid" })),
+      );
+
+      expect(error).toMatchObject({
+        _tag: "LegacyConnectionDocumentDecodeError",
+        cause: { _tag: "SchemaError" },
+      });
+      expect(error.message).toBe("Could not decode the legacy mobile connection catalog.");
+    }),
+  );
 });
