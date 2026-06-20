@@ -1,8 +1,8 @@
 import {
-  type EnvironmentId,
+  EnvironmentId,
   type OrchestrationThread,
   type OrchestrationShellSnapshot,
-  type ThreadId,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -26,9 +26,15 @@ export class ConnectionPersistenceError extends Schema.TaggedErrorClass<Connecti
       "remove-thread",
       "clear-environment",
     ]),
-    message: Schema.String,
+    environmentId: Schema.optionalKey(EnvironmentId),
+    threadId: Schema.optionalKey(ThreadId),
+    cause: Schema.Defect(),
   },
-) {}
+) {
+  override get message(): string {
+    return `Could not ${this.operation.replaceAll("-", " ")}.`;
+  }
+}
 
 export class ConnectionTargetStore extends Context.Service<
   ConnectionTargetStore,

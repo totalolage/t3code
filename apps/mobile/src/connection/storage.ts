@@ -62,22 +62,6 @@ function catalogError(operation: string, cause: unknown) {
   });
 }
 
-function shellPersistenceError(
-  operation:
-    | "load-shell"
-    | "save-shell"
-    | "load-thread"
-    | "save-thread"
-    | "remove-thread"
-    | "clear-environment",
-  cause: unknown,
-) {
-  return new ConnectionPersistenceError({
-    operation,
-    message: `Could not ${operation.replaceAll("-", " ")}: ${String(cause)}`,
-  });
-}
-
 function threadSnapshotFileName(threadId: ThreadId): string {
   return `${encodeURIComponent(threadId)}.json`;
 }
@@ -100,7 +84,7 @@ const threadSnapshotDirectory = Effect.fn("mobile.connectionStorage.threadSnapsh
         }
         return directory;
       },
-      catch: (cause) => shellPersistenceError(operation, cause),
+      catch: (cause) => new ConnectionPersistenceError({ operation, environmentId, cause }),
     });
   },
 );
@@ -116,16 +100,6 @@ const threadSnapshotFile = Effect.fn("mobile.connectionStorage.threadSnapshotFil
     threadSnapshotFileName(threadId),
   );
 });
-
-function targetPersistenceError(
-  operation: "list-targets" | "register-connection" | "remove-connection",
-  error: ConnectionTransientError,
-) {
-  return new ConnectionPersistenceError({
-    operation,
-    message: error.message,
-  });
-}
 
 const secureCatalogStorage: SecureCatalogStorage = {
   getItem: (key) =>
@@ -163,7 +137,7 @@ const shellSnapshotFileInDirectory = Effect.fn(
       directory.create({ idempotent: true, intermediates: true });
       return new File(directory, shellSnapshotFileName(environmentId));
     },
-    catch: (cause) => shellPersistenceError(operation, cause),
+    catch: (cause) => new ConnectionPersistenceError({ operation, environmentId, cause }),
   });
 });
 
@@ -184,18 +158,38 @@ export const connectionStorageLayer = Layer.effectContext(
     const targetStore = ConnectionTargetStore.of({
       list: catalog.read.pipe(
         Effect.map((document) => document.targets),
-        Effect.mapError((error) => targetPersistenceError("list-targets", error)),
+        Effect.mapError(
+          (cause) => new ConnectionPersistenceError({ operation: "list-targets", cause }),
+        ),
       ),
     });
     const registrationStore = ConnectionRegistrationStore.of({
       register: (registration) =>
         catalog
           .update((document) => registerConnectionInCatalog(document, registration))
-          .pipe(Effect.mapError((error) => targetPersistenceError("register-connection", error))),
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ConnectionPersistenceError({
+                  operation: "register-connection",
+                  environmentId: registration.target.environmentId,
+                  cause,
+                }),
+            ),
+          ),
       remove: (target) =>
         catalog
           .update((document) => removeConnectionFromCatalog(document, target))
-          .pipe(Effect.mapError((error) => targetPersistenceError("remove-connection", error))),
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ConnectionPersistenceError({
+                  operation: "remove-connection",
+                  environmentId: target.environmentId,
+                  cause,
+                }),
+            ),
+          ),
     });
     const profileStore = ProfileStore.make({
       get: (connectionId) =>
@@ -283,15 +277,34 @@ export const connectionStorageLayer = Layer.effectContext(
           if (file.exists) {
             const raw = yield* Effect.tryPromise({
               try: () => file.text(),
-              catch: (cause) => shellPersistenceError("load-shell", cause),
+              catch: (cause) =>
+                new ConnectionPersistenceError({
+                  operation: "load-shell",
+                  environmentId,
+                  cause,
+                }),
             });
             const parsed = yield* Effect.try({
               try: () => JSON.parse(raw) as unknown,
-              catch: (cause) => shellPersistenceError("load-shell", cause),
+              catch: (cause) =>
+                new ConnectionPersistenceError({
+                  operation: "load-shell",
+                  environmentId,
+                  cause,
+                }),
             });
             const stored = yield* Effect.fromResult(
               Schema.decodeUnknownResult(StoredShellSnapshot)(parsed),
-            ).pipe(Effect.mapError((cause) => shellPersistenceError("load-shell", cause)));
+            ).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ConnectionPersistenceError({
+                    operation: "load-shell",
+                    environmentId,
+                    cause,
+                  }),
+              ),
+            );
             return stored.environmentId === environmentId
               ? Option.some(stored.snapshot)
               : Option.none();
@@ -303,15 +316,34 @@ export const connectionStorageLayer = Layer.effectContext(
           }
           const legacyRaw = yield* Effect.tryPromise({
             try: () => legacyFile.text(),
-            catch: (cause) => shellPersistenceError("load-shell", cause),
+            catch: (cause) =>
+              new ConnectionPersistenceError({
+                operation: "load-shell",
+                environmentId,
+                cause,
+              }),
           });
           const legacyParsed = yield* Effect.try({
             try: () => JSON.parse(legacyRaw) as unknown,
-            catch: (cause) => shellPersistenceError("load-shell", cause),
+            catch: (cause) =>
+              new ConnectionPersistenceError({
+                operation: "load-shell",
+                environmentId,
+                cause,
+              }),
           });
           const legacyStored = yield* Effect.fromResult(
             Schema.decodeUnknownResult(LegacyStoredShellSnapshot)(legacyParsed),
-          ).pipe(Effect.mapError((cause) => shellPersistenceError("load-shell", cause)));
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ConnectionPersistenceError({
+                  operation: "load-shell",
+                  environmentId,
+                  cause,
+                }),
+            ),
+          );
           return legacyStored.environmentId === environmentId
             ? Option.some(legacyStored.snapshot)
             : Option.none();
@@ -326,7 +358,16 @@ export const connectionStorageLayer = Layer.effectContext(
           } as const;
           const encoded = yield* Effect.fromResult(
             Schema.encodeUnknownResult(StoredShellSnapshot)(stored),
-          ).pipe(Effect.mapError((cause) => shellPersistenceError("save-shell", cause)));
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ConnectionPersistenceError({
+                  operation: "save-shell",
+                  environmentId,
+                  cause,
+                }),
+            ),
+          );
           yield* Effect.try({
             try: () => {
               if (!file.exists) {
@@ -334,7 +375,12 @@ export const connectionStorageLayer = Layer.effectContext(
               }
               file.write(JSON.stringify(encoded));
             },
-            catch: (cause) => shellPersistenceError("save-shell", cause),
+            catch: (cause) =>
+              new ConnectionPersistenceError({
+                operation: "save-shell",
+                environmentId,
+                cause,
+              }),
           });
         }),
       loadThread: (environmentId, threadId) =>
@@ -345,15 +391,37 @@ export const connectionStorageLayer = Layer.effectContext(
           }
           const raw = yield* Effect.tryPromise({
             try: () => file.text(),
-            catch: (cause) => shellPersistenceError("load-thread", cause),
+            catch: (cause) =>
+              new ConnectionPersistenceError({
+                operation: "load-thread",
+                environmentId,
+                threadId,
+                cause,
+              }),
           });
           const parsed = yield* Effect.try({
             try: () => JSON.parse(raw) as unknown,
-            catch: (cause) => shellPersistenceError("load-thread", cause),
+            catch: (cause) =>
+              new ConnectionPersistenceError({
+                operation: "load-thread",
+                environmentId,
+                threadId,
+                cause,
+              }),
           });
           const stored = yield* Effect.fromResult(
             Schema.decodeUnknownResult(StoredThreadSnapshot)(parsed),
-          ).pipe(Effect.mapError((cause) => shellPersistenceError("load-thread", cause)));
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ConnectionPersistenceError({
+                  operation: "load-thread",
+                  environmentId,
+                  threadId,
+                  cause,
+                }),
+            ),
+          );
           return stored.environmentId === environmentId && stored.threadId === threadId
             ? Option.some(stored.thread)
             : Option.none();
@@ -368,7 +436,17 @@ export const connectionStorageLayer = Layer.effectContext(
               threadId: thread.id,
               thread,
             }),
-          ).pipe(Effect.mapError((cause) => shellPersistenceError("save-thread", cause)));
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ConnectionPersistenceError({
+                  operation: "save-thread",
+                  environmentId,
+                  threadId: thread.id,
+                  cause,
+                }),
+            ),
+          );
           yield* Effect.try({
             try: () => {
               if (!file.exists) {
@@ -376,36 +454,55 @@ export const connectionStorageLayer = Layer.effectContext(
               }
               file.write(JSON.stringify(encoded));
             },
-            catch: (cause) => shellPersistenceError("save-thread", cause),
+            catch: (cause) =>
+              new ConnectionPersistenceError({
+                operation: "save-thread",
+                environmentId,
+                threadId: thread.id,
+                cause,
+              }),
           });
         }),
       removeThread: (environmentId, threadId) =>
         Effect.gen(function* () {
           const file = yield* threadSnapshotFile(environmentId, threadId, "remove-thread");
           if (file.exists) {
-            file.delete();
+            yield* Effect.try({
+              try: () => file.delete(),
+              catch: (cause) =>
+                new ConnectionPersistenceError({
+                  operation: "remove-thread",
+                  environmentId,
+                  threadId,
+                  cause,
+                }),
+            });
           }
-        }).pipe(
-          Effect.mapError((cause) =>
-            cause._tag === "ConnectionPersistenceError"
-              ? cause
-              : shellPersistenceError("remove-thread", cause),
-          ),
-        ),
+        }),
       clear: (environmentId) =>
         Effect.gen(function* () {
           const file = yield* shellSnapshotFile(environmentId, "clear-environment");
           if (file.exists) {
             yield* Effect.try({
               try: () => file.delete(),
-              catch: (cause) => shellPersistenceError("clear-environment", cause),
+              catch: (cause) =>
+                new ConnectionPersistenceError({
+                  operation: "clear-environment",
+                  environmentId,
+                  cause,
+                }),
             });
           }
           const legacyFile = yield* legacyShellSnapshotFile(environmentId, "clear-environment");
           if (legacyFile.exists) {
             yield* Effect.try({
               try: () => legacyFile.delete(),
-              catch: (cause) => shellPersistenceError("clear-environment", cause),
+              catch: (cause) =>
+                new ConnectionPersistenceError({
+                  operation: "clear-environment",
+                  environmentId,
+                  cause,
+                }),
             });
           }
           const threadDirectory = yield* threadSnapshotDirectory(
@@ -415,7 +512,12 @@ export const connectionStorageLayer = Layer.effectContext(
           if (threadDirectory.exists) {
             yield* Effect.try({
               try: () => threadDirectory.delete(),
-              catch: (cause) => shellPersistenceError("clear-environment", cause),
+              catch: (cause) =>
+                new ConnectionPersistenceError({
+                  operation: "clear-environment",
+                  environmentId,
+                  cause,
+                }),
             });
           }
         }),

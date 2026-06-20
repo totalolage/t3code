@@ -694,7 +694,7 @@ describe("EnvironmentRegistry", () => {
           Effect.fail(
             new Persistence.ConnectionPersistenceError({
               operation: "remove-connection",
-              message: "Storage is unavailable.",
+              cause: new Error("Storage is unavailable."),
             }),
           ),
       });
