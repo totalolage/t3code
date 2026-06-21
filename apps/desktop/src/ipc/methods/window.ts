@@ -66,18 +66,25 @@ export const getLocalEnvironmentBootstraps = DesktopIpc.makeSyncIpcMethod({
       const isPrimary = instance.id === PRIMARY_LOCAL_ENVIRONMENT_ID;
       const config = yield* instance.currentConfig;
       // A secondary backend (e.g. a parallel WSL backend) that hasn't produced
-      // a config yet (mid-registration, before its first start cycle) OR whose
-      // preflight failed (e.g. WSL distro missing node, the linux server entry
-      // was never built) is not listening on a port. We still surface it as a
-      // *pending* bootstrap (null endpoints, no token) so the renderer can show
-      // a "Connecting…" indicator while it retries — but with null endpoints
-      // the renderer will not dial the dead port, avoiding the needless
-      // /api/auth/bootstrap/bearer error cycles that a real endpoint would
-      // trigger. The primary stays skipped while not ready: it is same-origin
-      // and has no "connecting" affordance to surface, so exposing it half-built
-      // would only confuse the same-origin bootstrap path.
+      // a config yet (mid-registration, before its first start cycle) or that
+      // is retrying a *transient* preflight failure (WSL VM still booting, a
+      // not-yet-built linux server entry) is not listening on a port. We
+      // surface it as a *pending* bootstrap (null endpoints, no token) so the
+      // renderer can show a "Connecting…" indicator while it retries — null
+      // endpoints keep the renderer from dialing the dead port, avoiding the
+      // needless /api/auth/bootstrap/bearer error cycles a real endpoint would
+      // trigger.
       if (Option.isNone(config) || Option.isSome(config.value.preflightFailure)) {
-        if (isPrimary) continue;
+        // Skip the primary (same-origin, no "connecting" affordance) and skip a
+        // secondary whose preflight failed *fatally* (no node, wrong version,
+        // missing build tools): it has stopped retrying, so an indefinite
+        // "Connecting…" would be misleading — its error is surfaced by the
+        // WSL-state UI instead.
+        const fatalPreflight =
+          Option.isSome(config) &&
+          Option.isSome(config.value.preflightFailure) &&
+          config.value.preflightFailure.value.fatal;
+        if (isPrimary || fatalPreflight) continue;
         bootstraps.push({
           id: instance.id,
           label: yield* instance.label,
