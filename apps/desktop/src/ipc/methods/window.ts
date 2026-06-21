@@ -7,6 +7,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
 import * as DesktopBackendManager from "../../backend/DesktopBackendManager.ts";
@@ -141,6 +142,19 @@ export const openExternal = DesktopIpc.makeIpcMethod({
   result: Schema.Boolean,
   handler: Effect.fn("desktop.ipc.window.openExternal")(function* (url) {
     const shell = yield* ElectronShell.ElectronShell;
-    return yield* shell.openExternal(url);
+    return yield* shell.openExternal(url).pipe(
+      Effect.catchTag("ElectronShellOpenExternalError", (error) =>
+        Effect.logWarning(error.message).pipe(
+          Effect.annotateLogs({
+            error: Redacted.make(error, { label: error._tag }),
+            "error.type": error._tag,
+            "desktop.external_url.hostname": error.urlHostname,
+            "desktop.external_url.input_length": error.urlLength,
+            "desktop.external_url.protocol": error.urlProtocol,
+          }),
+          Effect.as(false),
+        ),
+      ),
+    );
   }),
 });
