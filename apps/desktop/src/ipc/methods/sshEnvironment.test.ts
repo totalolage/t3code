@@ -80,6 +80,7 @@ describe("SSH environment IPC", () => {
       assert.equal(error.requestId, "prompt-1");
       assert.equal(error.destination, "developer@devbox.example.test");
       assert.instanceOf(error.cause, Error);
+      assert.instanceOf(error.cause.cause, Error);
     }).pipe(Effect.provide(layer));
   });
 
