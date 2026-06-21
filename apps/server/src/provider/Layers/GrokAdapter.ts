@@ -408,6 +408,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 new ProviderAdapterProcessError({
                   provider: PROVIDER,
                   threadId: input.threadId,
+                  stage: "session-start",
                   detail: "Failed to start the Grok ACP session process.",
                   cause,
                 }),

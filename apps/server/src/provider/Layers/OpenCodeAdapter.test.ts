@@ -390,7 +390,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.equal(error.detail, "OpenCode SDK request failed.");
       NodeAssert.equal(
         error.message,
-        "Provider adapter request failed (opencode) for session.promptAsync: OpenCode SDK request failed.",
+        "Provider adapter request failed (opencode) for session.promptAsync.",
       );
       NodeAssert.ok(OpenCodeRuntime.isOpenCodeRuntimeError(error.cause));
       NodeAssert.strictEqual(error.cause.cause, promptFailure);

@@ -105,21 +105,7 @@ const toRequestError = (cause: OpenCodeRuntime.OpenCodeRuntimeError): ProviderAd
   new ProviderAdapterRequestError({
     provider: PROVIDER,
     method: cause.operation,
-    detail: cause.detail,
-    cause,
-  });
-
-/**
- * Map a `Cause.squash`-ed failure into a `ProviderAdapterProcessError`. The
- * typed cause is usually an `OpenCodeRuntimeError` (from {@link OpenCodeRuntime.runOpenCodeSdk}),
- * in which case we preserve its `detail`; otherwise we fall back to
- * {@link OpenCodeRuntime.OpenCodeRuntimeError.detailFromCause} for unknown causes (defects, etc.).
- */
-const toProcessError = (threadId: ThreadId, cause: unknown): ProviderAdapterProcessError =>
-  new ProviderAdapterProcessError({
-    provider: PROVIDER,
-    threadId,
-    detail: OpenCodeRuntime.OpenCodeRuntimeError.detailFromCause(cause),
+    detail: "OpenCode SDK request failed.",
     cause,
   });
 
@@ -1078,7 +1064,14 @@ export function makeOpenCodeAdapter(
           );
           if (Exit.isFailure(startedExit)) {
             yield* Scope.close(sessionScope, Exit.void).pipe(Effect.ignore);
-            return yield* toProcessError(input.threadId, Cause.squash(startedExit.cause));
+            const cause = Cause.squash(startedExit.cause);
+            return yield* new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: input.threadId,
+              stage: "session-start",
+              detail: "Failed to start OpenCode runtime session.",
+              cause,
+            });
           }
           return startedExit.value;
         });

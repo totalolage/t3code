@@ -564,6 +564,7 @@ export function makeCursorAdapter(
                 new ProviderAdapterProcessError({
                   provider: PROVIDER,
                   threadId: input.threadId,
+                  stage: "session-start",
                   detail: "Failed to start the Cursor ACP session process.",
                   cause,
                 }),

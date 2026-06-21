@@ -8,7 +8,7 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
-import { make, OpenCodeRuntimeError, runOpenCodeSdk } from "./opencodeRuntime.ts";
+import * as OpenCodeRuntime from "./opencodeRuntime.ts";
 
 const encoder = new TextEncoder();
 
@@ -46,12 +46,12 @@ describe("OpenCodeRuntime", () => {
 
     return Effect.gen(function* () {
       const result = yield* Effect.result(
-        runOpenCodeSdk("session.get", () => Promise.reject(cause)),
+        OpenCodeRuntime.runOpenCodeSdk("session.get", () => Promise.reject(cause)),
       );
 
       assert.isTrue(Result.isFailure(result));
       if (Result.isFailure(result)) {
-        assert.instanceOf(result.failure, OpenCodeRuntimeError);
+        assert.instanceOf(result.failure, OpenCodeRuntime.OpenCodeRuntimeError);
         assert.equal(result.failure.operation, "session.get");
         assert.equal(result.failure.detail, "OpenCode SDK request failed.");
         assert.equal(result.failure.responseStatus, 401);
@@ -75,7 +75,7 @@ describe("OpenCodeRuntime", () => {
     );
 
     return Effect.gen(function* () {
-      const runtime = yield* make;
+      const runtime = yield* OpenCodeRuntime.make;
       const result = yield* Effect.result(
         Effect.scoped(
           runtime.startOpenCodeServerProcess({
@@ -87,7 +87,7 @@ describe("OpenCodeRuntime", () => {
 
       assert.isTrue(Result.isFailure(result));
       if (Result.isFailure(result)) {
-        assert.instanceOf(result.failure, OpenCodeRuntimeError);
+        assert.instanceOf(result.failure, OpenCodeRuntime.OpenCodeRuntimeError);
         assert.equal(result.failure.exitCode, 17);
         assert.equal(result.failure.argumentCount, 3);
         assert.equal(result.failure.stdoutBytes, encoder.encode(stdout).byteLength);
