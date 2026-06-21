@@ -5,9 +5,9 @@ import {
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
-import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { compareSemverVersions } from "@t3tools/shared/semver";
@@ -28,10 +28,29 @@ const OPENCODE_PRESENTATION = {
 } as const;
 const MINIMUM_OPENCODE_VERSION = "1.14.19";
 
-class OpenCodeProbeError extends Data.TaggedError("OpenCodeProbeError")<{
-  readonly cause: unknown;
-  readonly detail: string;
-}> {}
+export class OpenCodeProbeError extends Schema.TaggedErrorClass<OpenCodeProbeError>()(
+  "OpenCodeProbeError",
+  {
+    operation: Schema.Literals(["probe-version", "load-inventory"]),
+    detail: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `OpenCode probe failed during ${this.operation}.`;
+  }
+
+  static fromCause(operation: "probe-version" | "load-inventory") {
+    return (cause: unknown): OpenCodeProbeError =>
+      new OpenCodeProbeError({
+        operation,
+        detail: OpenCodeRuntime.OpenCodeRuntimeError.detailFromCause(cause),
+        cause,
+      });
+  }
+}
+
+export const isOpenCodeProbeError = Schema.is(OpenCodeProbeError);
 
 function normalizeProbeMessage(message: string): string | undefined {
   const trimmed = message.trim();
@@ -48,7 +67,7 @@ function normalizeProbeMessage(message: string): string | undefined {
 }
 
 function normalizedErrorMessage(cause: unknown): string | undefined {
-  if (cause instanceof OpenCodeProbeError) {
+  if (isOpenCodeProbeError(cause)) {
     return normalizeProbeMessage(cause.detail);
   }
 
@@ -385,15 +404,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
           args: ["--version"],
           environment: resolvedEnvironment,
         })
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new OpenCodeProbeError({
-                cause,
-                detail: OpenCodeRuntime.OpenCodeRuntimeError.detailFromCause(cause),
-              }),
-          ),
-        ),
+        .pipe(Effect.mapError(OpenCodeProbeError.fromCause("probe-version"))),
     );
     if (versionExit._tag === "Failure") {
       return fallback(Cause.squash(versionExit.cause));
@@ -448,15 +459,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
               : {}),
           }),
         );
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new OpenCodeProbeError({
-              cause,
-              detail: OpenCodeRuntime.OpenCodeRuntimeError.detailFromCause(cause),
-            }),
-        ),
-      ),
+      }).pipe(Effect.mapError(OpenCodeProbeError.fromCause("load-inventory"))),
     ),
   );
   if (inventoryExit._tag === "Failure") {

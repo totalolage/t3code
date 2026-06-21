@@ -10,7 +10,7 @@ import { beforeEach } from "vite-plus/test";
 import { OpenCodeSettings } from "@t3tools/contracts";
 import * as Config from "../../config.ts";
 import * as OpenCodeRuntime from "../opencodeRuntime.ts";
-import { checkOpenCodeProviderStatus } from "./OpenCodeProvider.ts";
+import { checkOpenCodeProviderStatus, OpenCodeProbeError } from "./OpenCodeProvider.ts";
 
 const decodeOpenCodeSettings = Schema.decodeSync(OpenCodeSettings);
 
@@ -113,6 +113,24 @@ const makeOpenCodeSettings = (overrides?: Partial<OpenCodeSettings>): OpenCodeSe
     customModels: [],
     ...overrides,
   });
+
+it("structures OpenCode probe failures without deriving messages from causes", () => {
+  const cause = new Error("401 Unauthorized");
+  const runtimeError = new OpenCodeRuntime.OpenCodeRuntimeError({
+    operation: "loadOpenCodeInventory",
+    detail: cause.message,
+    cause,
+  });
+  const probeError = OpenCodeProbeError.fromCause("load-inventory")(runtimeError);
+  const versionProbeError = OpenCodeProbeError.fromCause("probe-version")(runtimeError);
+
+  NodeAssert.equal(probeError.operation, "load-inventory");
+  NodeAssert.equal(probeError.detail, "401 Unauthorized");
+  NodeAssert.strictEqual(probeError.cause, runtimeError);
+  NodeAssert.strictEqual(runtimeError.cause, cause);
+  NodeAssert.equal(probeError.message, "OpenCode probe failed during load-inventory.");
+  NodeAssert.equal(versionProbeError.message, "OpenCode probe failed during probe-version.");
+});
 
 it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
   it.effect("shows a codex-style missing binary message", () =>
