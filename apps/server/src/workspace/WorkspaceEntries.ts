@@ -206,10 +206,7 @@ export const make = Effect.gen(function* () {
       const lowerPrefix = prefix.toLowerCase();
       const entries: Array<{ readonly name: string; readonly fullPath: string }> = [];
       for (const name of entryNames) {
-        if (
-          name.toLowerCase().startsWith(lowerPrefix) &&
-          (showHidden || !name.startsWith("."))
-        ) {
+        if (name.toLowerCase().startsWith(lowerPrefix) && (showHidden || !name.startsWith("."))) {
           const fullPath = path.join(parentPath, name);
           const info = yield* fileSystem.stat(fullPath).pipe(Effect.option);
           if (Option.isNone(info) || info.value.type !== "Directory") {
