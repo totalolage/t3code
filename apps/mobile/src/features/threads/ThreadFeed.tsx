@@ -1124,7 +1124,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const disclosureAnchorKeyRef = useRef<string | null>(null);
   const previousLatestTurnRef = useRef(props.latestTurn);
   const { width: windowWidth } = useWindowDimensions();
-  const [viewportWidth, setViewportWidth] = useState(windowWidth);
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    props.layoutVariant === "split" ? 0 : windowWidth,
+  );
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
   const [interactionState, setInteractionState] = useState<{
     readonly copiedRowId: string | null;
@@ -1201,6 +1203,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       markdownStyles,
       reviewCommentColors,
       userBubbleColor,
+      viewportWidth,
     }),
     [
       copiedRowId,
@@ -1209,6 +1212,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       markdownStyles,
       reviewCommentColors,
       userBubbleColor,
+      viewportWidth,
     ],
   );
   const expandedWorkGroupIds = useMemo(() => {
