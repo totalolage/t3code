@@ -152,6 +152,42 @@ it.effect("preserves unref as an opt-out from scope-owned termination", () =>
   }),
 );
 
+it.effect("bounds explicit handle kill calls and escalates to SIGKILL", () =>
+  Effect.gen(function* () {
+    const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+    const signals: Array<ChildProcessShutdownSignal> = [];
+    let running = true;
+    const handle = makeHandle({
+      pid: 44,
+      exitCode: Deferred.await(exited),
+      isRunning: Effect.sync(() => running),
+      kill: ({ killSignal } = {}) =>
+        Effect.sync(() => {
+          if (killSignal !== "SIGTERM" && killSignal !== "SIGKILL") return;
+          signals.push(killSignal);
+          if (killSignal === "SIGKILL") running = false;
+        }).pipe(Effect.andThen(Deferred.await(exited)), Effect.asVoid),
+    });
+    const spawner = make(
+      ChildProcessSpawner.make(() => Effect.succeed(handle)),
+      {
+        termGraceMs: 0,
+        killGraceMs: 0,
+      },
+    );
+    const callerScope = yield* Scope.make();
+    const spawned = yield* spawner
+      .spawn(ChildProcess.make("unused"))
+      .pipe(Effect.provideService(Scope.Scope, callerScope));
+
+    yield* spawned.kill({ forceKillAfter: 0 });
+
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    yield* Deferred.succeed(exited, ChildProcessSpawner.ExitCode(137));
+    yield* Scope.close(callerScope, Exit.void);
+  }),
+);
+
 it.effect("does not wait for the delegate's unbounded finalizer", () =>
   Effect.gen(function* () {
     const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();

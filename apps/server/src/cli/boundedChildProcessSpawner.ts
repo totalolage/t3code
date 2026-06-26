@@ -1,3 +1,4 @@
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -60,11 +61,49 @@ export const make = (
   );
   const sendSignal = Effect.fn("BoundedChildProcessSpawner.sendSignal")(function* (
     handle: ChildProcessSpawner.ChildProcessHandle,
-    signal: ChildProcessShutdownSignal,
+    signal: ChildProcess.Signal,
   ) {
     yield* handle
       .kill({ killSignal: signal })
       .pipe(Effect.ignore, Effect.forkDetach({ startImmediately: true }));
+  });
+
+  const kill = Effect.fn("BoundedChildProcessSpawner.kill")(function* (
+    handle: ChildProcessSpawner.ChildProcessHandle,
+    killOptions?: ChildProcess.KillOptions,
+  ) {
+    if (!(yield* isStillRunning(handle))) return;
+
+    const initialSignal = killOptions?.killSignal ?? "SIGTERM";
+    const initialGraceMs =
+      initialSignal === "SIGKILL"
+        ? killGraceMs
+        : Math.min(
+            termGraceMs,
+            normalizedDelay(
+              killOptions?.forceKillAfter === undefined
+                ? undefined
+                : Duration.toMillis(killOptions.forceKillAfter),
+              termGraceMs,
+            ),
+          );
+    yield* sendSignal(handle, initialSignal);
+    const stoppedAfterInitialSignal = yield* waitUntilStopped(
+      handle,
+      initialGraceMs,
+      pollIntervalMs,
+    );
+    if (stoppedAfterInitialSignal) return;
+
+    if (initialSignal !== "SIGKILL") {
+      yield* sendSignal(handle, "SIGKILL");
+      if (yield* waitUntilStopped(handle, killGraceMs, pollIntervalMs)) return;
+    }
+
+    yield* Effect.logWarning("Child process did not stop after SIGKILL grace period", {
+      pid: Number(handle.pid),
+      killGraceMs,
+    });
   });
 
   const shutdown = Effect.fn("BoundedChildProcessSpawner.shutdown")(function* (
@@ -72,20 +111,8 @@ export const make = (
     childScope: Scope.Closeable,
     isReferenced: () => boolean,
   ) {
-    if (isReferenced() && (yield* isStillRunning(handle))) {
-      yield* sendSignal(handle, "SIGTERM");
-      const stoppedAfterTerm = yield* waitUntilStopped(handle, termGraceMs, pollIntervalMs);
-
-      if (!stoppedAfterTerm) {
-        yield* sendSignal(handle, "SIGKILL");
-        const stoppedAfterKill = yield* waitUntilStopped(handle, killGraceMs, pollIntervalMs);
-        if (!stoppedAfterKill) {
-          yield* Effect.logWarning("Child process did not stop after SIGKILL grace period", {
-            pid: Number(handle.pid),
-            killGraceMs,
-          });
-        }
-      }
+    if (isReferenced()) {
+      yield* kill(handle);
     }
 
     // The platform spawner's own finalizer can wait forever for an exit event.
@@ -113,7 +140,7 @@ export const make = (
       pid: delegateHandle.pid,
       exitCode: delegateHandle.exitCode,
       isRunning: delegateHandle.isRunning,
-      kill: delegateHandle.kill,
+      kill: (killOptions) => kill(delegateHandle, killOptions),
       stdin: delegateHandle.stdin,
       stdout: delegateHandle.stdout,
       stderr: delegateHandle.stderr,
@@ -137,7 +164,7 @@ export const make = (
         ),
       ),
     });
-    yield* Effect.addFinalizer(() => shutdown(handle, childScope, () => referenced));
+    yield* Effect.addFinalizer(() => shutdown(delegateHandle, childScope, () => referenced));
     yield* handle.exitCode.pipe(
       Effect.exit,
       Effect.andThen(Scope.close(childScope, Exit.void)),
