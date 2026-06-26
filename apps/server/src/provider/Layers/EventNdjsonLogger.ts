@@ -54,6 +54,9 @@ export type EventNdjsonStream = "native" | "canonical" | "orchestration";
 export interface EventNdjsonLogger {
   readonly filePath: string;
   readonly write: (event: unknown, threadId: ThreadId | null) => Effect.Effect<void>;
+}
+
+export interface ManagedEventNdjsonLogger extends EventNdjsonLogger {
   readonly close: () => Effect.Effect<void>;
 }
 
@@ -579,7 +582,7 @@ export const makeEventNdjsonLogStore = Effect.fnUntraced(function* (
       }
     });
 
-    const view = { filePath, write, close } satisfies EventNdjsonLogger;
+    const view = { filePath, write } satisfies EventNdjsonLogger;
     loggerViews.set(stream, view);
     return view;
   };
@@ -590,7 +593,7 @@ export const makeEventNdjsonLogStore = Effect.fnUntraced(function* (
 export const makeEventNdjsonLogger = Effect.fnUntraced(function* (
   filePath: string,
   options: EventNdjsonLoggerOptions,
-): Effect.fn.Return<EventNdjsonLogger | undefined> {
+): Effect.fn.Return<ManagedEventNdjsonLogger | undefined> {
   const store = yield* makeEventNdjsonLogStore(filePath, options).pipe(
     Effect.catch((error) =>
       logWarning(error.message, { error }).pipe(
@@ -598,5 +601,6 @@ export const makeEventNdjsonLogger = Effect.fnUntraced(function* (
       ),
     ),
   );
-  return store?.logger(options.stream);
+  if (!store) return undefined;
+  return { ...store.logger(options.stream), close: store.close };
 });

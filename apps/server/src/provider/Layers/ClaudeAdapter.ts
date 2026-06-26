@@ -1347,15 +1347,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, options?.environment).pipe(
     Effect.provideService(Path.Path, path),
   );
-  const nativeEventLogger =
-    options?.nativeEventLogger ??
-    (options?.nativeEventLogPath !== undefined
+  const managedNativeEventLogger =
+    options?.nativeEventLogger === undefined && options?.nativeEventLogPath !== undefined
       ? yield* makeEventNdjsonLogger(options.nativeEventLogPath, {
           stream: "native",
         })
-      : undefined);
-  const managedNativeEventLogger =
-    options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
+      : undefined;
+  const nativeEventLogger = options?.nativeEventLogger ?? managedNativeEventLogger;
 
   const createQuery =
     options?.createQuery ??

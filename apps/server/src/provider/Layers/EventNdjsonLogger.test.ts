@@ -214,6 +214,9 @@ describe("EventNdjsonLogger", () => {
         const canonical = store.logger("canonical");
         const threadId = ThreadId.make("thread-shared");
 
+        assert.notProperty(native, "close");
+        assert.notProperty(canonical, "close");
+
         yield* native.write({ id: "native-event" }, threadId);
         yield* canonical.write({ type: "item.completed", id: "canonical-event" }, threadId);
         yield* store.close();
