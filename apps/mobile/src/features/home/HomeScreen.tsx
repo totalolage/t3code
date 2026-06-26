@@ -8,9 +8,15 @@ import type {
   SidebarThreadSortOrder,
 } from "@t3tools/contracts";
 import * as Haptics from "expo-haptics";
-import { SymbolView } from "expo-symbols";
 import { useCallback, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, useWindowDimensions, View } from "react-native";
+import {
+  ActivityIndicator,
+  Platform,
+  Pressable,
+  ScrollView,
+  useWindowDimensions,
+  View,
+} from "react-native";
 import ReanimatedSwipeable, {
   type SwipeableMethods,
 } from "react-native-gesture-handler/ReanimatedSwipeable";
@@ -25,6 +31,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useThemeColor } from "../../lib/useThemeColor";
 
 import { AppText as Text } from "../../components/AppText";
+import { SymbolView } from "../../components/AppSymbol";
 import { EmptyState } from "../../components/EmptyState";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
 import type { WorkspaceState } from "../../state/workspaceModel";
@@ -507,16 +514,19 @@ export function HomeScreen(props: HomeScreenProps) {
   return (
     <View className="flex-1 bg-screen">
       <ScrollView
-        contentInsetAdjustmentBehavior="automatic"
+        contentInsetAdjustmentBehavior={Platform.OS === "ios" ? "automatic" : "never"}
         showsVerticalScrollIndicator={false}
         keyboardDismissMode="on-drag"
         keyboardShouldPersistTaps="handled"
         onScrollBeginDrag={() => openSwipeableRef.current?.close()}
         className="flex-1"
         contentContainerStyle={{
+          alignSelf: "center",
+          width: "100%",
+          maxWidth: 720,
           paddingHorizontal: 16,
-          paddingTop: 8,
-          paddingBottom: 24,
+          paddingTop: Platform.OS === "android" ? 16 : 8,
+          paddingBottom: Math.max(insets.bottom, 24),
           gap: 20,
         }}
       >

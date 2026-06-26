@@ -84,6 +84,7 @@ export default function HomeRouteScreen() {
     <>
       <HomeHeader
         environments={environments}
+        searchQuery={searchQuery}
         selectedEnvironmentId={selectedEnvironmentId}
         projectSortOrder={listOptions.projectSortOrder}
         threadSortOrder={listOptions.threadSortOrder}
