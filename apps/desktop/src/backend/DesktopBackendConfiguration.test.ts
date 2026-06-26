@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -224,10 +225,11 @@ describe("DesktopBackendConfiguration", () => {
   it.effect("logs structured context when persisted observability settings cannot be read", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-desktop-backend-config-test-",
       });
-      const settingsPath = `${baseDir}/userdata/settings.json`;
+      const settingsPath = path.join(baseDir, "userdata", "settings.json");
       const cause = PlatformError.systemError({
         _tag: "PermissionDenied",
         module: "FileSystem",

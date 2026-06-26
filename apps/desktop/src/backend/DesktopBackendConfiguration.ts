@@ -508,130 +508,130 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
 });
 
 export const make = Effect.gen(function* () {
-    const environment = yield* DesktopEnvironment.DesktopEnvironment;
-    const fileSystem = yield* FileSystem.FileSystem;
-    const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
-    const wslEnvironment = yield* DesktopWslEnvironment.DesktopWslEnvironment;
-    const settings = yield* DesktopAppSettings.DesktopAppSettings;
-    const crypto = yield* Crypto.Crypto;
-    // SynchronizedRef (not a plain Ref) so the read-generate-write is atomic.
-    // crypto.randomBytes is a yield point, and resolvePrimary + resolveWsl can
-    // resolve concurrently; with a plain Ref both could observe None, generate
-    // distinct tokens, and one would overwrite the other — leaving the two
-    // backends holding mismatched tokens and breaking the shared-token
-    // invariant the renderer relies on. modifyEffect serializes the whole
-    // get-or-create so the first caller wins and the rest reuse its token.
-    const tokenRef = yield* SynchronizedRef.make(Option.none<string>());
-    const getOrCreateBootstrapToken = SynchronizedRef.modifyEffect(tokenRef, (current) =>
-      Option.match(current, {
-        onSome: (token) => Effect.succeed([token, current] as const),
-        onNone: () =>
-          crypto.randomBytes(24).pipe(
-            Effect.map((bytes) => {
-              const token = Encoding.encodeHex(bytes);
-              return [token, Option.some(token)] as const;
-            }),
-          ),
-      }),
-    );
-
-    // Both resolvers share the same bootstrap token: the renderer holds a
-    // single token and uses it against whichever backend it's currently
-    // talking to. Observability settings get re-read each resolve so a
-    // hot-swap of the server-settings file is picked up on the next
-    // restart cycle without having to bounce the desktop process.
-    const sharedInputs = Effect.gen(function* () {
-      const bootstrapToken = yield* getOrCreateBootstrapToken;
-      const observabilitySettings = yield* readPersistedBackendObservabilitySettings.pipe(
-        Effect.provideService(FileSystem.FileSystem, fileSystem),
-        Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
-      );
-      return { bootstrapToken, observabilitySettings } satisfies SharedBootstrapInput;
-    });
-
-    const buildWslPrimaryConfig = Effect.gen(function* () {
-      // wsl-only mode pipes the WSL backend through the same port the
-      // Windows primary would normally take. That way the renderer
-      // still loads from the local-only endpoint advertised by
-      // DesktopServerExposure, and primary-aware code paths (cookie
-      // auth, the env switcher's "primary" id) keep working without
-      // a parallel "secondary" registration.
-      const backendExposure = yield* serverExposure.backendConfig;
-      const persistedSettings = yield* settings.get;
-      const shared = yield* sharedInputs;
-      return yield* resolveWslStartConfig({
-        ...shared,
-        port: backendExposure.port,
-        distro: persistedSettings.wslDistro,
-      }).pipe(
-        Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
-        Effect.provideService(DesktopWslEnvironment.DesktopWslEnvironment, wslEnvironment),
-        Effect.provideService(FileSystem.FileSystem, fileSystem),
-      );
-    });
-
-    const buildWindowsPrimaryConfig = Effect.gen(function* () {
-      const shared = yield* sharedInputs;
-      return yield* resolvePrimaryStartConfig(shared).pipe(
-        Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
-        Effect.provideService(DesktopServerExposure.DesktopServerExposure, serverExposure),
-      );
-    });
-
-    // Single source of truth for what the primary actually runs as. Both
-    // the start-config dispatch and the renderer-facing label derive from
-    // this, so they can't disagree — e.g. the label reading "WSL" while the
-    // config silently fell back to Windows because WSL is unavailable.
-    // Dispatch happens at resolve time so toggling wsl-only between restarts
-    // is picked up on the next start cycle (the pool's primary instance is
-    // created once at layer init, but configResolve fires on each restart).
-    const describePrimary = Effect.gen(function* () {
-      const persistedSettings = yield* settings.get;
-      const wslRequested = persistedSettings.wslOnly && persistedSettings.wslBackendEnabled;
-      // Only honor wsl-only when WSL is actually usable. If the user
-      // persisted wsl-only but WSL has since become unavailable (wsl.exe
-      // removed, no distro), fall back to the Windows primary instead of
-      // looping forever on preflight failures: the Connections backend
-      // control is hidden while WSL is unavailable, so a stuck WSL primary
-      // would otherwise leave no in-app way back to Windows.
-      const useWsl = wslRequested && (yield* wslEnvironment.isAvailable);
-      return { useWsl, wslRequested, distro: persistedSettings.wslDistro };
-    });
-
-    return DesktopBackendConfiguration.of({
-      resolvePrimary: Effect.gen(function* () {
-        const { useWsl, wslRequested } = yield* describePrimary;
-        if (useWsl) {
-          return yield* buildWslPrimaryConfig;
-        }
-        if (wslRequested) {
-          yield* Effect.logWarning(
-            "WSL-only backend requested but WSL is unavailable; starting the Windows primary instead.",
-          );
-        }
-        return yield* buildWindowsPrimaryConfig;
-      }).pipe(Effect.withSpan("desktop.backendConfiguration.resolvePrimary")),
-      resolvePrimaryLabel: Effect.gen(function* () {
-        const { useWsl, distro } = yield* describePrimary;
-        if (!useWsl) {
-          return environment.platform === "win32" ? "Windows" : "Local environment";
-        }
-        return distro ? `WSL (${distro})` : "WSL";
-      }).pipe(Effect.withSpan("desktop.backendConfiguration.resolvePrimaryLabel")),
-      resolveWsl: (input) =>
-        Effect.gen(function* () {
-          const shared = yield* sharedInputs;
-          return yield* resolveWslStartConfig({ ...shared, ...input }).pipe(
-            Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
-            Effect.provideService(DesktopWslEnvironment.DesktopWslEnvironment, wslEnvironment),
-            Effect.provideService(FileSystem.FileSystem, fileSystem),
-          );
-        }).pipe(
-          Effect.withSpan("desktop.backendConfiguration.resolveWsl", {
-            attributes: { port: input.port, distro: input.distro ?? null },
+  const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
+  const wslEnvironment = yield* DesktopWslEnvironment.DesktopWslEnvironment;
+  const settings = yield* DesktopAppSettings.DesktopAppSettings;
+  const crypto = yield* Crypto.Crypto;
+  // SynchronizedRef (not a plain Ref) so the read-generate-write is atomic.
+  // crypto.randomBytes is a yield point, and resolvePrimary + resolveWsl can
+  // resolve concurrently; with a plain Ref both could observe None, generate
+  // distinct tokens, and one would overwrite the other — leaving the two
+  // backends holding mismatched tokens and breaking the shared-token
+  // invariant the renderer relies on. modifyEffect serializes the whole
+  // get-or-create so the first caller wins and the rest reuse its token.
+  const tokenRef = yield* SynchronizedRef.make(Option.none<string>());
+  const getOrCreateBootstrapToken = SynchronizedRef.modifyEffect(tokenRef, (current) =>
+    Option.match(current, {
+      onSome: (token) => Effect.succeed([token, current] as const),
+      onNone: () =>
+        crypto.randomBytes(24).pipe(
+          Effect.map((bytes) => {
+            const token = Encoding.encodeHex(bytes);
+            return [token, Option.some(token)] as const;
           }),
         ),
-    });
+    }),
+  );
+
+  // Both resolvers share the same bootstrap token: the renderer holds a
+  // single token and uses it against whichever backend it's currently
+  // talking to. Observability settings get re-read each resolve so a
+  // hot-swap of the server-settings file is picked up on the next
+  // restart cycle without having to bounce the desktop process.
+  const sharedInputs = Effect.gen(function* () {
+    const bootstrapToken = yield* getOrCreateBootstrapToken;
+    const observabilitySettings = yield* readPersistedBackendObservabilitySettings.pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
+    );
+    return { bootstrapToken, observabilitySettings } satisfies SharedBootstrapInput;
+  });
+
+  const buildWslPrimaryConfig = Effect.gen(function* () {
+    // wsl-only mode pipes the WSL backend through the same port the
+    // Windows primary would normally take. That way the renderer
+    // still loads from the local-only endpoint advertised by
+    // DesktopServerExposure, and primary-aware code paths (cookie
+    // auth, the env switcher's "primary" id) keep working without
+    // a parallel "secondary" registration.
+    const backendExposure = yield* serverExposure.backendConfig;
+    const persistedSettings = yield* settings.get;
+    const shared = yield* sharedInputs;
+    return yield* resolveWslStartConfig({
+      ...shared,
+      port: backendExposure.port,
+      distro: persistedSettings.wslDistro,
+    }).pipe(
+      Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
+      Effect.provideService(DesktopWslEnvironment.DesktopWslEnvironment, wslEnvironment),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+    );
+  });
+
+  const buildWindowsPrimaryConfig = Effect.gen(function* () {
+    const shared = yield* sharedInputs;
+    return yield* resolvePrimaryStartConfig(shared).pipe(
+      Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
+      Effect.provideService(DesktopServerExposure.DesktopServerExposure, serverExposure),
+    );
+  });
+
+  // Single source of truth for what the primary actually runs as. Both
+  // the start-config dispatch and the renderer-facing label derive from
+  // this, so they can't disagree — e.g. the label reading "WSL" while the
+  // config silently fell back to Windows because WSL is unavailable.
+  // Dispatch happens at resolve time so toggling wsl-only between restarts
+  // is picked up on the next start cycle (the pool's primary instance is
+  // created once at layer init, but configResolve fires on each restart).
+  const describePrimary = Effect.gen(function* () {
+    const persistedSettings = yield* settings.get;
+    const wslRequested = persistedSettings.wslOnly && persistedSettings.wslBackendEnabled;
+    // Only honor wsl-only when WSL is actually usable. If the user
+    // persisted wsl-only but WSL has since become unavailable (wsl.exe
+    // removed, no distro), fall back to the Windows primary instead of
+    // looping forever on preflight failures: the Connections backend
+    // control is hidden while WSL is unavailable, so a stuck WSL primary
+    // would otherwise leave no in-app way back to Windows.
+    const useWsl = wslRequested && (yield* wslEnvironment.isAvailable);
+    return { useWsl, wslRequested, distro: persistedSettings.wslDistro };
+  });
+
+  return DesktopBackendConfiguration.of({
+    resolvePrimary: Effect.gen(function* () {
+      const { useWsl, wslRequested } = yield* describePrimary;
+      if (useWsl) {
+        return yield* buildWslPrimaryConfig;
+      }
+      if (wslRequested) {
+        yield* Effect.logWarning(
+          "WSL-only backend requested but WSL is unavailable; starting the Windows primary instead.",
+        );
+      }
+      return yield* buildWindowsPrimaryConfig;
+    }).pipe(Effect.withSpan("desktop.backendConfiguration.resolvePrimary")),
+    resolvePrimaryLabel: Effect.gen(function* () {
+      const { useWsl, distro } = yield* describePrimary;
+      if (!useWsl) {
+        return environment.platform === "win32" ? "Windows" : "Local environment";
+      }
+      return distro ? `WSL (${distro})` : "WSL";
+    }).pipe(Effect.withSpan("desktop.backendConfiguration.resolvePrimaryLabel")),
+    resolveWsl: (input) =>
+      Effect.gen(function* () {
+        const shared = yield* sharedInputs;
+        return yield* resolveWslStartConfig({ ...shared, ...input }).pipe(
+          Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
+          Effect.provideService(DesktopWslEnvironment.DesktopWslEnvironment, wslEnvironment),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+        );
+      }).pipe(
+        Effect.withSpan("desktop.backendConfiguration.resolveWsl", {
+          attributes: { port: input.port, distro: input.distro ?? null },
+        }),
+      ),
+  });
 });
 
 export const layer = Layer.effect(DesktopBackendConfiguration, make);

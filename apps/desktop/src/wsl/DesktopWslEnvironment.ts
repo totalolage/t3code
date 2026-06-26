@@ -152,6 +152,13 @@ const runWslShell = (
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
+const NODE_PTY_PREBUILD_MISSING_EXIT_CODE = 4;
+
+export const formatNodePtyProbeFailureReason = (exitCode: number): string | null =>
+  exitCode === NODE_PTY_PREBUILD_MISSING_EXIT_CODE
+    ? "WSL support is missing from this T3 Code build: the packaged Linux node-pty binary was not included. Rebuild the Windows artifact with `--wsl-prebuild <path-to-linux-pty.node>` or install a build that includes WSL support."
+    : null;
+
 const NODE_PTY_PROBE_SCRIPT = (
   linuxServerDir: string,
 ) => `echo "nodePath:$(command -v node 2>/dev/null)"
@@ -178,7 +185,10 @@ const expected = {
   arch: process.arch,
   nodePtyVersion: require("node-pty/package.json").version,
 };
-const marker = path.join(pkgDir, "prebuilds", "linux-" + process.arch, "t3code-wsl-node-pty.json");
+const prebuildDir = path.join(pkgDir, "prebuilds", "linux-" + process.arch);
+const marker = path.join(prebuildDir, "t3code-wsl-node-pty.json");
+const binary = path.join(prebuildDir, "pty.node");
+if (!fs.existsSync(marker) || !fs.existsSync(binary)) process.exit(${NODE_PTY_PREBUILD_MISSING_EXIT_CODE});
 require("node-pty");
 const actual = JSON.parse(fs.readFileSync(marker, "utf8"));
 for (const key of Object.keys(expected)) {
@@ -344,11 +354,18 @@ const ensureNodePtyImpl = (
       return {
         ok: false,
         reason:
-          'WSL server dependencies could not be loaded (for example "effect"). The server\'s bundled node_modules is not readable by the WSL distro\'s Node — this is a packaging problem with this build. Please report it.',
+          "WSL server dependencies could not be loaded (for example \"effect\"). The server's bundled node_modules is not readable by the WSL distro's Node — this is a packaging problem with this build. Please report it.",
       } as const;
     }
 
     if (probe.exitCode === 0) return { ok: true, nodePath } as const;
+
+    if (options.allowBuild !== true) {
+      const packagedProbeFailure = formatNodePtyProbeFailureReason(probe.exitCode);
+      if (packagedProbeFailure !== null) {
+        return { ok: false, reason: packagedProbeFailure } as const;
+      }
+    }
 
     // node is present but node-pty's native module didn't load.
     const toolchainCheck = yield* runWslShell(
@@ -367,7 +384,10 @@ const ensureNodePtyImpl = (
       // here means the bundled binary itself couldn't load, which is almost
       // always an unsupported CPU architecture or incompatible system libraries.
       const nodeOnlyReason = formatMissingToolsReason(
-        { missingTools: report.missingTools.filter((tool) => tool === "node"), nodeVersion: report.nodeVersion },
+        {
+          missingTools: report.missingTools.filter((tool) => tool === "node"),
+          nodeVersion: report.nodeVersion,
+        },
         options.nodeEngineRange?.trim() || null,
       );
       return {

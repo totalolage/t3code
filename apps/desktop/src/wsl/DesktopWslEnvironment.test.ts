@@ -3,9 +3,23 @@ import { describe, it, expect } from "vite-plus/test";
 import {
   buildWslNodeEnvPreamble,
   formatMissingToolsReason,
+  formatNodePtyProbeFailureReason,
   parseNodePath,
   parseToolchainReport,
 } from "./DesktopWslEnvironment.ts";
+
+describe("formatNodePtyProbeFailureReason", () => {
+  it("identifies a packaged build that omitted the Linux node-pty prebuild", () => {
+    const reason = formatNodePtyProbeFailureReason(4);
+
+    expect(reason).toContain("packaged Linux node-pty binary was not included");
+    expect(reason).toContain("--wsl-prebuild");
+  });
+
+  it("leaves other node-pty load failures to the compatibility diagnostic", () => {
+    expect(formatNodePtyProbeFailureReason(1)).toBeNull();
+  });
+});
 
 describe("buildWslNodeEnvPreamble", () => {
   it("passes the required Node engine range into the shared resolver", () => {

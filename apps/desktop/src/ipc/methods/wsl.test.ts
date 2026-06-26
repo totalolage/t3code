@@ -50,7 +50,9 @@ const unusedLifecycleRuntimeLayer = Layer.mergeAll(
   DesktopState.layer,
   Layer.succeed(
     DesktopEnvironment.DesktopEnvironment,
-    DesktopEnvironment.DesktopEnvironment.of({} as DesktopEnvironment.DesktopEnvironment["Service"]),
+    DesktopEnvironment.DesktopEnvironment.of(
+      {} as DesktopEnvironment.DesktopEnvironment["Service"],
+    ),
   ),
   Layer.succeed(
     DesktopWindow.DesktopWindow,

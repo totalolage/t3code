@@ -40,7 +40,10 @@ type ProviderUpdateCommandResult = AtomCommandResult<
 function toProviderUpdateOutcome(input: {
   readonly environmentId: EnvironmentId;
   readonly isPrimary: boolean;
-  readonly target: { readonly driver: ServerProvider["driver"]; readonly instanceId: ServerProvider["instanceId"] };
+  readonly target: {
+    readonly driver: ServerProvider["driver"];
+    readonly instanceId: ServerProvider["instanceId"];
+  };
   readonly result: ProviderUpdateCommandResult;
 }): PromiseSettledResult<LocalProviderUpdateOutcome> {
   if (input.result._tag === "Failure") {

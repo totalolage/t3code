@@ -48,7 +48,9 @@ export function describeReadinessCause(cause: unknown): unknown {
  * inspect `cause` (which carries a `kind` discriminator for the probe-timeout and
  * overall-timeout cases) to reproduce phase-specific messages, or ignore it.
  */
-export const waitForHttpReady = Effect.fn("shared.httpReadiness.waitForHttpReady")(function* <E>(input: {
+export const waitForHttpReady = Effect.fn("shared.httpReadiness.waitForHttpReady")(function* <
+  E,
+>(input: {
   readonly baseUrl: string;
   readonly path?: string;
   readonly timeoutMs?: number;

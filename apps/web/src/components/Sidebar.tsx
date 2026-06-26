@@ -2485,7 +2485,10 @@ function LocalSecondaryStatus() {
   const localEnvByUrl = useMemo(() => {
     const map = new Map<string, { phase: string; error: string | null }>();
     for (const environment of environments) {
-      if (isDesktopLocalConnectionTarget(environment.entry.target) && environment.displayUrl !== null) {
+      if (
+        isDesktopLocalConnectionTarget(environment.entry.target) &&
+        environment.displayUrl !== null
+      ) {
         map.set(environment.displayUrl, {
           phase: environment.connection.phase,
           error: environment.connection.error,
