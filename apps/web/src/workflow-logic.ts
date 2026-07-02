@@ -300,13 +300,41 @@ export function collectWorkflowTaskIds(
   return taskIds;
 }
 
+/**
+ * Millisecond timestamps collide, so equal-time activities are ordered by
+ * provider sequence when present, then by lifecycle rank — a task.completed
+ * must never be applied before the task.started that creates its run.
+ */
+const WORKFLOW_ACTIVITY_RANK: Record<string, number> = {
+  "task.started": 0,
+  "task.workflow-meta": 1,
+  "task.workflow-updated": 1,
+  "task.completed": 2,
+};
+
+function compareWorkflowActivityOrder(
+  a: OrchestrationThreadActivity,
+  b: OrchestrationThreadActivity,
+): number {
+  if (a.sequence !== undefined && b.sequence !== undefined && a.sequence !== b.sequence) {
+    return a.sequence - b.sequence;
+  }
+  const byTime = a.createdAt.localeCompare(b.createdAt);
+  if (byTime !== 0) {
+    return byTime;
+  }
+  const byRank = (WORKFLOW_ACTIVITY_RANK[a.kind] ?? 1) - (WORKFLOW_ACTIVITY_RANK[b.kind] ?? 1);
+  if (byRank !== 0) {
+    return byRank;
+  }
+  return a.id.localeCompare(b.id);
+}
+
 export function deriveWorkflowRuns(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   options?: { readonly sessionActive?: boolean | undefined },
 ): WorkflowRun[] {
-  const ordered = [...activities].toSorted(
-    (a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
-  );
+  const ordered = [...activities].toSorted(compareWorkflowActivityOrder);
   const runs = new Map<string, MutableWorkflowRun>();
 
   const ensureRun = (taskId: string, activity: OrchestrationThreadActivity): MutableWorkflowRun => {

@@ -30,7 +30,12 @@ import {
   workflowRunTitle,
 } from "~/workflow-logic";
 import { Button } from "../ui/button";
-import { AgentRowContent, PhaseHeader, WorkflowStatusChip } from "./workflowUi";
+import {
+  AgentRowContent,
+  PhaseHeader,
+  WorkflowStatusChip,
+  safeWorkflowSessionUrl,
+} from "./workflowUi";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 
 type WorkflowTabId = "run" | "script" | "logs";
@@ -199,7 +204,7 @@ function RunTab({
   remote: boolean;
 }): ReactElement {
   if (remote) {
-    const sessionUrl = run.handles?.sessionUrl;
+    const sessionUrl = safeWorkflowSessionUrl(run.handles?.sessionUrl);
     if (sessionUrl === undefined) {
       return <MutedBody text="Running in the cloud" />;
     }
@@ -223,11 +228,11 @@ function RunTab({
   return (
     <div className="space-y-px">
       {run.phases.map((phase) => (
-        <div key={phase.index}>
+        <div key={`${run.taskId}:${phase.index}`}>
           <PhaseHeader phase={phase} />
           {phase.agents.map((agent) => (
             <ExpandableAgentRow
-              key={agent.index}
+              key={`${run.taskId}:${agent.index}`}
               agent={agent}
               environmentId={environmentId}
               transcriptDir={transcriptDir}

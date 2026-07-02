@@ -831,8 +831,11 @@ function normalizeWorkflowProgress(
   if (!Array.isArray(value) || value.length === 0) {
     return undefined;
   }
-  const agents: Array<WorkflowAgentProgressEntry> = [];
-  const phases: Array<WorkflowPhaseProgressEntry> = [];
+  // Last write wins per index: the snapshot may re-emit an agent/phase slot
+  // (retries, later progress), and the cap must count unique slots, not raw
+  // entries, or repeats would freeze later agents in a stale state.
+  const agentsByIndex = new Map<number, WorkflowAgentProgressEntry>();
+  const phasesByIndex = new Map<number, WorkflowPhaseProgressEntry>();
   const logs: Array<WorkflowLogProgressEntry> = [];
   for (const raw of value) {
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -842,8 +845,11 @@ function normalizeWorkflowProgress(
     switch (entry.type) {
       case "workflow_agent": {
         const agent = normalizeWorkflowAgentEntry(entry);
-        if (agent && agents.length < MAX_WORKFLOW_AGENT_ENTRIES) {
-          agents.push(agent);
+        if (
+          agent &&
+          (agentsByIndex.has(agent.index) || agentsByIndex.size < MAX_WORKFLOW_AGENT_ENTRIES)
+        ) {
+          agentsByIndex.set(agent.index, agent);
         }
         break;
       }
@@ -853,9 +859,9 @@ function normalizeWorkflowProgress(
         if (
           index !== undefined &&
           title !== undefined &&
-          phases.length < MAX_WORKFLOW_PHASE_ENTRIES
+          (phasesByIndex.has(index) || phasesByIndex.size < MAX_WORKFLOW_PHASE_ENTRIES)
         ) {
-          phases.push({
+          phasesByIndex.set(index, {
             type: "workflow_phase",
             index,
             title,
@@ -880,7 +886,7 @@ function normalizeWorkflowProgress(
   // Narration is append-only upstream; keep the newest lines when clipping.
   const clippedLogs =
     logs.length > MAX_WORKFLOW_LOG_ENTRIES ? logs.slice(-MAX_WORKFLOW_LOG_ENTRIES) : logs;
-  const entries = [...phases, ...agents, ...clippedLogs];
+  const entries = [...phasesByIndex.values(), ...agentsByIndex.values(), ...clippedLogs];
   return entries.length > 0 ? entries : undefined;
 }
 
@@ -891,6 +897,21 @@ function readClaudeWorkflowProgress(
   // cast is the single place the undocumented field is read.
   const raw = (message as { readonly workflow_progress?: unknown }).workflow_progress;
   return normalizeWorkflowProgress(raw);
+}
+
+function workflowHttpUrl(value: unknown): string | undefined {
+  const text = workflowString(value);
+  if (text === undefined) {
+    return undefined;
+  }
+  // Clients render this into an anchor href — restrict to web URLs so a
+  // hostile tool result cannot smuggle a javascript:/file: scheme through.
+  try {
+    const parsed = new URL(text);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? text : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizeWorkflowRunHandles(
@@ -917,8 +938,8 @@ function normalizeWorkflowRunHandles(
     ...(workflowString(toolUseResult.transcriptDir) !== undefined
       ? { transcriptDir: workflowString(toolUseResult.transcriptDir) }
       : {}),
-    ...(workflowString(toolUseResult.sessionUrl) !== undefined
-      ? { sessionUrl: workflowString(toolUseResult.sessionUrl) }
+    ...(workflowHttpUrl(toolUseResult.sessionUrl) !== undefined
+      ? { sessionUrl: workflowHttpUrl(toolUseResult.sessionUrl) }
       : {}),
     ...(workflowString(toolUseResult.warning) !== undefined
       ? { warning: workflowString(toolUseResult.warning) }

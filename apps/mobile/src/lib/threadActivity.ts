@@ -281,11 +281,13 @@ function deriveWorkLogEntries(
     if (activity.kind === "task.started") continue;
     // Workflow snapshot/meta activities back the desktop workflow card; on
     // mobile they would render as ever-mutating raw rows, so skip them —
-    // along with the per-tick task rows the workflow owns.
+    // along with the per-tick progress rows the workflow owns. task.completed
+    // stays: with no workflow card here it is mobile's only signal that a
+    // workflow finished, failed, or was stopped.
     if (activity.kind === "task.workflow-updated") continue;
     if (activity.kind === "task.workflow-meta") continue;
     if (
-      (activity.kind === "task.progress" || activity.kind === "task.completed") &&
+      activity.kind === "task.progress" &&
       workflowTaskIds.size > 0 &&
       activityBelongsToWorkflow(activity, workflowTaskIds)
     ) {

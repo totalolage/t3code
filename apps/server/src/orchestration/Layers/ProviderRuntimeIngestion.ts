@@ -167,12 +167,14 @@ function maxCheckpointTurnCount(
  * Stable per-task activity ids: workflow snapshot/meta activities are
  * upserted (one projection row per run), not appended per progress tick.
  */
+// JSON-encode the (threadId, taskId) tuple: both are free-form strings, so a
+// bare `:`-joined key would let distinct pairs collide on the upsert id.
 function workflowActivityId(threadId: ThreadId, taskId: string): EventId {
-  return EventId.make(`workflow:${threadId}:${taskId}`);
+  return EventId.make(`workflow:${JSON.stringify([threadId, taskId])}`);
 }
 
 function workflowMetaActivityId(threadId: ThreadId, taskId: string): EventId {
-  return EventId.make(`workflow-meta:${threadId}:${taskId}`);
+  return EventId.make(`workflow-meta:${JSON.stringify([threadId, taskId])}`);
 }
 
 function truncateDetail(value: string, limit = 180): string {

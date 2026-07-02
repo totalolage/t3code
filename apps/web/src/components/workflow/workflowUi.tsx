@@ -157,8 +157,27 @@ export function AgentRowContent({
 // Phase header + rollup helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Only web URLs may reach an anchor href. The server already filters the
+ * scheme at ingestion; this guards payloads persisted before that filter
+ * (and any other producer) as defense in depth.
+ */
+export function safeWorkflowSessionUrl(sessionUrl: string | undefined): string | undefined {
+  if (sessionUrl === undefined) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(sessionUrl);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? sessionUrl : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Settled agents (done or error) — the x/y header is a progress counter,
+ * and an errored agent has no work remaining. */
 export function phaseDoneCount(phase: WorkflowRunPhase): number {
-  return phase.agents.filter((agent) => agent.status === "done").length;
+  return phase.agents.filter((agent) => agent.status === "done" || agent.status === "error").length;
 }
 
 export function PhaseHeader({ phase }: { phase: WorkflowRunPhase }): ReactElement {

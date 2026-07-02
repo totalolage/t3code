@@ -25,6 +25,10 @@ export function createWorkflowEnvironmentAtoms<R, E>(
       label: "environment-data:workflow:read-journal",
       tag: WS_METHODS.workflowReadJournal,
       staleTimeMs: 5_000,
+      // The journal grows while a run is live and the query only mounts
+      // while the Logs tab is open — poll so new results appear without a
+      // manual refresh.
+      refreshIntervalMs: 4_000,
     }),
     readAgentTranscript: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:workflow:read-agent-transcript",

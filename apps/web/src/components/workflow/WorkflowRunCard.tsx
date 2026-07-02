@@ -11,7 +11,13 @@ import {
   workflowRunTitle,
 } from "~/workflow-logic";
 import { Button } from "../ui/button";
-import { AgentRowContent, PhaseHeader, WorkflowStatusChip, agentRollupLabel } from "./workflowUi";
+import {
+  AgentRowContent,
+  PhaseHeader,
+  WorkflowStatusChip,
+  agentRollupLabel,
+  safeWorkflowSessionUrl,
+} from "./workflowUi";
 
 const MAX_CARD_AGENT_ROWS = 8;
 
@@ -89,10 +95,10 @@ export function WorkflowRunCard(props: {
               return null;
             }
             return (
-              <div key={phase.index}>
+              <div key={`${run.taskId}:${phase.index}`}>
                 <PhaseHeader phase={phase} />
                 {rows.map((agent) => (
-                  <div key={agent.index} className="px-0.5 py-0.5">
+                  <div key={`${run.taskId}:${agent.index}`} className="px-0.5 py-0.5">
                     <AgentRowContent agent={agent} />
                   </div>
                 ))}
@@ -124,7 +130,7 @@ export function WorkflowRunCard(props: {
 }
 
 function RemoteRunBody({ run }: { run: WorkflowRun }): ReactElement {
-  const sessionUrl = run.handles?.sessionUrl;
+  const sessionUrl = safeWorkflowSessionUrl(run.handles?.sessionUrl);
   if (sessionUrl === undefined) {
     return (
       <p className="mt-1.5 px-0.5 text-[12px] text-muted-foreground/70 leading-5">
