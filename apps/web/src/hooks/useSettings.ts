@@ -39,6 +39,60 @@ let clientSettingsHydrated = false;
 let clientSettingsHydrationPromise: Promise<void> | null = null;
 let clientSettingsHydrationGeneration = 0;
 
+type SettingsSelector<S, T> = (settings: S) => T;
+
+const selectClientSettingsIdentity: SettingsSelector<ClientSettings, ClientSettings> = (settings) =>
+  settings;
+
+function isObjectLike(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+export function areSettingsSelectionsEqual<T>(left: T, right: T): boolean {
+  if (Object.is(left, right)) {
+    return true;
+  }
+  if (!isObjectLike(left) || !isObjectLike(right)) {
+    return false;
+  }
+
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+
+  for (const key of leftKeys) {
+    if (!Object.prototype.hasOwnProperty.call(right, key)) {
+      return false;
+    }
+    if (!Object.is(left[key], right[key])) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+export function createSettingsSelectorSnapshotReader<S, T>(
+  getSnapshot: () => S,
+  selector: SettingsSelector<S, T>,
+): () => T {
+  let hasPreviousSelection = false;
+  let previousSelection: T;
+
+  return () => {
+    const nextSelection = selector(getSnapshot());
+    if (hasPreviousSelection && areSettingsSelectionsEqual(previousSelection, nextSelection)) {
+      return previousSelection;
+    }
+
+    hasPreviousSelection = true;
+    previousSelection = nextSelection;
+    return nextSelection;
+  };
+}
+
 function emitClientSettingsChange() {
   for (const listener of clientSettingsListeners) {
     listener();
@@ -182,11 +236,24 @@ export function useClientSettingsHydrated(): boolean {
   );
 }
 
-function useClientSettingsValue(): ClientSettings {
+function useSelectedClientSettings<T>(selector: SettingsSelector<ClientSettings, T>): T {
+  const getSelectedSnapshot = useMemo(
+    () => createSettingsSelectorSnapshotReader(getClientSettingsSnapshot, selector),
+    [selector],
+  );
+  const getSelectedServerSnapshot = useMemo(
+    () =>
+      createSettingsSelectorSnapshotReader(
+        () => DEFAULT_CLIENT_SETTINGS,
+        selector,
+      ),
+    [selector],
+  );
+
   return useSyncExternalStore(
     subscribeClientSettings,
-    getClientSettingsSnapshot,
-    () => DEFAULT_CLIENT_SETTINGS,
+    getSelectedSnapshot,
+    getSelectedServerSnapshot,
   );
 }
 
@@ -201,21 +268,23 @@ function useMergedSettings<T>(
   serverSettings: ServerSettings,
   selector: ((settings: UnifiedSettings) => T) | undefined,
 ): T {
-  const clientSettings = useClientSettingsValue();
-
-  const merged = useMemo<UnifiedSettings>(
-    () => mergeEnvironmentSettings(serverSettings, clientSettings),
-    [clientSettings, serverSettings],
+  const selectMergedSettings = useCallback(
+    (clientSettings: ClientSettings) => {
+      const merged = mergeEnvironmentSettings(serverSettings, clientSettings);
+      return selector ? selector(merged) : (merged as T);
+    },
+    [selector, serverSettings],
   );
 
-  return useMemo(() => (selector ? selector(merged) : (merged as T)), [merged, selector]);
+  return useSelectedClientSettings(selectMergedSettings);
 }
 
 export function useClientSettings<T = ClientSettings>(
   selector?: (settings: ClientSettings) => T,
 ): T {
-  const settings = useClientSettingsValue();
-  return useMemo(() => (selector ? selector(settings) : (settings as T)), [selector, settings]);
+  return useSelectedClientSettings(
+    selector ?? (selectClientSettingsIdentity as unknown as SettingsSelector<ClientSettings, T>),
+  );
 }
 
 /** Read current settings for one environment, merged with client-local preferences. */
