@@ -255,7 +255,14 @@ export const make = Effect.gen(function* () {
     authorizationUrl.searchParams.set("state", state);
     authorizationUrl.searchParams.set("code_challenge", challenge);
     authorizationUrl.searchParams.set("code_challenge_method", "S256");
-    yield* Console.log(`Open this URL to authorize T3 Connect:\n${authorizationUrl.toString()}\n`);
+    yield* Console.log(
+      [
+        `Open this URL to authorize T3 Connect:\n${authorizationUrl.toString()}`,
+        "",
+        "Tip: on a headless or remote machine (SSH, VPS), run `t3 connect login --device` instead.",
+        "",
+      ].join("\n"),
+    );
     const code = yield* Deferred.await(callback).pipe(
       Effect.timeout(CLOUD_CLI_OAUTH_CALLBACK_TIMEOUT),
       Effect.catchTag("TimeoutError", (cause) =>
