@@ -16,18 +16,28 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
 ## Tracking checklist
 
-- [ ] 1. Honor `is_error` on Claude SDK results (runs marked completed on 401/529)
-- [ ] 2. Preserve real failure causes in projected errors (Claude adapter + ProviderFailure)
-- [ ] 3. Preserve cursor failure detail (requestId, durationMs, SDK `error_code`)
-- [ ] 4. Log failure/lifecycle frames in native provider logs
-- [ ] 5. Surface provider-process crashes / reconcile cancellations to the user
+> **Restructure note (2026-07-04):** the PR stack was reorganized to combine with
+> mwolson's parallel work. Shared continuation plumbing (C0, ea57e97d58) now lives
+> directly on `t3code/codex-turn-mapping`; Claude session-continuity fixes including
+> our #1/#15 (+ fixtures `claude_result_is_error`, `claude_idle_resume`,
+> `advance_clock` step) live in PR #3860; grok/ACP lifecycle (superset of plan #7)
+> lives in PR #3578; this branch (PR #3677) keeps the remaining audit fixes:
+> #2 #3 #4 #5 #9 #10 #11 #12. Our turn.wakeup implementation was dropped in favor
+> of the C0 continuation design.
+
+
+- [x] 1. Honor `is_error` on Claude SDK results — MOVED to PR #3860 (with fixture claude_result_is_error)
+- [x] 2. Preserve real failure causes in projected errors (Claude adapter + ProviderFailure)
+- [x] 3. Preserve cursor failure detail (requestId, durationMs; SDK exposes no error text yet)
+- [x] 4. Log failure/lifecycle frames in native provider logs (claude + cursor runners)
+- [x] 5. Surface provider-process crashes / reconcile cancellations to the user
 - [ ] 6. Ingest codex-native collab subagents
 - [ ] 7. Fix grok/ACP background subagent lifecycle + transcript projection
-- [x] 8. Invisible post-turn wakeup turns (fix already on this branch — verify against audit scenarios)
-- [ ] 9. Route shared-codex-session native logs to the correct thread's file
-- [ ] 10. Coalesce streaming-delta event persistence (~2800x amplification)
+- [x] 8. Invisible post-turn wakeup turns — SUPERSEDED by C0/#3860's provider-continuation design (our turn.wakeup implementation dropped in the restructure)
+- [x] 9. Route shared-codex-session native logs to the correct thread's file
+- [x] 10. Coalesce streaming-delta event persistence (~2800x amplification)
 - [x] 11. Assistant text segments merged without separator (fixed in worktree — add regression fixture)
-- [ ] 12. OpenCode `file_search` items drop error/output
+- [x] 12. OpenCode `file_search` items drop error/output
 - [ ] 13. Low-severity backlog (see section)
 - [ ] 14. Cursor SDK unhandled `write EPIPE` crashes the backend child (recurring, post-SDK-bump)
 
