@@ -125,6 +125,10 @@ export const ORCHESTRATOR_REPLAY_FIXTURES = [
         ),
         modelSelection: CLAUDE_MODEL_SELECTION,
         assertOutput: assertClaudeResultIsErrorOutput,
+      },
+    ],
+  },
+  {
     name: "claude_text_segments",
     buildInput: claudeTextSegmentsInput,
     providers: [

@@ -31,7 +31,7 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] 3. Preserve cursor failure detail (requestId, durationMs; SDK exposes no error text yet)
 - [x] 4. Log failure/lifecycle frames in native provider logs (claude + cursor runners)
 - [x] 5. Surface provider-process crashes / reconcile cancellations to the user
-- [ ] 6. Ingest codex-native collab subagents
+- [x] 6. Ingest codex-native collab subagents — already implemented upstream (verified 2026-07-04 on #3908's branch: registerSubagentActivity/registerSubagentThreads handle subAgentActivity + collabAgentToolCall, and the subagent_v2 fixtures replay the exact a5a643b2 loss scenario incl. post-settle child completion, asserting the child's "Hello." result)
 - [ ] 7. Fix grok/ACP background subagent lifecycle + transcript projection
 - [x] 8. Invisible post-turn wakeup turns — SUPERSEDED by C0/#3860's provider-continuation design (our turn.wakeup implementation dropped in the restructure)
 - [x] 9. Route shared-codex-session native logs to the correct thread's file
