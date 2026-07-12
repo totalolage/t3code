@@ -142,7 +142,10 @@ const highlightedCodeCache = new LRUCache<string>(
 const highlighterPromiseCache = new Map<string, Promise<DiffsHighlighter>>();
 // Languages Shiki has no grammar for (e.g. `sh` fences). Without this negative
 // cache every render of such a block retries the grammar load and throws again.
+// Fence labels are arbitrary text, so cap both caches: past the cap, unknown
+// languages just retry (the pre-cache behavior) instead of growing memory.
 const fallbackHighlightLanguages = new Set<string>();
+const MAX_FALLBACK_HIGHLIGHT_LANGUAGES = 100;
 
 function findTaskListMarkerOffset(markdown: string, listItemStart: number): number | null {
   const firstLineEnd = markdown.indexOf("\n", listItemStart);
@@ -276,6 +279,9 @@ function estimateHighlightedSize(html: string, code: string): number {
 }
 
 function getHighlighterPromise(language: string): Promise<DiffsHighlighter> {
+  if (fallbackHighlightLanguages.has(language)) {
+    return getHighlighterPromise("text");
+  }
   const cached = highlighterPromiseCache.get(language);
   if (cached) return cached;
 
@@ -284,15 +290,19 @@ function getHighlighterPromise(language: string): Promise<DiffsHighlighter> {
     langs: [language as SupportedLanguages],
     preferredHighlighter: "shiki-js",
   }).catch((err) => {
+    // Failed loads never stay in the promise cache: unsupported languages are
+    // remembered in the (bounded) negative cache instead, and transient
+    // failures for real languages stay retryable.
+    highlighterPromiseCache.delete(language);
     if (language === "text") {
       // "text" itself failed — Shiki cannot initialize at all, surface the error
-      highlighterPromiseCache.delete(language);
       throw err;
     }
-    // Language not supported by Shiki — remember that and fall back to "text",
-    // keeping the resolved promise cached so the grammar load isn't retried on
-    // every render of a block with that language.
-    fallbackHighlightLanguages.add(language);
+    // Language not supported by Shiki — remember that and fall back to "text"
+    // so blocks with that language stop retrying the grammar load per render.
+    if (fallbackHighlightLanguages.size < MAX_FALLBACK_HIGHLIGHT_LANGUAGES) {
+      fallbackHighlightLanguages.add(language);
+    }
     return getHighlighterPromise("text");
   });
   highlighterPromiseCache.set(language, promise);
@@ -694,13 +704,14 @@ function UncachedShikiCodeBlock({
     try {
       return highlighter.codeToHtml(code, { lang: effectiveLanguage, theme: themeName });
     } catch (error) {
-      // Log highlighting failures for debugging while falling back to plain text
+      // Log highlighting failures for debugging while falling back to plain
+      // text. Render-time throws can be content-specific, so they don't join
+      // the negative cache — one pathological block must not disable
+      // highlighting for the whole language. Retries are bounded by the memo.
       console.warn(
         `Code highlighting failed for language "${language}", falling back to plain text.`,
         error instanceof Error ? error.message : error,
       );
-      // Remember the failure so subsequent renders skip the throwing path.
-      fallbackHighlightLanguages.add(language);
       return highlighter.codeToHtml(code, { lang: "text", theme: themeName });
     }
   }, [code, highlighter, language, themeName]);

@@ -179,8 +179,9 @@ function derivePendingUserInputCountFromActivities(
 // Activity kinds that can change the shell summary's pending-approval or
 // pending-user-input counters. All other activity kinds (command output,
 // file edits, streaming progress, ...) leave the summary untouched, so they
-// must not trigger the history-wide summary rebuild.
-const SHELL_SUMMARY_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
+// must not trigger the history-wide summary rebuild — and the shell stream
+// (ws.ts toShellStreamEvent) skips re-broadcasting the thread row for them.
+export const SHELL_SUMMARY_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
   "approval.requested",
   "approval.resolved",
   "provider.approval.respond.failed",
@@ -758,6 +759,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.activity-appended": {
+          // Non-summary activities (command output, file edits, progress, ...)
+          // change no shell-visible field: the sidebar timestamp prefers
+          // latestUserMessageAt and status pills derive from session/approval
+          // state. Skip the row churn entirely so high-volume activity streams
+          // don't bump updatedAt (and fan out shell upserts) per event.
+          if (!SHELL_SUMMARY_ACTIVITY_KINDS.has(event.payload.activity.kind)) {
+            return;
+          }
           const existingRow = yield* projectionThreadRepository.getById({
             threadId: event.payload.threadId,
           });
@@ -768,9 +777,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...existingRow.value,
             updatedAt: event.occurredAt,
           });
-          if (SHELL_SUMMARY_ACTIVITY_KINDS.has(event.payload.activity.kind)) {
-            yield* refreshThreadShellSummary(event.payload.threadId);
-          }
+          yield* refreshThreadShellSummary(event.payload.threadId);
           return;
         }
 

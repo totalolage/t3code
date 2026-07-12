@@ -260,7 +260,9 @@ function SidebarHoverThreadPrewarmer() {
       onPrewarmTargetChange: setPrewarmThreadKey,
     });
     const onPointerOver = (event: globalThis.PointerEvent) => {
-      const target = event.target instanceof HTMLElement ? event.target : null;
+      // Element, not HTMLElement: row icons are SVG and must still resolve to
+      // their row's key instead of cancelling the hover.
+      const target = event.target instanceof Element ? event.target : null;
       controller.hover(
         target?.closest("[data-thread-prewarm-key]")?.getAttribute("data-thread-prewarm-key") ??
           null,

@@ -68,6 +68,7 @@ import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
+import { SHELL_SUMMARY_ACTIVITY_KINDS } from "./orchestration/Layers/ProjectionPipeline.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -674,6 +675,15 @@ const makeWsRpcLayer = (
               event.type === "thread.message-sent" &&
               event.payload.streaming &&
               event.payload.role === "assistant"
+            ) {
+              return Effect.succeed(Option.none());
+            }
+            // Same for high-volume activity kinds (command output, file edits,
+            // progress): the projection skips the thread row for them, so a
+            // shell broadcast would be a no-op re-send of unchanged data.
+            if (
+              event.type === "thread.activity-appended" &&
+              !SHELL_SUMMARY_ACTIVITY_KINDS.has(event.payload.activity.kind)
             ) {
               return Effect.succeed(Option.none());
             }
