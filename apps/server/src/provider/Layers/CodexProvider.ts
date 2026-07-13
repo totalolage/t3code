@@ -62,6 +62,9 @@ const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
 };
 
 const DEFAULT_SERVICE_TIER_ID = "default";
+function isGpt5Model(modelID: string): boolean {
+  return modelID.toLowerCase().startsWith("gpt-5");
+}
 
 function reasoningEffortLabel(reasoningEffort: string): string {
   return REASONING_EFFORT_LABELS[reasoningEffort] ?? reasoningEffort;
@@ -110,6 +113,7 @@ function codexAccountEmail(account: CodexSchema.V2GetAccountResponse["account"])
 export function mapCodexModelCapabilities(
   model: CodexSchema.V2ModelListResponse__Model,
 ): ModelCapabilities {
+  const hasGpt5Verbosity = isGpt5Model(model.id);
   const reasoningOptions = model.supportedReasoningEfforts.map(({ reasoningEffort }) =>
     reasoningEffort === model.defaultReasoningEffort
       ? {
@@ -137,6 +141,14 @@ export function mapCodexModelCapabilities(
     ? model.defaultServiceTier
     : null;
   const defaultServiceTier = catalogDefaultServiceTier ?? DEFAULT_SERVICE_TIER_ID;
+  const verbosityOptions = [
+    { id: "low", label: "Low" },
+    { id: "medium", label: "Medium" },
+    { id: "high", label: "High" },
+  ];
+  const defaultVerbosity = hasGpt5Verbosity
+    ? (verbosityOptions.find((option) => option.id === "medium")?.id ?? verbosityOptions[0]?.id)
+    : undefined;
   const optionDescriptors: ProviderOptionDescriptor[] = [];
 
   if (reasoningOptions.length > 0) {
@@ -167,6 +179,15 @@ export function mapCodexModelCapabilities(
         })),
       ],
       currentValue: defaultServiceTier,
+    });
+  }
+  if (hasGpt5Verbosity) {
+    optionDescriptors.push({
+      id: "verbosity",
+      label: "Verbosity",
+      type: "select",
+      options: verbosityOptions,
+      ...(defaultVerbosity ? { currentValue: defaultVerbosity } : {}),
     });
   }
 
