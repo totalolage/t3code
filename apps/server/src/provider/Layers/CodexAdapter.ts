@@ -55,7 +55,7 @@ import { ServerConfig } from "../../config.ts";
 import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
-  type CodexSessionRuntimeSendTurnInput,
+  isCodexVerbosity,
   makeCodexSessionRuntime,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
@@ -1545,27 +1545,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       input.modelSelection?.instanceId === boundInstanceId
         ? getCodexServiceTierOptionValue(input.modelSelection)
         : undefined;
-    const verbosity =
+    const selectedVerbosity =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "verbosity")
         : undefined;
-    const turnInput = {
-      ...(input.input !== undefined ? { input: input.input } : {}),
-      ...(input.modelSelection?.instanceId === boundInstanceId
-        ? { model: input.modelSelection.model }
-        : {}),
-      ...(reasoningEffort
-        ? {
-            effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
-          }
-        : {}),
-      ...(serviceTier ? { serviceTier } : {}),
-      ...(verbosity ? { verbosity } : {}),
-      ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
-      ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
-    } as CodexSessionRuntimeSendTurnInput & { readonly verbosity?: string };
+    const verbosity = isCodexVerbosity(selectedVerbosity) ? selectedVerbosity : undefined;
     return yield* session.runtime
-      .sendTurn(turnInput)
+      .sendTurn({
+        ...(input.input !== undefined ? { input: input.input } : {}),
+        ...(input.modelSelection?.instanceId === boundInstanceId
+          ? { model: input.modelSelection.model }
+          : {}),
+        ...(reasoningEffort ? { effort: reasoningEffort } : {}),
+        ...(serviceTier ? { serviceTier } : {}),
+        ...(verbosity ? { verbosity } : {}),
+        ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+        ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
+      })
       .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
   });
 
