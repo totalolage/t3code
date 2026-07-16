@@ -88,14 +88,21 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
 });
 
 describe("ServerSettings worktree defaults", () => {
-  it("defaults start-from-origin off for legacy configs", () => {
-    expect(decodeServerSettings({}).newWorktreesStartFromOrigin).toBe(false);
+  it("uses backward-compatible defaults for legacy configs", () => {
+    const settings = decodeServerSettings({});
+
+    expect(settings.newWorktreeBaseBranch).toBe("current");
+    expect(settings.newWorktreesStartFromOrigin).toBe(false);
   });
 
-  it("accepts start-from-origin updates", () => {
-    expect(
-      decodeServerSettingsPatch({ newWorktreesStartFromOrigin: true }).newWorktreesStartFromOrigin,
-    ).toBe(true);
+  it("accepts worktree default updates", () => {
+    const patch = decodeServerSettingsPatch({
+      newWorktreeBaseBranch: "default",
+      newWorktreesStartFromOrigin: true,
+    });
+
+    expect(patch.newWorktreeBaseBranch).toBe("default");
+    expect(patch.newWorktreesStartFromOrigin).toBe(true);
   });
 });
 

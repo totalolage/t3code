@@ -5230,6 +5230,7 @@ function ChatViewContent(props: ChatViewProps) {
                       threadId={activeThread.id}
                       {...(routeKind === "draft" && draftId ? { draftId } : {})}
                       onEnvModeChange={onEnvModeChange}
+                      newWorktreeBaseBranch={settings.newWorktreeBaseBranch}
                       startFromOrigin={startFromOrigin}
                       onStartFromOriginChange={onStartFromOriginChange}
                       {...(canOverrideServerThreadEnvMode
