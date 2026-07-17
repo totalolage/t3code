@@ -34,6 +34,11 @@ const DEVELOPMENT_RETRYABLE_LOAD_ERROR_CODES = new Set([
   -106, // ERR_INTERNET_DISCONNECTED
   -118, // ERR_CONNECTION_TIMED_OUT
 ]);
+const earlyStartupSplashes = new WeakSet<Electron.BrowserWindow>();
+
+export function trackEarlyStartupSplash(window: Electron.BrowserWindow): void {
+  earlyStartupSplashes.add(window);
+}
 
 type WindowTitleBarOptions = Pick<
   Electron.BrowserWindowConstructorOptions,
@@ -62,8 +67,7 @@ export class DesktopWindow extends Context.Service<
     readonly revealOrCreateMain: Effect.Effect<Electron.BrowserWindow, DesktopWindowError>;
     readonly activate: Effect.Effect<void, DesktopWindowError>;
     readonly createMainIfBackendReady: Effect.Effect<void, DesktopWindowError>;
-    // Show a lightweight "Connecting to WSL" splash window immediately (wsl-only
-    // mode), before the WSL backend that serves the renderer is ready. It is
+    // Show a lightweight startup splash while the backend gets ready. It is
     // dismissed automatically once the real main window reveals.
     readonly showConnectingSplash: Effect.Effect<void>;
     // Marks the primary backend as ready so `createMainIfBackendReady` and the
@@ -142,15 +146,14 @@ export function resolveInitialMainWindowBounds(
   return DesktopAppSettings.DEFAULT_MAIN_WINDOW_SIZE;
 }
 
-// A self-contained "Connecting to WSL" splash, shown immediately in wsl-only
-// mode while the WSL backend (which serves the renderer) cold-boots. Inlined as
-// a data URL so it needs no bundled asset and no backend — pure CSS, no JS.
+// A self-contained startup splash. Inlined as a data URL so it needs no bundled
+// asset and no backend: pure CSS, no JS.
 function buildConnectingSplashDataUrl(shouldUseDarkColors: boolean): string {
   const background = getInitialWindowBackgroundColor(shouldUseDarkColors);
   const label = shouldUseDarkColors ? "#9ca3af" : "#6b7280";
   const accent = shouldUseDarkColors ? "#f8fafc" : "#1f2937";
   const track = shouldUseDarkColors ? "rgba(248,250,252,0.18)" : "rgba(31,41,55,0.18)";
-  const html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><style>html,body{margin:0;height:100%}body{background:${background};color:${label};font-family:system-ui,-apple-system,'Segoe UI',sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;-webkit-user-select:none;user-select:none;-webkit-app-region:drag}.spinner{width:26px;height:26px;border:3px solid ${track};border-top-color:${accent};border-radius:50%;animation:spin .8s linear infinite}.label{font-size:13px}@keyframes spin{to{transform:rotate(360deg)}}</style></head><body><div class="spinner"></div><div class="label">Connecting to WSL…</div></body></html>`;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><style>html,body{margin:0;height:100%}body{background:${background};color:${label};font-family:system-ui,-apple-system,'Segoe UI',sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;-webkit-user-select:none;user-select:none;-webkit-app-region:drag}.spinner{width:26px;height:26px;border:3px solid ${track};border-top-color:${accent};border-radius:50%;animation:spin .8s linear infinite}.label{font-size:13px}@keyframes spin{to{transform:rotate(360deg)}}</style></head><body><div class="spinner"></div><div class="label">Starting T3 Code…</div></body></html>`;
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
@@ -252,8 +255,8 @@ export const make = Effect.gen(function* () {
   // createMainIfBackendReady, which gates the post-readiness window
   // open in development and the macOS "activate without windows" path.
   const backendReadyRef = yield* Ref.make(false);
-  // The transient "Connecting to WSL" splash window, tracked separately so it
-  // is never mistaken for the real main window.
+  // The transient startup splash window, tracked separately so it is never
+  // mistaken for the real main window.
   const splashWindowRef = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
   const context = yield* Effect.context<DesktopWindowRuntimeServices>();
   const runFork = Effect.runForkWith(context);
@@ -268,7 +271,7 @@ export const make = Effect.gen(function* () {
   });
 
   // currentMainOrFirst / focusedMainOrFirst fall back to "any first window",
-  // which during WSL-only boot is the connecting splash. The splash is never
+  // which during backend boot may be the connecting splash. The splash is never
   // registered via setMain, so it must be treated as "no real main window" --
   // otherwise ensureMain/activate/dispatchMenuAction latch onto it and never
   // open (or retry) the real main. That is the failure the pool's swallowed
@@ -277,7 +280,9 @@ export const make = Effect.gen(function* () {
   const withoutSplash = (window: Option.Option<Electron.BrowserWindow>) =>
     Ref.get(splashWindowRef).pipe(
       Effect.map((splash) =>
-        Option.isSome(splash) && Option.isSome(window) && window.value === splash.value
+        Option.isSome(window) &&
+        ((Option.isSome(splash) && window.value === splash.value) ||
+          earlyStartupSplashes.has(window.value))
           ? Option.none<Electron.BrowserWindow>()
           : window,
       ),
@@ -625,10 +630,10 @@ export const make = Effect.gen(function* () {
       );
     });
 
-    const revealSubscribers: RevealSubscription[] = [(fire) => window.once("ready-to-show", fire)];
-    if (environment.platform === "linux") {
-      revealSubscribers.push((fire) => window.webContents.once("did-finish-load", fire));
-    }
+    const revealSubscribers: RevealSubscription[] = [
+      (fire) => window.once("ready-to-show", fire),
+      (fire) => window.webContents.once("did-finish-load", fire),
+    ];
     bindFirstRevealTrigger(revealSubscribers, () => {
       // Reveal the real window, then close the connecting splash (if any) so the
       // two don't overlap and there's no blank gap between them.
@@ -712,11 +717,17 @@ export const make = Effect.gen(function* () {
     splash.once("closed", () => {
       void runPromise(Ref.set(splashWindowRef, Option.none()));
     });
-    splash.once("ready-to-show", () => {
-      if (!splash.isDestroyed()) {
-        splash.show();
-      }
-    });
+    bindFirstRevealTrigger(
+      [
+        (fire) => splash.once("ready-to-show", fire),
+        (fire) => splash.webContents.once("did-finish-load", fire),
+      ],
+      () => {
+        if (!splash.isDestroyed()) {
+          splash.show();
+        }
+      },
+    );
     void splash.loadURL(buildConnectingSplashDataUrl(shouldUseDarkColors));
     yield* logWindowInfo("connecting splash shown");
   }).pipe(
