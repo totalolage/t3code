@@ -24,8 +24,10 @@ import {
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  buildToolSummariesPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
+  normalizeGeneratedToolSummaries,
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
@@ -85,7 +87,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle",
+      | "generateThreadTitle"
+      | "generateToolSummaries",
     value: unknown,
     detail: string,
   ): Effect.Effect<string, TextGenerationError> =>
@@ -115,7 +118,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateToolSummaries";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -355,10 +359,29 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       };
     });
 
+  const generateToolSummaries: TextGeneration.TextGeneration["Service"]["generateToolSummaries"] =
+    Effect.fn("ClaudeTextGeneration.generateToolSummaries")(function* (input) {
+      const { prompt, outputSchema } = buildToolSummariesPrompt({ tools: input.tools });
+      const generated = yield* runClaudeJson({
+        operation: "generateToolSummaries",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+      return {
+        summaries: normalizeGeneratedToolSummaries(
+          new Set(input.tools.map((tool) => tool.activityId)),
+          generated.summaries,
+        ),
+      };
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateToolSummaries,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

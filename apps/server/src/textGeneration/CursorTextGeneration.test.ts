@@ -236,6 +236,47 @@ it.layer(CursorTextGenerationTestLayer)("CursorTextGeneration", (it) => {
     ),
   );
 
+  it.effect("generates normalized tool summaries through the selected Cursor model", () => {
+    const requestLogDir = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3code-cursor-summary-log-"),
+    );
+    const requestLogPath = NodePath.join(requestLogDir, "requests.ndjson");
+    return withFakeAcpAgent(
+      {
+        T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+        T3_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({
+          summaries: [
+            { activityId: "activity-1", summary: "  Updated   reconnect tests. " },
+            { activityId: "activity-2", summary: "x".repeat(100) },
+          ],
+        }),
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const generated = yield* textGeneration.generateToolSummaries({
+            cwd: process.cwd(),
+            tools: [
+              { activityId: "activity-1", itemType: "file_change", currentSummary: "Tool call" },
+              {
+                activityId: "activity-2",
+                itemType: "command_execution",
+                currentSummary: "Ran command",
+              },
+            ],
+            modelSelection: createModelSelection(ProviderInstanceId.make("cursor"), "gpt-5.4"),
+          });
+          expect(generated.summaries).toEqual([
+            { activityId: "activity-1", summary: "Updated reconnect tests" },
+            { activityId: "activity-2", summary: "x".repeat(80) },
+          ]);
+          const requests = yield* waitForFileContent(requestLogPath);
+          expect(requests).toContain("gpt-5.4");
+          expect(requests).toContain("activity-1");
+          expect(requests).toContain("summaries");
+        }),
+    );
+  });
+
   it.effect("closes the ACP child process after text generation completes", () => {
     const exitLogDir = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "t3code-cursor-text-exit-log-"),

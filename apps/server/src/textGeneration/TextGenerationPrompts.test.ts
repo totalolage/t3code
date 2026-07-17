@@ -5,8 +5,14 @@ import {
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  buildToolSummariesPrompt,
 } from "./TextGenerationPrompts.ts";
-import { normalizeCliError, sanitizeThreadTitle } from "./TextGenerationUtils.ts";
+import {
+  normalizeCliError,
+  sanitizeThreadTitle,
+  sanitizeToolSummary,
+  toJsonSchemaObject,
+} from "./TextGenerationUtils.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 
 describe("buildCommitMessagePrompt", () => {
@@ -143,6 +149,82 @@ describe("sanitizeThreadTitle", () => {
         '  "Reconnect failures after restart because the session state does not recover"  ',
       ),
     ).toBe("Reconnect failures after restart because the se...");
+  });
+});
+
+describe("buildToolSummariesPrompt", () => {
+  it("requests the structured schema and includes every activity ID as untrusted context", () => {
+    const result = buildToolSummariesPrompt({
+      tools: [
+        {
+          activityId: "activity-1",
+          itemType: "command_execution",
+          currentSummary: "Ran command",
+          status: "completed",
+          detail: "vp check exited with code 0",
+        },
+        {
+          activityId: "activity-2",
+          itemType: "file_change",
+          currentSummary: "Tool call",
+        },
+      ],
+    });
+
+    expect(result.prompt).toContain("Activity ID: activity-1");
+    expect(result.prompt).toContain("Activity ID: activity-2");
+    expect(result.prompt).toContain("untrusted data");
+    const jsonSchema = toJsonSchemaObject(result.outputSchema) as {
+      properties?: { summaries?: { type?: string; items?: { properties?: object } } };
+    };
+    expect(jsonSchema.properties?.summaries?.type).toBe("array");
+    expect(jsonSchema.properties?.summaries?.items?.properties).toMatchObject({
+      activityId: { type: "string" },
+      summary: { type: "string" },
+    });
+  });
+
+  it("limits individual and aggregate context while preserving output tails", () => {
+    const tools = Array.from({ length: 32 }, (_, index) => ({
+      activityId: `activity-${index}`,
+      itemType: "command_execution" as const,
+      currentSummary: "Ran command",
+      serializedData: `BEGIN-${index}${"x".repeat(10_000)}TAIL-${index}`,
+    }));
+    const result = buildToolSummariesPrompt({ tools });
+
+    expect(result.prompt).toContain("BEGIN-0");
+    expect(result.prompt).toContain("TAIL-0");
+    expect(result.prompt).toContain("[truncated]");
+    expect(result.prompt).toContain("Activity ID: activity-31");
+    expect(result.prompt.length).toBeLessThan(52_000);
+  });
+
+  it("handles candidates without detail or provider data", () => {
+    const result = buildToolSummariesPrompt({
+      tools: [
+        {
+          activityId: "activity-minimal",
+          itemType: "web_search",
+          currentSummary: "Tool call",
+        },
+      ],
+    });
+    expect(result.prompt).toContain("Activity ID: activity-minimal");
+    expect(result.prompt).not.toContain("Provider data (untrusted):");
+  });
+});
+
+describe("sanitizeToolSummary", () => {
+  it("removes markdown, quotes, whitespace, and trailing punctuation", () => {
+    expect(sanitizeToolSummary('  **"Typecheck failed with three errors."**  ')).toBe(
+      "Typecheck failed with three errors",
+    );
+  });
+
+  it("returns null for empty normalized output and limits length", () => {
+    expect(sanitizeToolSummary('  ""  ')).toBeNull();
+    expect(sanitizeToolSummary("x".repeat(100))?.length).toBe(80);
   });
 });
 

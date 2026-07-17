@@ -19,6 +19,7 @@ const runtimeMock = {
     startCalls: [] as string[],
     promptUrls: [] as string[],
     authHeaders: [] as Array<string | null>,
+    promptRequests: [] as Array<unknown>,
     closeCalls: [] as string[],
     sessionCreateError: undefined as unknown,
     sessionResult: undefined as { data?: { id: string } } | undefined,
@@ -31,6 +32,7 @@ const runtimeMock = {
     this.state.startCalls.length = 0;
     this.state.promptUrls.length = 0;
     this.state.authHeaders.length = 0;
+    this.state.promptRequests.length = 0;
     this.state.closeCalls.length = 0;
     this.state.sessionCreateError = undefined;
     this.state.sessionResult = undefined;
@@ -73,7 +75,8 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntime.OpenCodeRuntimeShape = {
           }
           return runtimeMock.state.sessionResult ?? { data: { id: `${baseUrl}/session` } };
         },
-        prompt: async () => {
+        prompt: async (request: unknown) => {
+          runtimeMock.state.promptRequests.push(request);
           runtimeMock.state.promptUrls.push(baseUrl);
           runtimeMock.state.authHeaders.push(
             serverPassword ? `Basic ${btoa(`opencode:${serverPassword}`)}` : null,
@@ -209,6 +212,52 @@ it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
         expect(runtimeMock.state.closeCalls).toEqual(["http://127.0.0.1:4301"]);
       }),
     ).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("generates normalized tool summaries with the selected OpenCode model", () =>
+    withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
+      Effect.gen(function* () {
+        runtimeMock.state.promptResult = {
+          data: {
+            parts: [
+              {
+                type: "text",
+                // @effect-diagnostics-next-line preferSchemaOverJson:off
+                text: JSON.stringify({
+                  summaries: [
+                    { activityId: "activity-1", summary: "  Updated   reconnect tests. " },
+                    { activityId: "activity-2", summary: "x".repeat(100) },
+                  ],
+                }),
+              },
+            ],
+          },
+        };
+        const generated = yield* textGeneration.generateToolSummaries({
+          cwd: process.cwd(),
+          tools: [
+            { activityId: "activity-1", itemType: "file_change", currentSummary: "Tool call" },
+            {
+              activityId: "activity-2",
+              itemType: "command_execution",
+              currentSummary: "Ran command",
+            },
+          ],
+          modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+        });
+        expect(generated.summaries).toEqual([
+          { activityId: "activity-1", summary: "Updated reconnect tests" },
+          { activityId: "activity-2", summary: "x".repeat(80) },
+        ]);
+        expect(runtimeMock.state.promptRequests).toHaveLength(1);
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        expect(JSON.stringify(runtimeMock.state.promptRequests[0])).toContain('"modelID":"gpt-5"');
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        expect(JSON.stringify(runtimeMock.state.promptRequests[0])).toContain("activity-1");
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        expect(JSON.stringify(runtimeMock.state.promptRequests[0])).toContain("summaries");
+      }),
+    ),
   );
 
   it.effect("starts a new server after the warm server idles out", () =>

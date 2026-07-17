@@ -284,6 +284,9 @@ describe("ProviderCommandReactor", () => {
         }),
       ),
     );
+    const generateToolSummaries = vi.fn<TextGenerationShape["generateToolSummaries"]>((_) =>
+      Effect.succeed({ summaries: [] }),
+    );
     const providerSnapshots = [
       {
         instanceId: modelSelection.instanceId,
@@ -366,6 +369,7 @@ describe("ProviderCommandReactor", () => {
         Layer.mock(TextGeneration, {
           generateBranchName,
           generateThreadTitle,
+          generateToolSummaries,
         }),
       ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
@@ -421,6 +425,7 @@ describe("ProviderCommandReactor", () => {
       refreshStatus,
       generateBranchName,
       generateThreadTitle,
+      generateToolSummaries,
       runtimeSessions,
       stateDir,
       drain,

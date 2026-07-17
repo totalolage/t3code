@@ -19,6 +19,16 @@ export function limitSection(value: string, maxChars: number): string {
   return `${truncated}\n\n[truncated]`;
 }
 
+/** Preserve both ends of tool output, where setup and final errors commonly live. */
+export function limitToolContext(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const marker = "\n\n[truncated]\n\n";
+  const available = Math.max(0, maxChars - marker.length);
+  const headLength = Math.ceil(available / 2);
+  const tailLength = Math.floor(available / 2);
+  return `${value.slice(0, headLength)}${marker}${value.slice(value.length - tailLength)}`;
+}
+
 /** Normalise a raw commit subject to imperative-mood, ≤72 chars, no trailing period. */
 export function sanitizeCommitSubject(raw: string): string {
   const singleLine = raw.trim().split(/\r?\n/g)[0]?.trim() ?? "";
@@ -61,6 +71,41 @@ export function sanitizeThreadTitle(raw: string): string {
   }
 
   return `${normalized.slice(0, 47).trimEnd()}...`;
+}
+
+/** Normalize a generated tool summary without inventing fallback text. */
+export function sanitizeToolSummary(raw: string): string | null {
+  let normalized = raw.trim().replace(/\s+/g, " ");
+  normalized = normalized
+    .replace(/^(?:[>#*_~`-]+\s*)+/, "")
+    .replace(/(?:\s*[*_~`]+)+$/, "")
+    .trim()
+    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, "")
+    .trim()
+    .replace(/[.!?,;:]+$/g, "")
+    .trim();
+
+  if (normalized.length === 0) return null;
+  return normalized.length <= 80 ? normalized : normalized.slice(0, 80).trimEnd();
+}
+
+/** Keep only one valid generated summary for each supplied activity ID. */
+export function normalizeGeneratedToolSummaries(
+  knownActivityIds: ReadonlySet<string>,
+  generated: ReadonlyArray<{ readonly activityId: string; readonly summary: string }>,
+): ReadonlyArray<{ activityId: string; summary: string }> {
+  const counts = new Map<string, number>();
+  for (const entry of generated) {
+    counts.set(entry.activityId, (counts.get(entry.activityId) ?? 0) + 1);
+  }
+
+  const summaries: Array<{ activityId: string; summary: string }> = [];
+  for (const entry of generated) {
+    if (!knownActivityIds.has(entry.activityId) || counts.get(entry.activityId) !== 1) continue;
+    const summary = sanitizeToolSummary(entry.summary);
+    if (summary) summaries.push({ activityId: entry.activityId, summary });
+  }
+  return summaries;
 }
 
 /** CLI name to human-readable label, e.g. "codex" → "Codex CLI (`codex`)" */

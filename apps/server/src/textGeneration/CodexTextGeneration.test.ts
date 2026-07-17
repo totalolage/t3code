@@ -37,6 +37,8 @@ function makeFakeCodexBinary(
     forbidReasoningEffort?: boolean;
     stdinMustContain?: string;
     stdinMustNotContain?: string;
+    requireModel?: string;
+    schemaMustContain?: string;
   },
 ) {
   return Effect.gen(function* () {
@@ -54,6 +56,8 @@ function makeFakeCodexBinary(
         'seen_image="0"',
         'seen_service_tier=""',
         'seen_reasoning_effort=""',
+        'seen_model=""',
+        'schema_path=""',
         "while [ $# -gt 0 ]; do",
         '  if [ "$1" = "--image" ]; then',
         "    shift",
@@ -75,6 +79,18 @@ function makeFakeCodexBinary(
         '        seen_reasoning_effort="$1"',
         "        ;;",
         "    esac",
+        "    shift",
+        "    continue",
+        "  fi",
+        '  if [ "$1" = "--model" ]; then',
+        "    shift",
+        '    seen_model="$1"',
+        "    shift",
+        "    continue",
+        "  fi",
+        '  if [ "$1" = "--output-schema" ]; then',
+        "    shift",
+        '    schema_path="$1"',
         "    shift",
         "    continue",
         "  fi",
@@ -137,6 +153,24 @@ function makeFakeCodexBinary(
               "fi",
             ]
           : []),
+        ...(input.requireModel !== undefined
+          ? [
+              // @effect-diagnostics-next-line preferSchemaOverJson:off
+              `if [ "$seen_model" != ${JSON.stringify(input.requireModel)} ]; then`,
+              '  printf "%s\\n" "unexpected model: $seen_model" >&2',
+              "  exit 8",
+              "fi",
+            ]
+          : []),
+        ...(input.schemaMustContain !== undefined
+          ? [
+              // @effect-diagnostics-next-line preferSchemaOverJson:off
+              `if ! grep -F -- ${JSON.stringify(input.schemaMustContain)} "$schema_path" >/dev/null; then`,
+              '  printf "%s\\n" "schema missing expected content" >&2',
+              "  exit 9",
+              "fi",
+            ]
+          : []),
         ...(input.stderr !== undefined
           ? [
               // @effect-diagnostics-next-line preferSchemaOverJson:off
@@ -168,6 +202,8 @@ function withFakeCodexEnv<A, E, R>(
     forbidReasoningEffort?: boolean;
     stdinMustContain?: string;
     stdinMustNotContain?: string;
+    requireModel?: string;
+    schemaMustContain?: string;
   },
   effectFn: (textGeneration: TextGeneration.TextGeneration["Service"]) => Effect.Effect<A, E, R>,
 ) {
@@ -350,6 +386,54 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
 
           expect(generated.title).toBe("Investigate websocket reconnect regressions aft...");
         }),
+    ),
+  );
+
+  it.effect("generates normalized summaries with the selected model and summary schema", () =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({
+          summaries: [
+            { activityId: "activity-1", summary: "  Inspected   provider events. " },
+            { activityId: "activity-2", summary: "x".repeat(100) },
+          ],
+        }),
+        requireModel: "gpt-5.4-mini",
+        schemaMustContain: '"summaries"',
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const generated = yield* textGeneration.generateToolSummaries({
+            cwd: process.cwd(),
+            tools: [
+              { activityId: "activity-1", itemType: "web_search", currentSummary: "Tool call" },
+              { activityId: "activity-2", itemType: "file_change", currentSummary: "Tool call" },
+            ],
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          });
+          expect(generated.summaries).toEqual([
+            { activityId: "activity-1", summary: "Inspected provider events" },
+            { activityId: "activity-2", summary: "x".repeat(80) },
+          ]);
+        }),
+    ),
+  );
+
+  it.effect("rejects malformed tool-summary structured output", () =>
+    withFakeCodexEnv({ output: JSON.stringify({ summaries: "invalid" }) }, (textGeneration) =>
+      textGeneration
+        .generateToolSummaries({
+          cwd: process.cwd(),
+          tools: [],
+          modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+        })
+        .pipe(
+          Effect.result,
+          Effect.tap((result) => {
+            expect(Result.isFailure(result)).toBe(true);
+            return Effect.void;
+          }),
+        ),
     ),
   );
 
