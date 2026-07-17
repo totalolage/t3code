@@ -9,6 +9,7 @@ import {
   resolveDraftEnvModeAfterBranchChange,
   resolveEffectiveEnvMode,
   resolveEnvModeLabel,
+  resolveInitialWorktreeBaseBranch,
   resolveBranchToolbarValue,
   resolveLockedWorkspaceLabel,
   shouldIncludeBranchPickerItem,
@@ -81,6 +82,57 @@ describe("resolveBranchToolbarValue", () => {
         currentGitBranch: "main",
       }),
     ).toBe("main");
+  });
+});
+
+describe("resolveInitialWorktreeBaseBranch", () => {
+  const refs = [
+    { name: "feature/current", isDefault: false, isRemote: false },
+    { name: "main", isDefault: true, isRemote: false },
+  ];
+
+  it("uses the checked-out branch when configured", () => {
+    expect(
+      resolveInitialWorktreeBaseBranch({
+        preference: "current",
+        currentGitBranch: "feature/current",
+        refs,
+        refsLoaded: true,
+      }),
+    ).toBe("feature/current");
+  });
+
+  it("uses the repository default branch when configured", () => {
+    expect(
+      resolveInitialWorktreeBaseBranch({
+        preference: "default",
+        currentGitBranch: "feature/current",
+        refs,
+        refsLoaded: true,
+      }),
+    ).toBe("main");
+  });
+
+  it("waits for refs before falling back to the checked-out branch", () => {
+    expect(
+      resolveInitialWorktreeBaseBranch({
+        preference: "default",
+        currentGitBranch: "feature/current",
+        refs: [],
+        refsLoaded: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("falls back to the checked-out branch when no default ref is available", () => {
+    expect(
+      resolveInitialWorktreeBaseBranch({
+        preference: "default",
+        currentGitBranch: "feature/current",
+        refs: [refs[0]!],
+        refsLoaded: true,
+      }),
+    ).toBe("feature/current");
   });
 });
 

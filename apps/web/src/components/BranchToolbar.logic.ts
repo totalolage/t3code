@@ -1,4 +1,4 @@
-import type { EnvironmentId, VcsRef, ProjectId } from "@t3tools/contracts";
+import type { EnvironmentId, NewWorktreeBaseBranch, VcsRef, ProjectId } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 export {
   dedupeRemoteBranchesWithLocalMatches,
@@ -95,6 +95,25 @@ export function resolveBranchToolbarValue(input: {
     return activeThreadBranch ?? currentGitBranch;
   }
   return currentGitBranch ?? activeThreadBranch;
+}
+
+export function resolveInitialWorktreeBaseBranch(input: {
+  preference: NewWorktreeBaseBranch;
+  currentGitBranch: string | null;
+  refs: ReadonlyArray<Pick<VcsRef, "name" | "isDefault" | "isRemote">>;
+  refsLoaded: boolean;
+}): string | null {
+  if (input.preference === "current") {
+    return input.currentGitBranch;
+  }
+  if (!input.refsLoaded) {
+    return null;
+  }
+
+  const defaultRef =
+    input.refs.find((ref) => ref.isDefault && !ref.isRemote) ??
+    input.refs.find((ref) => ref.isDefault);
+  return defaultRef?.name ?? input.currentGitBranch;
 }
 
 export function resolveBranchSelectionTarget(input: {
