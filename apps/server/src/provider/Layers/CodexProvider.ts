@@ -143,7 +143,7 @@ export function mapCodexModelCapabilities(
   const defaultServiceTier = catalogDefaultServiceTier ?? DEFAULT_SERVICE_TIER_ID;
   const verbosityOptions = [
     { id: "low", label: "Low" },
-    { id: "medium", label: "Medium" },
+    { id: "medium", label: "Medium", isDefault: true },
     { id: "high", label: "High" },
   ];
   const defaultVerbosity = hasGpt5Verbosity
