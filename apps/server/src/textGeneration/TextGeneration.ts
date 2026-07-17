@@ -1,7 +1,12 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import type { ChatAttachment, ModelSelection, ProviderInstanceId } from "@t3tools/contracts";
+import type {
+  ChatAttachment,
+  ModelSelection,
+  ProviderInstanceId,
+  ToolLifecycleItemType,
+} from "@t3tools/contracts";
 import { TextGenerationError } from "@t3tools/contracts";
 
 import * as ProviderInstanceRegistry from "../provider/Services/ProviderInstanceRegistry.ts";
@@ -67,6 +72,28 @@ export interface ThreadTitleGenerationResult {
   title: string;
 }
 
+export interface ToolSummaryCandidate {
+  activityId: string;
+  itemType: ToolLifecycleItemType;
+  currentSummary: string;
+  status?: string;
+  detail?: string;
+  serializedData?: string;
+}
+
+export interface ToolSummaryGenerationInput {
+  cwd: string;
+  tools: ReadonlyArray<ToolSummaryCandidate>;
+  modelSelection: ModelSelection;
+}
+
+export interface ToolSummaryGenerationResult {
+  summaries: ReadonlyArray<{
+    activityId: string;
+    summary: string;
+  }>;
+}
+
 export interface TextGenerationService {
   generateCommitMessage(
     input: CommitMessageGenerationInput,
@@ -74,6 +101,7 @@ export interface TextGenerationService {
   generatePrContent(input: PrContentGenerationInput): Promise<PrContentGenerationResult>;
   generateBranchName(input: BranchNameGenerationInput): Promise<BranchNameGenerationResult>;
   generateThreadTitle(input: ThreadTitleGenerationInput): Promise<ThreadTitleGenerationResult>;
+  generateToolSummaries(input: ToolSummaryGenerationInput): Promise<ToolSummaryGenerationResult>;
 }
 
 /**
@@ -109,6 +137,13 @@ export class TextGeneration extends Context.Service<
     readonly generateThreadTitle: (
       input: ThreadTitleGenerationInput,
     ) => Effect.Effect<ThreadTitleGenerationResult, TextGenerationError>;
+
+    /**
+     * Generate concise descriptions for completed tool activities.
+     */
+    readonly generateToolSummaries: (
+      input: ToolSummaryGenerationInput,
+    ) => Effect.Effect<ToolSummaryGenerationResult, TextGenerationError>;
   }
 >()("t3/textGeneration/TextGeneration") {}
 
@@ -119,7 +154,8 @@ type TextGenerationOp =
   | "generateCommitMessage"
   | "generatePrContent"
   | "generateBranchName"
-  | "generateThreadTitle";
+  | "generateThreadTitle"
+  | "generateToolSummaries";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -158,6 +194,10 @@ export const makeTextGenerationFromRegistry = (
     generateThreadTitle: (input) =>
       resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(
         Effect.flatMap((textGeneration) => textGeneration.generateThreadTitle(input)),
+      ),
+    generateToolSummaries: (input) =>
+      resolveInstance(registry, "generateToolSummaries", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) => textGeneration.generateToolSummaries(input)),
       ),
   });
 

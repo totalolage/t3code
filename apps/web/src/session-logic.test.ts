@@ -1395,6 +1395,62 @@ describe("deriveWorkLogEntries", () => {
     });
   });
 
+  it("collapses top-level tool IDs into the generated completion while preserving details", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "generated-tool-update",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.updated",
+        summary: "Tool updated",
+        payload: {
+          itemType: "command_execution",
+          toolCallId: "provider-item-1",
+          status: "inProgress",
+          detail: "vp run typecheck",
+          data: { command: "vp run typecheck" },
+        },
+      }),
+      makeActivity({
+        id: "generated-tool-completed",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "tool.completed",
+        summary: "Typecheck failed with three errors",
+        payload: {
+          itemType: "command_execution",
+          toolCallId: "provider-item-1",
+          status: "failed",
+          detail: "vp run typecheck\nProcess exited with code 1",
+          originalSummary: "Ran command",
+          summarySource: "text-generation",
+        },
+      }),
+      makeActivity({
+        id: "unmatched-tool-update",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        kind: "tool.updated",
+        summary: "Tool updated",
+        payload: {
+          itemType: "web_search",
+          toolCallId: "provider-item-2",
+          status: "inProgress",
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities);
+    expect(entries).toHaveLength(2);
+    expect(entries.find((entry) => entry.id === "generated-tool-completed")).toMatchObject({
+      label: "Typecheck failed with three errors",
+      command: "vp run typecheck\nProcess exited with code 1",
+      detail: "vp run typecheck\nProcess exited with code 1",
+      toolLifecycleStatus: "failed",
+    });
+    expect(entries.find((entry) => entry.id === "unmatched-tool-update")).toMatchObject({
+      label: "Tool updated",
+      toolLifecycleStatus: "inProgress",
+    });
+  });
+
   it("keeps separate tool entries when an identical call starts after the prior one completed", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

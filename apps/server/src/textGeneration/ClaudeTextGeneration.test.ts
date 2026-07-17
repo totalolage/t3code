@@ -286,6 +286,41 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
     ),
   );
 
+  it.effect("generates normalized tool summaries with the selected Claude model", () =>
+    withFakeClaudeEnv(
+      {
+        output: JSON.stringify({
+          structured_output: {
+            summaries: [
+              { activityId: "activity-1", summary: "  Inspected   provider events. " },
+              { activityId: "activity-2", summary: "x".repeat(100) },
+            ],
+          },
+        }),
+        argsMustContain: "claude-sonnet-4-5",
+        stdinMustContain: "activity-1",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const generated = yield* textGeneration.generateToolSummaries({
+            cwd: process.cwd(),
+            tools: [
+              { activityId: "activity-1", itemType: "web_search", currentSummary: "Tool call" },
+              { activityId: "activity-2", itemType: "file_change", currentSummary: "Tool call" },
+            ],
+            modelSelection: createModelSelection(
+              ProviderInstanceId.make("claudeAgent"),
+              "claude-sonnet-4-5",
+            ),
+          });
+          expect(generated.summaries).toEqual([
+            { activityId: "activity-1", summary: "Inspected provider events" },
+            { activityId: "activity-2", summary: "x".repeat(80) },
+          ]);
+        }),
+    ),
+  );
+
   it.effect("runs Claude text generation with the configured CLAUDE_CONFIG_DIR", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;
