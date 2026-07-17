@@ -53,6 +53,48 @@ import * as DesktopWindow from "./window/DesktopWindow.ts";
 import * as DesktopWslBackend from "./wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
 
+const showEarlyStartupSplash = (): void => {
+  void Electron.app
+    .whenReady()
+    .then(() => {
+      if (Electron.BrowserWindow.getAllWindows().length > 0) return;
+
+      const splash = new Electron.BrowserWindow({
+        width: 360,
+        height: 220,
+        show: false,
+        frame: false,
+        resizable: false,
+        backgroundColor: "#0a0a0a",
+        webPreferences: {
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+        },
+      });
+      DesktopWindow.trackEarlyStartupSplash(splash);
+      const reveal = () => {
+        if (!splash.isDestroyed()) splash.show();
+      };
+      const closeOnRealWindow = (_event: unknown, window: Electron.BrowserWindow) => {
+        if (window === splash) return;
+        Electron.app.removeListener("browser-window-created", closeOnRealWindow);
+        if (!splash.isDestroyed()) splash.close();
+      };
+
+      Electron.app.on("browser-window-created", closeOnRealWindow);
+      splash.once("ready-to-show", reveal);
+      splash.webContents.once("did-finish-load", reveal);
+      splash.once("closed", () => {
+        Electron.app.removeListener("browser-window-created", closeOnRealWindow);
+      });
+      void splash.loadURL(
+        `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><style>html,body{margin:0;height:100%}body{background:#0a0a0a;color:#9ca3af;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;gap:18px;flex-direction:column;-webkit-user-select:none;user-select:none;-webkit-app-region:drag}.spinner{width:26px;height:26px;border:3px solid rgba(248,250,252,.18);border-top-color:#f8fafc;border-radius:50%;animation:spin .8s linear infinite}.label{font-size:13px}@keyframes spin{to{transform:rotate(360deg)}}</style></head><body><div class="spinner"></div><div class="label">Starting T3 Code...</div></body></html>`)}`,
+      );
+    })
+    .catch(() => undefined);
+};
+
 const desktopEnvironmentLayer = Layer.unwrap(
   Effect.gen(function* () {
     const metadata = yield* Effect.service(ElectronApp.ElectronApp).pipe(
@@ -197,4 +239,5 @@ const desktopRuntimeLayer = desktopClerkLayer.pipe(
   ),
 );
 
+showEarlyStartupSplash();
 DesktopApp.program.pipe(Effect.provide(desktopRuntimeLayer), NodeRuntime.runMain);
