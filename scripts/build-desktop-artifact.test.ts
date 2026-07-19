@@ -13,6 +13,8 @@ import {
   createStageWorkspaceConfig,
   createStagePatchedDependencies,
   createBuildConfig,
+  DESKTOP_BUILD_ARGS,
+  DESKTOP_BUILD_COMMAND,
   DESKTOP_ASAR_UNPACK,
   InvalidMacPasskeyRpDomainError,
   InvalidMacPasskeyPublishableKeyError,
@@ -82,6 +84,11 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it("resolves the dedicated nightly updater channel from nightly versions", () => {
     assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
+  });
+
+  it("disables the wrapper-task cache when building desktop artifacts", () => {
+    assert.deepStrictEqual(DESKTOP_BUILD_ARGS, ["run", "--no-cache", "build:desktop"]);
+    assert.equal(DESKTOP_BUILD_COMMAND, "vp run --no-cache build:desktop");
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
