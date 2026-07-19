@@ -169,12 +169,9 @@ export function requireThreadAbsent(input: {
     return Effect.void;
   }
   // Bootstrap rollback soft-deletes a newly created thread while the client
-  // retains its draft identity. Permit only that same logical create to retry.
-  if (
-    input.command.type === "thread.create" &&
-    existingThread.deletedAt !== null &&
-    existingThread.createdAt === input.command.createdAt
-  ) {
+  // retains its preallocated id. A retry may carry refreshed draft metadata,
+  // so the tombstone itself is the stable signal that this id can be reused.
+  if (input.command.type === "thread.create" && existingThread.deletedAt !== null) {
     return Effect.void;
   }
   return Effect.fail(

@@ -420,7 +420,7 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
-  it("recreates a rolled-back thread with its original creation identity", async () => {
+  it("recreates a rolled-back thread when retry metadata changed", async () => {
     const system = await createOrchestrationSystem();
     const { engine } = system;
     const createdAt = now();
@@ -466,12 +466,11 @@ describe("OrchestrationEngine", () => {
         threadId,
       }),
     );
+    const retriedCreatedAt = "2026-01-03T00:00:00.000Z";
+    await system.run(createThread("cmd-bootstrap-retry-thread-recreate", retriedCreatedAt));
     await expect(
-      system.run(
-        createThread("cmd-bootstrap-retry-thread-new-identity", "2026-01-03T00:00:00.000Z"),
-      ),
+      system.run(createThread("cmd-bootstrap-retry-thread-active-duplicate")),
     ).rejects.toThrow("already exists");
-    await system.run(createThread("cmd-bootstrap-retry-thread-recreate"));
 
     const events = await system.run(
       Stream.runCollect(engine.readEvents(0)).pipe(
@@ -488,7 +487,7 @@ describe("OrchestrationEngine", () => {
       (thread) => thread.id === threadId,
     );
     expect(recreatedThread?.deletedAt).toBeNull();
-    expect(recreatedThread?.createdAt).toBe(createdAt);
+    expect(recreatedThread?.createdAt).toBe(retriedCreatedAt);
     await system.dispose();
   });
 
