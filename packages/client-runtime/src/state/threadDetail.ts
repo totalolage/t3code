@@ -35,11 +35,14 @@ export function mergeEnvironmentThread(
   detail: EnvironmentThread | null,
   shell: EnvironmentThreadShell | null,
 ): EnvironmentThread | null {
+  // The shell is authoritative for thread existence. A detail cache can
+  // outlive a deletion, so never let detail-only state resurrect a thread
+  // that the current shell no longer contains.
   if (detail === null || shell === null) {
-    return detail;
+    return null;
   }
   if (detail.environmentId !== shell.environmentId || detail.id !== shell.id) {
-    return detail;
+    return null;
   }
 
   return {
