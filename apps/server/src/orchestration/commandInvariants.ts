@@ -156,7 +156,17 @@ export function requireThreadAbsent(input: {
   readonly command: OrchestrationCommand;
   readonly threadId: ThreadId;
 }): Effect.Effect<void, OrchestrationCommandInvariantError> {
-  if (!findThreadById(input.readModel, input.threadId)) {
+  const existingThread = findThreadById(input.readModel, input.threadId);
+  if (!existingThread) {
+    return Effect.void;
+  }
+  // Bootstrap rollback soft-deletes a newly created thread while the client
+  // retains its draft identity. Permit only that same logical create to retry.
+  if (
+    input.command.type === "thread.create" &&
+    existingThread.deletedAt !== null &&
+    existingThread.createdAt === input.command.createdAt
+  ) {
     return Effect.void;
   }
   return Effect.fail(
