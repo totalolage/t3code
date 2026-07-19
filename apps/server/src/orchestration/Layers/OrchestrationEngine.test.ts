@@ -416,6 +416,78 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
+  it("recreates a rolled-back thread with its original creation identity", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const createdAt = now();
+    const threadId = ThreadId.make("thread-bootstrap-retry");
+
+    await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-bootstrap-retry-project-create"),
+        projectId: asProjectId("project-bootstrap-retry"),
+        title: "Bootstrap Retry Project",
+        workspaceRoot: "/tmp/project-bootstrap-retry",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      }),
+    );
+    const createThread = (commandId: string, threadCreatedAt = createdAt) =>
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(commandId),
+        threadId,
+        projectId: asProjectId("project-bootstrap-retry"),
+        title: "Bootstrap Retry Thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: "main",
+        worktreePath: null,
+        createdAt: threadCreatedAt,
+      });
+
+    await system.run(createThread("cmd-bootstrap-retry-thread-create"));
+    await system.run(
+      engine.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("cmd-bootstrap-retry-thread-delete"),
+        threadId,
+      }),
+    );
+    await expect(
+      system.run(
+        createThread("cmd-bootstrap-retry-thread-new-identity", "2026-01-03T00:00:00.000Z"),
+      ),
+    ).rejects.toThrow("already exists");
+    await system.run(createThread("cmd-bootstrap-retry-thread-recreate"));
+
+    const events = await system.run(
+      Stream.runCollect(engine.readEvents(0)).pipe(
+        Effect.map((chunk): OrchestrationEvent[] => Array.from(chunk)),
+      ),
+    );
+    expect(events.map((event) => event.type)).toEqual([
+      "project.created",
+      "thread.created",
+      "thread.deleted",
+      "thread.created",
+    ]);
+    const recreatedThread = (await system.readModel()).threads.find(
+      (thread) => thread.id === threadId,
+    );
+    expect(recreatedThread?.deletedAt).toBeNull();
+    expect(recreatedThread?.createdAt).toBe(createdAt);
+    await system.dispose();
+  });
+
   it("streams persisted domain events in order", async () => {
     const system = await createOrchestrationSystem();
     const { engine } = system;
