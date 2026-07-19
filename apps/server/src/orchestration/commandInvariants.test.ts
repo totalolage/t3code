@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it } from "@effect/vitest";
 import {
   MessageId,
   CommandId,
@@ -130,30 +130,51 @@ describe("commandInvariants", () => {
     ).toEqual([ThreadId.make("thread-2")]);
   });
 
-  it("requires existing thread", async () => {
-    const thread = await Effect.runPromise(
-      requireThread({
+  it.effect("requires existing thread", () =>
+    Effect.gen(function* () {
+      const thread = yield* requireThread({
         readModel,
         command: messageSendCommand,
         threadId: ThreadId.make("thread-1"),
-      }),
-    );
-    expect(thread.id).toBe(ThreadId.make("thread-1"));
+      });
+      expect(thread.id).toBe(ThreadId.make("thread-1"));
 
-    await expect(
-      Effect.runPromise(
+      const error = yield* Effect.flip(
         requireThread({
           readModel,
           command: messageSendCommand,
           threadId: ThreadId.make("missing"),
         }),
-      ),
-    ).rejects.toThrow("does not exist");
-  });
+      );
+      expect(error.message).toContain("does not exist");
+    }),
+  );
 
-  it("requires missing thread for create flows", async () => {
-    await Effect.runPromise(
-      requireThreadAbsent({
+  it.effect("rejects commands against deleted threads", () =>
+    Effect.gen(function* () {
+      const deletedReadModel: OrchestrationReadModel = {
+        ...readModel,
+        threads: readModel.threads.map((thread) =>
+          thread.id === ThreadId.make("thread-1")
+            ? { ...thread, deletedAt: "2026-01-02T00:00:00.000Z" }
+            : thread,
+        ),
+      };
+
+      const error = yield* Effect.flip(
+        requireThread({
+          readModel: deletedReadModel,
+          command: messageSendCommand,
+          threadId: ThreadId.make("thread-1"),
+        }),
+      );
+      expect(error.message).toContain("is deleted and cannot handle command 'thread.turn.start'");
+    }),
+  );
+
+  it.effect("requires missing thread for create flows", () =>
+    Effect.gen(function* () {
+      yield* requireThreadAbsent({
         readModel,
         command: {
           type: "thread.create",
@@ -172,11 +193,9 @@ describe("commandInvariants", () => {
           createdAt: now,
         },
         threadId: ThreadId.make("thread-3"),
-      }),
-    );
+      });
 
-    await expect(
-      Effect.runPromise(
+      const error = yield* Effect.flip(
         requireThreadAbsent({
           readModel,
           command: {
@@ -197,27 +216,27 @@ describe("commandInvariants", () => {
           },
           threadId: ThreadId.make("thread-1"),
         }),
-      ),
-    ).rejects.toThrow("already exists");
-  });
+      );
+      expect(error.message).toContain("already exists");
+    }),
+  );
 
-  it("requires non-negative integers", async () => {
-    await Effect.runPromise(
-      requireNonNegativeInteger({
+  it.effect("requires non-negative integers", () =>
+    Effect.gen(function* () {
+      yield* requireNonNegativeInteger({
         commandType: "thread.checkpoint.revert",
         field: "turnCount",
         value: 0,
-      }),
-    );
+      });
 
-    await expect(
-      Effect.runPromise(
+      const error = yield* Effect.flip(
         requireNonNegativeInteger({
           commandType: "thread.checkpoint.revert",
           field: "turnCount",
           value: -1,
         }),
-      ),
-    ).rejects.toThrow("greater than or equal to 0");
-  });
+      );
+      expect(error.message).toContain("greater than or equal to 0");
+    }),
+  );
 });

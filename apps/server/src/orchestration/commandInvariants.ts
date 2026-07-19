@@ -102,15 +102,23 @@ export function requireThread(input: {
   readonly threadId: ThreadId;
 }): Effect.Effect<OrchestrationThread, OrchestrationCommandInvariantError> {
   const thread = findThreadById(input.readModel, input.threadId);
-  if (thread) {
-    return Effect.succeed(thread);
+  if (!thread) {
+    return Effect.fail(
+      invariantError(
+        input.command.type,
+        `Thread '${input.threadId}' does not exist for command '${input.command.type}'.`,
+      ),
+    );
   }
-  return Effect.fail(
-    invariantError(
-      input.command.type,
-      `Thread '${input.threadId}' does not exist for command '${input.command.type}'.`,
-    ),
-  );
+  if (thread.deletedAt !== null) {
+    return Effect.fail(
+      invariantError(
+        input.command.type,
+        `Thread '${input.threadId}' is deleted and cannot handle command '${input.command.type}'.`,
+      ),
+    );
+  }
+  return Effect.succeed(thread);
 }
 
 export function requireThreadArchived(input: {
