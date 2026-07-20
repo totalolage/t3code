@@ -1303,9 +1303,14 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
   updateChannel: "latest" | "nightly",
 ) {
   const env = yield* Config.all({
+    disableUpdateConfig: Config.boolean("T3CODE_DESKTOP_DISABLE_UPDATE_CONFIG").pipe(
+      Config.withDefault(false),
+    ),
     updateRepository: Config.string("T3CODE_DESKTOP_UPDATE_REPOSITORY").pipe(Config.option),
     githubRepository: Config.string("GITHUB_REPOSITORY").pipe(Config.option),
   });
+  if (env.disableUpdateConfig) return undefined;
+
   const rawRepo = (
     Option.getOrUndefined(env.updateRepository)?.trim() ||
     Option.getOrUndefined(env.githubRepository)?.trim() ||
@@ -1386,8 +1391,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       }
     | undefined,
 ) {
+  const appId = yield* Config.string("T3CODE_DESKTOP_APP_ID").pipe(
+    Config.option,
+    Effect.map((configured) => Option.getOrElse(configured, () => DESKTOP_APP_ID).trim()),
+    Effect.map((configured) => configured || DESKTOP_APP_ID),
+  );
   const buildConfig: Record<string, unknown> = {
-    appId: DESKTOP_APP_ID,
+    appId,
     productName: resolveDesktopProductName(version),
     artifactName: "T3-Code-${version}-${arch}.${ext}",
     directories: {

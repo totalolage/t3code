@@ -1,0 +1,289 @@
+name: f8y Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  metadata_and_checks:
+    name: Metadata and focused checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      tag: ${{ steps.metadata.outputs.tag }}
+      release_name: ${{ steps.metadata.outputs.name }}
+      short_sha: ${{ steps.metadata.outputs.short_sha }}
+      android_version_code: ${{ steps.metadata.outputs.android_version_code }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - id: metadata
+        name: Resolve f8y release metadata
+        run: |
+          release_date="$(date -u +%Y%m%d)"
+          node scripts/resolve-f8y-release.ts \
+            --date "$release_date" \
+            --run-number "${{ github.run_number }}" \
+            --sha "${{ github.sha }}" \
+            --github-output
+
+      - name: Check Android signing secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.F8Y_ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.F8Y_ANDROID_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.F8Y_ANDROID_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$KEYSTORE_BASE64" || -z "$STORE_PASSWORD" || -z "$KEY_PASSWORD" ]]; then
+            echo "Missing one or more f8y Android signing secrets." >&2
+            exit 1
+          fi
+
+      - name: Run focused release tests
+        run: |
+          vp test run \
+            scripts/resolve-f8y-release.test.ts \
+            scripts/build-desktop-artifact.test.ts \
+            scripts/f8y-release-workflow.test.ts \
+            apps/mobile/f8yBuildConfig.test.ts \
+            apps/mobile/plugins/withAndroidF8yReleaseSigning.test.ts
+
+      - name: Typecheck release packages
+        run: |
+          vp run --filter @t3tools/scripts typecheck
+          vp run --filter @t3tools/desktop typecheck
+          vp run --filter @t3tools/mobile typecheck
+
+  build_macos_arm64:
+    name: Build macOS arm64 DMG
+    needs: metadata_and_checks
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Ensure Electron runtime is installed
+        run: vp run --filter @t3tools/desktop ensure:electron
+
+      - name: Align package versions
+        run: node scripts/update-release-package-versions.ts "${{ needs.metadata_and_checks.outputs.version }}"
+
+      - name: Build unsigned DMG
+        env:
+          T3CODE_DESKTOP_APP_ID: com.f8y.t3code
+          T3CODE_DESKTOP_DISABLE_UPDATE_CONFIG: "true"
+        run: |
+          vp run dist:desktop:artifact \
+            --platform mac \
+            --target dmg \
+            --arch arm64 \
+            --build-version "${{ needs.metadata_and_checks.outputs.version }}" \
+            --verbose
+
+      - name: Collect DMG
+        run: |
+          shopt -s nullglob
+          dmgs=(release/*.dmg)
+          if (( ${#dmgs[@]} != 1 )); then
+            echo "Expected exactly one DMG, found ${#dmgs[@]}." >&2
+            exit 1
+          fi
+          mkdir -p release-publish
+          cp "${dmgs[0]}" release-publish/
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v7
+        with:
+          name: f8y-release-macos-arm64
+          path: release-publish/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  build_android_apk:
+    name: Build Android APK
+    needs: metadata_and_checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      APP_VARIANT: f8y
+      NODE_OPTIONS: --max-old-space-size=8192
+      T3CODE_RELEASE_VERSION: ${{ needs.metadata_and_checks.outputs.version }}
+      T3CODE_ANDROID_VERSION_CODE: ${{ needs.metadata_and_checks.outputs.android_version_code }}
+      T3CODE_ANDROID_STORE_PASSWORD: ${{ secrets.F8Y_ANDROID_STORE_PASSWORD }}
+      T3CODE_ANDROID_KEY_PASSWORD: ${{ secrets.F8Y_ANDROID_KEY_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Restore f8y signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.F8Y_ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          umask 077
+          keystore_path="$RUNNER_TEMP/t3code-f8y.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          echo "T3CODE_ANDROID_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
+
+      - name: Build signed release APK
+        run: vp run dist:mobile:apk:f8y
+
+      - name: Collect and verify APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          apks=(apps/mobile/android/app/build/outputs/apk/release/*.apk)
+          if (( ${#apks[@]} != 1 )); then
+            echo "Expected exactly one release APK, found ${#apks[@]}." >&2
+            exit 1
+          fi
+
+          build_tools_version="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort -V | tail -n 1)"
+          build_tools="$ANDROID_HOME/build-tools/$build_tools_version"
+          "$build_tools/apksigner" verify --verbose --print-certs "${apks[0]}"
+
+          badging="$("$build_tools/aapt" dump badging "${apks[0]}" | head -n 1)"
+          expected_package="name='com.f8y.t3code'"
+          expected_version_code="versionCode='${{ needs.metadata_and_checks.outputs.android_version_code }}'"
+          expected_version_name="versionName='${{ needs.metadata_and_checks.outputs.version }}'"
+          for expected in "$expected_package" "$expected_version_code" "$expected_version_name"; do
+            if [[ "$badging" != *"$expected"* ]]; then
+              echo "APK metadata did not contain $expected: $badging" >&2
+              exit 1
+            fi
+          done
+
+          current_certificate="$("$build_tools/apksigner" verify --print-certs "${apks[0]}" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
+          if [[ -z "$current_certificate" ]]; then
+            echo "Could not resolve the APK signing certificate digest." >&2
+            exit 1
+          fi
+
+          previous_apk_url="$(
+            gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '[.[] | select(.prerelease and (.tag_name | contains("-f8y."))) | .assets[] | select(.name | test("^T3-Code-.*-android\\.apk$")) | .browser_download_url][0] // empty'
+          )"
+          if [[ -n "$previous_apk_url" ]]; then
+            previous_apk="$RUNNER_TEMP/previous-f8y.apk"
+            curl --fail --location --silent --show-error "$previous_apk_url" --output "$previous_apk"
+            previous_certificate="$("$build_tools/apksigner" verify --print-certs "$previous_apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
+            if [[ "$previous_certificate" != "$current_certificate" ]]; then
+              echo "Signing certificate differs from the previous f8y APK." >&2
+              exit 1
+            fi
+
+            previous_badging="$("$build_tools/aapt" dump badging "$previous_apk" | head -n 1)"
+            previous_version_code="$(sed -n "s/.*versionCode='\\([^']*\\)'.*/\\1/p" <<< "$previous_badging")"
+            current_version_code="${{ needs.metadata_and_checks.outputs.android_version_code }}"
+            if [[ ! "$previous_version_code" =~ ^[0-9]+$ ]] || (( previous_version_code >= current_version_code )); then
+              echo "The new versionCode ($current_version_code) must exceed the previous f8y versionCode ($previous_version_code)." >&2
+              exit 1
+            fi
+          fi
+
+          mkdir -p release-publish
+          cp "${apks[0]}" "release-publish/T3-Code-${{ needs.metadata_and_checks.outputs.version }}-android.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: f8y-release-android
+          path: release-publish/T3-Code-*-android.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove signing keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/t3code-f8y.jks" "$RUNNER_TEMP/previous-f8y.apk"
+
+  publish_release:
+    name: Publish GitHub prerelease
+    needs: [metadata_and_checks, build_macos_arm64, build_android_apk]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: f8y-release-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Validate release assets
+        run: |
+          shopt -s nullglob
+          dmgs=(release-assets/*.dmg)
+          apks=(release-assets/*.apk)
+          if (( ${#dmgs[@]} != 1 || ${#apks[@]} != 1 )); then
+            echo "Expected one DMG and one APK; found ${#dmgs[@]} DMG(s) and ${#apks[@]} APK(s)." >&2
+            exit 1
+          fi
+          if [[ "${apks[0]##*/}" != T3-Code-*-android.apk ]]; then
+            echo "APK filename is incompatible with the Obtainium filter." >&2
+            exit 1
+          fi
+
+      - name: Publish f8y release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.metadata_and_checks.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ needs.metadata_and_checks.outputs.release_name }}
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          body: |
+            Automated f8y build of `${{ github.sha }}` from `main`.
+
+            - macOS: unsigned arm64 DMG; install updates manually and use right-click → Open on first launch.
+            - Android: signed APK for installation on your devices and guided updates through Obtainium.
+
+            Obtainium source: `https://github.com/totalolage/t3code`
+            APK filter: `^T3-Code-.*-android\.apk$`
+            Enable prereleases and disable “Verify Latest Tag” in Obtainium.
+          files: |
+            release-assets/*.dmg
+            release-assets/*.apk
