@@ -35,6 +35,8 @@ it("uses a stable f8y keystore and validates Android package metadata", () => {
     "versionCode='${{ needs.metadata_and_checks.outputs.android_version_code }}'",
   );
   assert.include(workflow, 'apksigner" verify --verbose --print-certs');
+  assert.include(workflow, "s/^.*certificate SHA-256 digest: //p");
+  assert.notInclude(workflow, "s/^Signer #1 certificate SHA-256 digest: //p");
   assert.include(workflow, "Signing certificate differs from the previous f8y APK.");
   assert.include(workflow, "previous_version_code >= current_version_code");
 });
