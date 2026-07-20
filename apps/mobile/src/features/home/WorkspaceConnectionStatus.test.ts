@@ -49,6 +49,7 @@ describe("workspace connection status", () => {
           connectionState: "reconnecting",
           connectionError: null,
           connectionErrorTraceId: null,
+          queryParameters: [],
         },
       ],
     });

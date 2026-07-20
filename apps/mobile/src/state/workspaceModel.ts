@@ -2,6 +2,7 @@ import { type EnvironmentShellSummary } from "@t3tools/client-runtime/state/shel
 import { type NetworkStatus } from "@t3tools/client-runtime/connection";
 import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId, ServerConfig } from "@t3tools/contracts";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 
 import type { EnvironmentPresentation } from "./environments";
 
@@ -13,6 +14,7 @@ export interface WorkspaceEnvironment {
   readonly connectionState: EnvironmentConnectionPhase;
   readonly connectionError: string | null;
   readonly connectionErrorTraceId: string | null;
+  readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
 }
 
 export interface WorkspaceState {
@@ -41,6 +43,7 @@ export function projectWorkspaceEnvironment(
     connectionState: environment.connection.phase,
     connectionError: environment.connection.error,
     connectionErrorTraceId: environment.connection.traceId,
+    queryParameters: environment.queryParameters,
   };
 }
 

@@ -21,6 +21,10 @@ describe("migrateLegacyConnectionCatalog", () => {
               wsBaseUrl: "wss://local.example.test",
               bearerToken: "bearer-token",
               authenticationMethod: "bearer",
+              queryParameters: [
+                { key: "proxy", value: "one" },
+                { key: "proxy", value: "two" },
+              ],
             },
             {
               environmentId: relayEnvironmentId,
@@ -45,6 +49,12 @@ describe("migrateLegacyConnectionCatalog", () => {
         catalog.targets.find((target) => target.environmentId === relayEnvironmentId)?._tag,
       ).toBe("RelayConnectionTarget");
       expect(catalog.profiles).toHaveLength(1);
+      expect(catalog.profiles[0]).toMatchObject({
+        queryParameters: [
+          { key: "proxy", value: "one" },
+          { key: "proxy", value: "two" },
+        ],
+      });
       expect(catalog.credentials).toHaveLength(1);
       expect(catalog.credentials[0]?.credential).toMatchObject({
         _tag: "BearerConnectionCredential",

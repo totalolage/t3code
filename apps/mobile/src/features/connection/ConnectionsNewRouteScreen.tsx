@@ -14,6 +14,12 @@ import { ConnectionSheetButton } from "./ConnectionSheetButton";
 import { extractPairingUrlFromQrPayload } from "./pairing";
 import { useRemoteConnections } from "../../state/use-remote-environment-registry";
 import { buildPairingUrl, parsePairingUrl } from "./pairing";
+import {
+  ConnectionQueryParametersEditor,
+  makeQueryParameterRows,
+  queryParametersFromRows,
+  type QueryParameterRow,
+} from "./ConnectionQueryParametersEditor";
 
 type ConnectionsNewRouteParams = {
   readonly mode?: string;
@@ -33,6 +39,10 @@ export function ConnectionsNewRouteScreen({
   const insets = useSafeAreaInsets();
   const [hostInput, setHostInput] = useState("");
   const [codeInput, setCodeInput] = useState("");
+  const [queryParameterRows, setQueryParameterRows] = useState<ReadonlyArray<QueryParameterRow>>(
+    [],
+  );
+  const [queryParametersOpen, setQueryParametersOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showScanner, setShowScanner] = useState(params.mode === "scan_qr");
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
@@ -43,9 +53,11 @@ export function ConnectionsNewRouteScreen({
   const connectDisabled = isSubmitting || hostInput.trim().length === 0;
 
   useEffect(() => {
-    const { host, code } = parsePairingUrl(connectionPairingUrl);
+    const { host, code, queryParameters } = parsePairingUrl(connectionPairingUrl);
     setHostInput(host);
     setCodeInput(code);
+    setQueryParameterRows(makeQueryParameterRows(queryParameters));
+    setQueryParametersOpen(queryParameters.length > 0);
   }, [connectionPairingUrl]);
 
   useEffect(() => {
@@ -55,6 +67,16 @@ export function ConnectionsNewRouteScreen({
   }, [pairingConnectionError]);
 
   const handleHostChange = useCallback((value: string) => {
+    const parsed = parsePairingUrl(value);
+    if (parsed.code !== "" || parsed.queryParameters.length > 0) {
+      setHostInput(parsed.host);
+      if (parsed.code !== "") {
+        setCodeInput(parsed.code);
+      }
+      setQueryParameterRows(makeQueryParameterRows(parsed.queryParameters));
+      setQueryParametersOpen(parsed.queryParameters.length > 0);
+      return;
+    }
     setHostInput(value);
   }, []);
 
@@ -97,9 +119,11 @@ export function ConnectionsNewRouteScreen({
 
       try {
         const pairingUrl = extractPairingUrlFromQrPayload(data);
-        const { host, code } = parsePairingUrl(pairingUrl);
+        const { host, code, queryParameters } = parsePairingUrl(pairingUrl);
         setHostInput(host);
         setCodeInput(code);
+        setQueryParameterRows(makeQueryParameterRows(queryParameters));
+        setQueryParametersOpen(queryParameters.length > 0);
         onChangeConnectionPairingUrl(pairingUrl);
         setShowScanner(false);
       } catch (error) {
@@ -119,7 +143,21 @@ export function ConnectionsNewRouteScreen({
   const handleSubmit = useCallback(async () => {
     setIsSubmitting(true);
 
-    const pairingUrl = buildPairingUrl(hostInput, codeInput);
+    let pairingUrl: string;
+    try {
+      pairingUrl = buildPairingUrl(
+        hostInput,
+        codeInput,
+        queryParametersFromRows(queryParameterRows),
+      );
+    } catch (error) {
+      setIsSubmitting(false);
+      Alert.alert(
+        "Invalid query parameters",
+        error instanceof Error ? error.message : "The query parameters are invalid.",
+      );
+      return;
+    }
     onChangeConnectionPairingUrl(pairingUrl);
     const result = await onConnectPress(pairingUrl);
     if (AsyncResult.isSuccess(result)) {
@@ -131,7 +169,14 @@ export function ConnectionsNewRouteScreen({
     } else {
       setIsSubmitting(false);
     }
-  }, [codeInput, hostInput, onChangeConnectionPairingUrl, onConnectPress, navigation]);
+  }, [
+    codeInput,
+    hostInput,
+    navigation,
+    onChangeConnectionPairingUrl,
+    onConnectPress,
+    queryParameterRows,
+  ]);
 
   return (
     <View collapsable={false} className="flex-1 bg-sheet">
@@ -243,6 +288,14 @@ export function ConnectionsNewRouteScreen({
                   className="rounded-[14px] border border-input-border bg-input px-4 py-3.5 text-base text-foreground"
                 />
               </View>
+
+              <ConnectionQueryParametersEditor
+                rows={queryParameterRows}
+                open={queryParametersOpen}
+                disabled={isSubmitting}
+                onOpenChange={setQueryParametersOpen}
+                onRowsChange={setQueryParameterRows}
+              />
 
               {pairingConnectionError ? <ErrorBanner message={pairingConnectionError} /> : null}
 

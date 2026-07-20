@@ -36,6 +36,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
+import { parseRemotePairingUrlFields } from "@t3tools/shared/remote";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
@@ -92,8 +93,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { Textarea } from "../ui/textarea";
-import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "../../pairingUrl";
-import { readHostedPairingRequest } from "../../hostedPairing";
+import { setPairingTokenOnUrl } from "../../pairingUrl";
 import {
   createServerPairingCredential,
   revokeOtherServerClientSessions,
@@ -135,6 +135,12 @@ import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import { ServerUpdateAction } from "../ServerUpdateAction";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
 import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "./itemRows";
+import {
+  ConnectionQueryParametersEditor,
+  makeQueryParameterRows,
+  queryParametersFromRows,
+  type QueryParameterRow,
+} from "./ConnectionQueryParametersEditor";
 
 const DEFAULT_TAILSCALE_SERVE_PORT = 443;
 const EMPTY_ADVERTISED_ENDPOINTS: ReadonlyArray<AdvertisedEndpoint> = [];
@@ -313,44 +319,15 @@ function parseManualDesktopSshTarget(input: {
   };
 }
 
-function parsePairingUrlFields(
-  input: string,
-): { readonly host: string; readonly pairingCode: string } | null {
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-
-  try {
-    const urlLikeInput =
-      /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//u.test(trimmed) || trimmed.startsWith("//")
-        ? trimmed
-        : `https://${trimmed}`;
-    const url = new URL(urlLikeInput, window.location.origin);
-    const hostedPairingRequest = readHostedPairingRequest(url);
-    if (hostedPairingRequest) {
-      return {
-        host: hostedPairingRequest.host,
-        pairingCode: hostedPairingRequest.token,
-      };
-    }
-
-    const pairingCode = getPairingTokenFromUrl(url);
-    if (!pairingCode) return null;
-    return {
-      host: url.origin,
-      pairingCode,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function parseRemotePairingFields(input: { readonly host: string; readonly pairingCode: string }): {
+function parseRemotePairingFields(input: {
   readonly host: string;
   readonly pairingCode: string;
+  readonly queryParameterRows: ReadonlyArray<QueryParameterRow>;
+}): {
+  readonly host: string;
+  readonly pairingCode: string;
+  readonly queryParameters: ReturnType<typeof queryParametersFromRows>;
 } {
-  const parsedPairingUrl = parsePairingUrlFields(input.host);
-  if (parsedPairingUrl) return parsedPairingUrl;
-
   const host = input.host.trim();
   const pairingCode = input.pairingCode.trim();
   if (!host) {
@@ -359,7 +336,11 @@ function parseRemotePairingFields(input: { readonly host: string; readonly pairi
   if (!pairingCode) {
     throw new Error("Enter a pairing code.");
   }
-  return { host, pairingCode };
+  return {
+    host,
+    pairingCode,
+    queryParameters: queryParametersFromRows(input.queryParameterRows),
+  };
 }
 
 function formatDesktopSshConnectionError(error: unknown): string {
@@ -1792,6 +1773,10 @@ export function ConnectionsSettings() {
   const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "ssh">("remote");
   const [savedBackendHost, setSavedBackendHost] = useState("");
   const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
+  const [savedBackendQueryParameterRows, setSavedBackendQueryParameterRows] = useState<
+    ReadonlyArray<QueryParameterRow>
+  >([]);
+  const [savedBackendQueryParametersOpen, setSavedBackendQueryParametersOpen] = useState(false);
   const [savedBackendSshHost, setSavedBackendSshHost] = useState("");
   const [savedBackendSshUsername, setSavedBackendSshUsername] = useState("");
   const [savedBackendSshPort, setSavedBackendSshPort] = useState("");
@@ -2135,6 +2120,8 @@ export function ConnectionsSettings() {
 
       setSavedBackendHost("");
       setSavedBackendPairingCode("");
+      setSavedBackendQueryParameterRows([]);
+      setSavedBackendQueryParametersOpen(false);
       setSavedBackendSshHost("");
       setSavedBackendSshUsername("");
       setSavedBackendSshPort("");
@@ -2155,6 +2142,7 @@ export function ConnectionsSettings() {
       remotePairingInput = parseRemotePairingFields({
         host: savedBackendHost,
         pairingCode: savedBackendPairingCode,
+        queryParameterRows: savedBackendQueryParameterRows,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to add backend.";
@@ -2190,6 +2178,8 @@ export function ConnectionsSettings() {
 
     setSavedBackendHost("");
     setSavedBackendPairingCode("");
+    setSavedBackendQueryParameterRows([]);
+    setSavedBackendQueryParametersOpen(false);
     setSavedBackendSshHost("");
     setSavedBackendSshUsername("");
     setSavedBackendSshPort("");
@@ -2206,6 +2196,7 @@ export function ConnectionsSettings() {
     savedBackendHost,
     savedBackendMode,
     savedBackendPairingCode,
+    savedBackendQueryParameterRows,
     savedBackendSshHost,
     savedBackendSshPort,
     savedBackendSshUsername,
@@ -2338,10 +2329,17 @@ export function ConnectionsSettings() {
     [setDefaultAdvertisedEndpointKey],
   );
   const handleSavedBackendHostChange = useCallback((value: string) => {
-    const parsedPairingUrl = parsePairingUrlFields(value);
-    if (parsedPairingUrl) {
+    const parsedPairingUrl = parseRemotePairingUrlFields(value);
+    if (
+      parsedPairingUrl &&
+      (parsedPairingUrl.pairingCode !== "" || parsedPairingUrl.queryParameters.length > 0)
+    ) {
       setSavedBackendHost(parsedPairingUrl.host);
-      setSavedBackendPairingCode(parsedPairingUrl.pairingCode);
+      if (parsedPairingUrl.pairingCode !== "") {
+        setSavedBackendPairingCode(parsedPairingUrl.pairingCode);
+      }
+      setSavedBackendQueryParameterRows(makeQueryParameterRows(parsedPairingUrl.queryParameters));
+      setSavedBackendQueryParametersOpen(parsedPairingUrl.queryParameters.length > 0);
       return;
     }
     setSavedBackendHost(value);
@@ -2415,9 +2413,16 @@ export function ConnectionsSettings() {
       </div>
       <div>
         <span className="mt-1 block text-[11px] text-muted-foreground">
-          Paste a full pairing URL here to fill both fields automatically.
+          Paste a full pairing URL here to fill the connection fields automatically.
         </span>
       </div>
+      <ConnectionQueryParametersEditor
+        rows={savedBackendQueryParameterRows}
+        open={savedBackendQueryParametersOpen}
+        disabled={isAddingSavedBackend}
+        onOpenChange={setSavedBackendQueryParametersOpen}
+        onRowsChange={setSavedBackendQueryParameterRows}
+      />
     </div>
   );
   const renderRemoteModeBody = () => (

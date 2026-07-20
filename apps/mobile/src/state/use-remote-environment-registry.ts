@@ -67,6 +67,7 @@ function toSavedConnection(
           ...(authorization?._tag === "Dpop" ? { dpopAccessToken: authorization.accessToken } : {}),
         }
       : { authenticationMethod: "bearer" as const }),
+    queryParameters: environment.queryParameters,
   };
 }
 
@@ -140,6 +141,7 @@ export function useRemoteConnectionStatus() {
         connectionState: environment.connectionState,
         connectionError: environment.connectionError,
         connectionErrorTraceId: environment.connectionErrorTraceId,
+        queryParameters: environment.queryParameters,
       })),
     [workspace.environments],
   );
@@ -186,7 +188,11 @@ export function useRemoteConnections() {
   const onUpdateEnvironment = useCallback(
     (
       environmentId: EnvironmentId,
-      updates: { readonly label: string; readonly displayUrl: string },
+      updates: {
+        readonly label: string;
+        readonly displayUrl: string;
+        readonly queryParameters: ConnectedEnvironmentSummary["queryParameters"];
+      },
     ) => controller.updateEnvironment(environmentId, updates),
     [controller],
   );

@@ -298,7 +298,10 @@ export function linkEnvironmentToCloudWithPreference(
           decodedRelayClientError(`${relayUrl}/v1/client/environment-link-challenges failed`),
         ),
       );
-    const environmentClient = yield* makeEnvironmentHttpApiClient(input.connection.httpBaseUrl);
+    const environmentClient = yield* makeEnvironmentHttpApiClient(
+      input.connection.httpBaseUrl,
+      input.connection.queryParameters ?? [],
+    );
     const proof = yield* environmentClient.connect
       .linkProof({
         headers: { authorization: `Bearer ${localBearerToken}` },

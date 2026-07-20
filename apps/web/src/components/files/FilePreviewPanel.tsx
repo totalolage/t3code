@@ -36,6 +36,7 @@ import { buildFileReviewComment } from "~/reviewCommentContext";
 import { assetEnvironment } from "~/state/assets";
 import { useEnvironmentHttpBaseUrl, usePrimaryEnvironmentId } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
+import { usePreparedConnection } from "~/state/session";
 import { projectEnvironment } from "~/state/projects";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
@@ -663,6 +664,7 @@ export default function FilePreviewPanel({
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const environmentHttpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
+  const preparedConnection = usePreparedConnection(environmentId);
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
   });
@@ -717,6 +719,8 @@ export default function FilePreviewPanel({
         threadRef,
         filePath: absolutePath,
         httpBaseUrl: environmentHttpBaseUrl,
+        queryParameters:
+          preparedConnection._tag === "Some" ? preparedConnection.value.queryParameters : [],
         createAssetUrl,
         openPreview,
       });
@@ -732,7 +736,14 @@ export default function FilePreviewPanel({
         }),
       );
     })();
-  }, [absolutePath, createAssetUrl, environmentHttpBaseUrl, openPreview, threadRef]);
+  }, [
+    absolutePath,
+    createAssetUrl,
+    environmentHttpBaseUrl,
+    openPreview,
+    preparedConnection,
+    threadRef,
+  ]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">

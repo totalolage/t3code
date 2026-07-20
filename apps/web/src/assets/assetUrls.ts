@@ -31,7 +31,11 @@ export function useAssetUrlState(
   if (preparedConnection._tag === "None" || result._tag !== "Success") {
     return { _tag: "Loading" };
   }
-  const url = resolveAssetUrl(preparedConnection.value.httpBaseUrl, result.value.relativeUrl);
+  const url = resolveAssetUrl(
+    preparedConnection.value.httpBaseUrl,
+    result.value.relativeUrl,
+    preparedConnection.value.queryParameters,
+  );
   return url === null ? { _tag: "Failure" } : { _tag: "Success", url };
 }
 
@@ -60,7 +64,11 @@ export function useAssetUrls(
         ? resources.map(() => null)
         : results.map((result) =>
             AsyncResult.isSuccess(result)
-              ? resolveAssetUrl(preparedConnection.value.httpBaseUrl, result.value.relativeUrl)
+              ? resolveAssetUrl(
+                  preparedConnection.value.httpBaseUrl,
+                  result.value.relativeUrl,
+                  preparedConnection.value.queryParameters,
+                )
               : null,
           ),
     [preparedConnection, resources, results],

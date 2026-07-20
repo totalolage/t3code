@@ -15,6 +15,7 @@ import { splitEnvironmentSections } from "../connection/environmentSections";
 import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useRemoteConnections } from "../../state/use-remote-environment-registry";
+import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 import {
   applyShowcaseLocalEnvironmentDisplayUrls,
   resolveShowcaseEnvironmentUpdateDisplayUrl,
@@ -61,7 +62,11 @@ export function SettingsEnvironmentsRouteScreen() {
   const handleUpdateEnvironment = useCallback(
     (
       environmentId: EnvironmentId,
-      updates: { readonly label: string; readonly displayUrl: string },
+      updates: {
+        readonly label: string;
+        readonly displayUrl: string;
+        readonly queryParameters: ConnectedEnvironmentSummary["queryParameters"];
+      },
     ) => {
       if (!SHOWCASE_ENABLED) return onUpdateEnvironment(environmentId, updates);
       const actualEnvironment = environmentSections.localEnvironments.find(

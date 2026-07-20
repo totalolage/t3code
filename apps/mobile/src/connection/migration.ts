@@ -14,6 +14,7 @@ import {
 import { EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { RemoteQueryParameter } from "@t3tools/shared/remote";
 
 const LegacySavedRemoteConnection = Schema.Struct({
   environmentId: EnvironmentId,
@@ -22,6 +23,9 @@ const LegacySavedRemoteConnection = Schema.Struct({
   displayUrl: Schema.String,
   httpBaseUrl: Schema.String,
   wsBaseUrl: Schema.String,
+  queryParameters: Schema.Array(RemoteQueryParameter).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   bearerToken: Schema.NullOr(Schema.String),
   authenticationMethod: Schema.optionalKey(Schema.Literals(["bearer", "dpop"])),
   dpopAccessToken: Schema.optionalKey(Schema.String),
@@ -79,6 +83,7 @@ function migrateConnection(
         label: connection.environmentLabel,
         httpBaseUrl: connection.httpBaseUrl,
         wsBaseUrl: connection.wsBaseUrl,
+        queryParameters: connection.queryParameters,
       }),
       credential: new BearerConnectionCredential({
         token: connection.bearerToken,

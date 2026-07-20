@@ -1,9 +1,11 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   connectionCatalogDisplayUrl,
+  connectionCatalogQueryParameters,
   type EnvironmentPresentation as BaseEnvironmentPresentation,
 } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId } from "@t3tools/contracts";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import { useMemo } from "react";
 
 import { environmentCatalog } from "../connection/catalog";
@@ -15,6 +17,7 @@ export interface EnvironmentPresentation extends BaseEnvironmentPresentation {
   readonly label: string;
   readonly displayUrl: string | null;
   readonly relayManaged: boolean;
+  readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
 }
 
 export function projectEnvironmentPresentation(
@@ -27,6 +30,7 @@ export function projectEnvironmentPresentation(
     label: presentation.entry.target.label,
     displayUrl: connectionCatalogDisplayUrl(presentation.entry),
     relayManaged: presentation.entry.target._tag === "RelayConnectionTarget",
+    queryParameters: connectionCatalogQueryParameters(presentation.entry),
   };
 }
 

@@ -1,4 +1,5 @@
 import { EnvironmentId } from "@t3tools/contracts";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import * as Schema from "effect/Schema";
 
 const ConnectionTargetBase = {
@@ -118,6 +119,7 @@ export interface PreparedConnection {
   readonly label: string;
   readonly httpBaseUrl: string;
   readonly socketUrl: string;
+  readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
   readonly httpAuthorization: PreparedHttpAuthorization | null;
   readonly target: ConnectionTarget;
 }
