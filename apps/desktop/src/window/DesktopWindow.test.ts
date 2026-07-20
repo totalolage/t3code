@@ -48,6 +48,7 @@ const environmentInput = {
 function makeFakeBrowserWindow() {
   const windowListeners = new Map<string, (...args: readonly unknown[]) => void>();
   const webContentsListeners = new Map<string, (...args: readonly unknown[]) => void>();
+  const webContentsOnceListeners = new Map<string, (...args: readonly unknown[]) => void>();
   const webContents = {
     copyImageAt: vi.fn(),
     getURL: vi.fn(() => "t3code-dev://app/"),
@@ -55,7 +56,9 @@ function makeFakeBrowserWindow() {
     on: vi.fn((eventName: string, listener: (...args: readonly unknown[]) => void) => {
       webContentsListeners.set(eventName, listener);
     }),
-    once: vi.fn(),
+    once: vi.fn((eventName: string, listener: (...args: readonly unknown[]) => void) => {
+      webContentsOnceListeners.set(eventName, listener);
+    }),
     openDevTools: vi.fn(),
     reload: vi.fn(),
     replaceMisspelling: vi.fn(),
@@ -92,6 +95,7 @@ function makeFakeBrowserWindow() {
     send: webContents.send,
     setAutoHideCursor: window.setAutoHideCursor,
     webContentsListeners,
+    webContentsOnceListeners,
     windowListeners,
   };
 }
@@ -150,6 +154,7 @@ function makeTestLayer(input: {
   readonly mainWindow: Ref.Ref<Option.Option<Electron.BrowserWindow>>;
   readonly createdWindowOptions?: Electron.BrowserWindowConstructorOptions[];
   readonly openedExternalUrls?: unknown[];
+  readonly revealedWindows?: Electron.BrowserWindow[];
 }) {
   const electronWindowLayer = Layer.succeed(ElectronWindow.ElectronWindow, {
     create: (options) =>
@@ -164,7 +169,10 @@ function makeTestLayer(input: {
     focusedMainOrFirst: Ref.get(input.mainWindow),
     setMain: (window) => Ref.set(input.mainWindow, Option.some(window)),
     clearMain: () => Ref.set(input.mainWindow, Option.none()),
-    reveal: () => Effect.void,
+    reveal: (window) =>
+      Effect.sync(() => {
+        input.revealedWindows?.push(window);
+      }),
     sendAll: () => Effect.void,
     destroyAll: Effect.void,
     syncAllAppearance: (sync) => sync(input.window),
@@ -370,6 +378,57 @@ describe("DesktopWindow", () => {
           [WINDOW_FULLSCREEN_STATE_CHANNEL, true],
           [WINDOW_FULLSCREEN_STATE_CHANNEL, false],
         ]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("does not mistake the early startup splash for the main window", () =>
+    Effect.gen(function* () {
+      const earlySplash = makeFakeBrowserWindow();
+      const fakeMain = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make(Option.some(earlySplash.window as Electron.BrowserWindow));
+      const layer = makeTestLayer({
+        window: fakeMain.window,
+        createCount,
+        mainWindow,
+      });
+      DesktopWindow.trackEarlyStartupSplash(earlySplash.window);
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+        assert.equal(yield* Ref.get(createCount), 1);
+        assert.strictEqual(Option.getOrUndefined(yield* Ref.get(mainWindow)), fakeMain.window);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("reveals the main window when the renderer finishes loading", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const revealedWindows: Electron.BrowserWindow[] = [];
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        revealedWindows,
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        const didFinishLoad = fakeWindow.webContentsOnceListeners.get("did-finish-load");
+        if (!didFinishLoad) {
+          return yield* Effect.die("renderer reveal listener was not registered");
+        }
+
+        didFinishLoad();
+        yield* Effect.promise(() => Promise.resolve());
+        assert.deepEqual(revealedWindows, [fakeWindow.window]);
       }).pipe(Effect.provide(layer));
     }),
   );
