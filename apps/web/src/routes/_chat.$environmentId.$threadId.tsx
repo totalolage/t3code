@@ -22,7 +22,10 @@ function ChatThreadRouteView() {
   const serverThreadDetail = useThreadDetail(threadRef);
   const environmentThreadRefs = useEnvironmentThreadRefs(threadRef?.environmentId ?? null);
   const bootstrapComplete = shell.data?.snapshot._tag === "Some";
-  const threadExists = serverThreadShell !== null || serverThreadDetail !== null;
+  // Once the shell snapshot is available it is authoritative for existence.
+  // A detail cache can outlive a deleted thread and must not keep its route or
+  // draft promotion alive on its own.
+  const serverThreadExists = serverThreadShell !== null;
   const environmentHasServerThreads = environmentThreadRefs.length > 0;
   const draftThreadExists = useComposerDraftStore((store) =>
     threadRef ? store.getDraftThreadByRef(threadRef) !== null : false,
@@ -36,8 +39,8 @@ function ChatThreadRouteView() {
     }
     return store.hasDraftThreadsInEnvironment(threadRef.environmentId);
   });
-  const routeThreadExists = threadExists || draftThreadExists;
-  const serverThreadStarted = threadHasStarted(serverThreadDetail);
+  const routeThreadExists = serverThreadExists || draftThreadExists;
+  const serverThreadStarted = serverThreadExists && threadHasStarted(serverThreadDetail);
   const environmentHasAnyThreads = environmentHasServerThreads || environmentHasDraftThreads;
 
   useEffect(() => {
