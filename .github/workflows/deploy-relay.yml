@@ -1,9 +1,7 @@
 name: Deploy T3 Connect relay
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: read

@@ -149,6 +149,37 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
+  it.effect("disables desktop update metadata for f8y builds", () =>
+    Effect.gen(function* () {
+      const publishConfig = yield* resolveGitHubPublishConfig("latest");
+      const buildConfig = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.0.29-f8y.20260720.42",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+
+      assert.equal(publishConfig, undefined);
+      assert.equal(buildConfig.appId, "com.f8y.t3code");
+      assert.notProperty(buildConfig, "publish");
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: {
+              GITHUB_REPOSITORY: "totalolage/t3code",
+              T3CODE_DESKTOP_APP_ID: "com.f8y.t3code",
+              T3CODE_DESKTOP_DISABLE_UPDATE_CONFIG: "true",
+            },
+          }),
+        ),
+      ),
+    ),
+  );
+
   it("omits bundled workspace packages from staged desktop dependencies", () => {
     assert.deepStrictEqual(
       resolveDesktopRuntimeDependencies(
