@@ -238,6 +238,49 @@ describe("connection onboarding", () => {
     }),
   );
 
+  it.effect("replaces bearer query parameters while preserving credentials", () =>
+    Effect.gen(function* () {
+      const environmentId = EnvironmentId.make("environment-paired");
+      const registration = yield* prepareBearerConnectionUpdate({
+        input: {
+          environmentId,
+          label: "Remote environment",
+          httpBaseUrl: "https://remote.example.test/",
+          queryParameters: [
+            { key: "proxy", value: "one" },
+            { key: "proxy", value: "two" },
+          ],
+        },
+        entry: Option.some({
+          target: new BearerConnectionTarget({
+            environmentId,
+            label: "Remote environment",
+            connectionId: "bearer:environment-paired",
+          }),
+          profile: Option.some(
+            new BearerConnectionProfile({
+              connectionId: "bearer:environment-paired",
+              environmentId,
+              label: "Remote environment",
+              httpBaseUrl: "https://remote.example.test/",
+              wsBaseUrl: "wss://remote.example.test/",
+              queryParameters: [{ key: "old", value: "value" }],
+            }),
+          ),
+        }),
+        credential: Option.some(new BearerConnectionCredential({ token: "bearer-token" })),
+      });
+
+      expect(registration.profile.queryParameters).toEqual([
+        { key: "proxy", value: "one" },
+        { key: "proxy", value: "two" },
+      ]);
+      expect(registration.credential).toEqual(
+        new BearerConnectionCredential({ token: "bearer-token" }),
+      );
+    }),
+  );
+
   it.effect("prepares an SSH registration from the provisioned platform environment", () =>
     Effect.gen(function* () {
       const target = {

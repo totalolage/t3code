@@ -1,5 +1,6 @@
 import {
   ConnectionOnboarding,
+  type BearerConnectionUpdateInput,
   type PairingConnectionInput,
 } from "@t3tools/client-runtime/connection";
 import {
@@ -33,4 +34,15 @@ export const connectSshEnvironment = createRuntimeCommand(connectionAtomRuntime,
   },
   execute: (input: { readonly target: DesktopSshEnvironmentTarget; readonly label?: string }) =>
     ConnectionOnboarding.pipe(Effect.flatMap((onboarding) => onboarding.registerSsh(input))),
+});
+
+export const updateBearerConnection = createRuntimeCommand(connectionAtomRuntime, {
+  label: "web:connection:update-bearer",
+  scheduler: onboardingScheduler,
+  concurrency: {
+    mode: "serial",
+    key: (input: BearerConnectionUpdateInput) => input.environmentId,
+  },
+  execute: (input: BearerConnectionUpdateInput) =>
+    ConnectionOnboarding.pipe(Effect.flatMap((onboarding) => onboarding.updateBearer(input))),
 });

@@ -36,7 +36,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
-import { parseRemotePairingUrlFields } from "@t3tools/shared/remote";
+import { parseRemotePairingUrlFields, type RemoteQueryParameter } from "@t3tools/shared/remote";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
@@ -117,6 +117,7 @@ import { environmentCatalog } from "~/connection/catalog";
 import {
   connectPairing as connectPairingAtom,
   connectSshEnvironment as connectSshEnvironmentAtom,
+  updateBearerConnection as updateBearerConnectionAtom,
 } from "~/connection/onboarding";
 import { useEnvironmentQuery } from "~/state/query";
 import {
@@ -137,6 +138,7 @@ import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectLis
 import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "./itemRows";
 import {
   ConnectionQueryParametersEditor,
+  makeQueryParameterRow,
   makeQueryParameterRows,
   queryParametersFromRows,
   type QueryParameterRow,
@@ -1325,6 +1327,12 @@ type SavedBackendListRowProps = {
   removingEnvironmentId: EnvironmentId | null;
   onConnect: (environmentId: EnvironmentId) => void;
   onRemove: (environmentId: EnvironmentId) => void;
+  onUpdateQueryParameters: (input: {
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+    readonly httpBaseUrl: string;
+    readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
+  }) => Promise<string | null>;
 };
 
 function SavedBackendListRow({
@@ -1332,11 +1340,19 @@ function SavedBackendListRow({
   removingEnvironmentId,
   onConnect,
   onRemove,
+  onUpdateQueryParameters,
 }: SavedBackendListRowProps) {
   const environmentId = environment.environmentId;
   const connectionState = environment.connection.phase;
   const isConnected = connectionState === "connected";
   const isConnecting = connectionState === "connecting" || connectionState === "reconnecting";
+  const [editQueryParametersOpen, setEditQueryParametersOpen] = useState(false);
+  const [editQueryParameterRows, setEditQueryParameterRows] = useState<
+    ReadonlyArray<QueryParameterRow>
+  >([]);
+  const [editQueryParametersExpanded, setEditQueryParametersExpanded] = useState(true);
+  const [editQueryParametersError, setEditQueryParametersError] = useState<string | null>(null);
+  const [isSavingQueryParameters, setIsSavingQueryParameters] = useState(false);
   const stateDotClassName =
     connectionState === "connected"
       ? "bg-success"
@@ -1379,6 +1395,12 @@ function SavedBackendListRow({
     environment.entry.profile.value._tag === "SshConnectionProfile"
       ? environment.entry.profile.value.target
       : null;
+  const bearerProfile =
+    environment.entry.target._tag === "BearerConnectionTarget" &&
+    Option.isSome(environment.entry.profile) &&
+    environment.entry.profile.value._tag === "BearerConnectionProfile"
+      ? environment.entry.profile.value
+      : null;
   const metadataBits = [
     sshTarget ? `SSH ${formatDesktopSshTarget(sshTarget)}` : null,
     environment.relayManaged ? "T3 Connect" : null,
@@ -1389,6 +1411,46 @@ function SavedBackendListRow({
   // environment you connect to or remove here — its lifecycle is driven by the
   // WSL on/off + distro picker on this page.
   const isWslEnvironment = isDesktopLocalConnectionTarget(environment.entry.target);
+
+  const handleEditQueryParametersOpenChange = (open: boolean) => {
+    setEditQueryParametersOpen(open);
+    setEditQueryParametersError(null);
+    if (open && bearerProfile !== null) {
+      const rows = makeQueryParameterRows(bearerProfile.queryParameters);
+      setEditQueryParameterRows(rows.length === 0 ? [makeQueryParameterRow()] : rows);
+      setEditQueryParametersExpanded(true);
+    }
+  };
+
+  const handleSaveQueryParameters = async () => {
+    if (bearerProfile === null) {
+      return;
+    }
+    let queryParameters: ReadonlyArray<RemoteQueryParameter>;
+    try {
+      queryParameters = queryParametersFromRows(editQueryParameterRows);
+    } catch (error) {
+      setEditQueryParametersError(
+        error instanceof Error ? error.message : "The query parameters are invalid.",
+      );
+      return;
+    }
+
+    setIsSavingQueryParameters(true);
+    setEditQueryParametersError(null);
+    const error = await onUpdateQueryParameters({
+      environmentId,
+      label: bearerProfile.label,
+      httpBaseUrl: bearerProfile.httpBaseUrl,
+      queryParameters,
+    });
+    setIsSavingQueryParameters(false);
+    if (error === null) {
+      setEditQueryParametersOpen(false);
+      return;
+    }
+    setEditQueryParametersError(error);
+  };
 
   return (
     <div className={ITEM_ROW_CLASSNAME}>
@@ -1455,6 +1517,62 @@ function SavedBackendListRow({
             </Tooltip>
           ) : (
             <>
+              {bearerProfile !== null ? (
+                <Dialog
+                  open={editQueryParametersOpen}
+                  onOpenChange={handleEditQueryParametersOpenChange}
+                >
+                  <DialogTrigger
+                    render={
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        aria-label={`Edit query parameters for ${environment.label}`}
+                        disabled={
+                          isSavingQueryParameters || removingEnvironmentId === environmentId
+                        }
+                      />
+                    }
+                  >
+                    Edit
+                  </DialogTrigger>
+                  <DialogPopup className="max-w-lg">
+                    <DialogHeader>
+                      <DialogTitle>Edit query parameters</DialogTitle>
+                      <DialogDescription>
+                        These parameters are sent with every request to {environment.label}.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <DialogPanel className="space-y-3">
+                      <ConnectionQueryParametersEditor
+                        rows={editQueryParameterRows}
+                        open={editQueryParametersExpanded}
+                        disabled={isSavingQueryParameters}
+                        onOpenChange={setEditQueryParametersExpanded}
+                        onRowsChange={setEditQueryParameterRows}
+                      />
+                      {editQueryParametersError ? (
+                        <p className="text-xs text-destructive">{editQueryParametersError}</p>
+                      ) : null}
+                    </DialogPanel>
+                    <DialogFooter>
+                      <Button
+                        variant="outline"
+                        disabled={isSavingQueryParameters}
+                        onClick={() => setEditQueryParametersOpen(false)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        disabled={isSavingQueryParameters}
+                        onClick={() => void handleSaveQueryParameters()}
+                      >
+                        {isSavingQueryParameters ? "Saving…" : "Save"}
+                      </Button>
+                    </DialogFooter>
+                  </DialogPopup>
+                </Dialog>
+              ) : null}
               {!isConnected ? (
                 <Button
                   size="xs"
@@ -1699,6 +1817,9 @@ export function ConnectionsSettings() {
   const primaryEnvironment = usePrimaryEnvironment();
   const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
   const connectSshEnvironment = useAtomCommand(connectSshEnvironmentAtom, {
+    reportFailure: false,
+  });
+  const updateBearerEnvironment = useAtomCommand(updateBearerConnectionAtom, {
     reportFailure: false,
   });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
@@ -2242,6 +2363,39 @@ export function ConnectionsSettings() {
       }
     },
     [removeEnvironment],
+  );
+
+  const handleUpdateSavedBackendQueryParameters = useCallback(
+    async (input: {
+      readonly environmentId: EnvironmentId;
+      readonly label: string;
+      readonly httpBaseUrl: string;
+      readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
+    }): Promise<string | null> => {
+      const result = await updateBearerEnvironment(input);
+      if (result._tag === "Success") {
+        toastManager.add({
+          type: "success",
+          title: "Query parameters updated",
+          description: `Saved request parameters for ${input.label}.`,
+        });
+        return null;
+      }
+      if (isAtomCommandInterrupted(result)) {
+        return "The update was interrupted.";
+      }
+      const error = squashAtomCommandFailure(result);
+      const message = error instanceof Error ? error.message : "Failed to update query parameters.";
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not update query parameters",
+          description: message,
+        }),
+      );
+      return message;
+    },
+    [updateBearerEnvironment],
   );
 
   const handleConnectSshHost = useCallback(
@@ -3394,6 +3548,7 @@ export function ConnectionsSettings() {
             removingEnvironmentId={removingSavedEnvironmentId}
             onConnect={handleConnectSavedBackend}
             onRemove={handleRemoveSavedBackend}
+            onUpdateQueryParameters={handleUpdateSavedBackendQueryParameters}
           />
         ))}
         <CloudRemoteEnvironmentRows
