@@ -181,7 +181,8 @@ jobs:
 
           build_tools_version="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort -V | tail -n 1)"
           build_tools="$ANDROID_HOME/build-tools/$build_tools_version"
-          "$build_tools/apksigner" verify --verbose --print-certs "${apks[0]}"
+          current_verification="$("$build_tools/apksigner" verify --verbose --print-certs "${apks[0]}")"
+          printf '%s\n' "$current_verification"
 
           badging="$("$build_tools/aapt" dump badging "${apks[0]}" | head -n 1)"
           expected_package="name='com.f8y.t3code'"
@@ -194,7 +195,7 @@ jobs:
             fi
           done
 
-          current_certificate="$("$build_tools/apksigner" verify --print-certs "${apks[0]}" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
+          current_certificate="$(sed -n 's/^.*certificate SHA-256 digest: //p' <<< "$current_verification" | head -n 1)"
           if [[ -z "$current_certificate" ]]; then
             echo "Could not resolve the APK signing certificate digest." >&2
             exit 1
@@ -207,7 +208,8 @@ jobs:
           if [[ -n "$previous_apk_url" ]]; then
             previous_apk="$RUNNER_TEMP/previous-f8y.apk"
             curl --fail --location --silent --show-error "$previous_apk_url" --output "$previous_apk"
-            previous_certificate="$("$build_tools/apksigner" verify --print-certs "$previous_apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
+            previous_verification="$("$build_tools/apksigner" verify --verbose --print-certs "$previous_apk")"
+            previous_certificate="$(sed -n 's/^.*certificate SHA-256 digest: //p' <<< "$previous_verification" | head -n 1)"
             if [[ "$previous_certificate" != "$current_certificate" ]]; then
               echo "Signing certificate differs from the previous f8y APK." >&2
               exit 1
