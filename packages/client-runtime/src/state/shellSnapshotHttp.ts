@@ -29,8 +29,15 @@ export const fetchEnvironmentShellSnapshot = Effect.fn(
   readonly signer: Option.Option<ManagedRelayDpopSigner["Service"]>;
   readonly timeoutMs?: number;
 }) {
-  const requestUrl = environmentEndpointUrl(input.prepared.httpBaseUrl, "/api/orchestration/shell");
-  const client = yield* makeEnvironmentHttpApiClient(input.prepared.httpBaseUrl);
+  const requestUrl = environmentEndpointUrl(
+    input.prepared.httpBaseUrl,
+    "/api/orchestration/shell",
+    input.prepared.queryParameters,
+  );
+  const client = yield* makeEnvironmentHttpApiClient(
+    input.prepared.httpBaseUrl,
+    input.prepared.queryParameters,
+  );
   const headers = yield* buildEnvironmentAuthHeaders(
     input.prepared.httpAuthorization,
     "GET",

@@ -25,5 +25,9 @@ export function useAssetUrl(
   if (preparedConnection._tag === "None" || result._tag !== "Success") {
     return null;
   }
-  return resolveAssetUrl(preparedConnection.value.httpBaseUrl, result.value.relativeUrl);
+  return resolveAssetUrl(
+    preparedConnection.value.httpBaseUrl,
+    result.value.relativeUrl,
+    preparedConnection.value.queryParameters,
+  );
 }

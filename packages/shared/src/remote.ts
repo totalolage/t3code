@@ -5,6 +5,12 @@ const HOSTED_PAIRING_HOST_PARAM = "host";
 const HOSTED_PAIRING_LABEL_PARAM = "label";
 const SUPPORTED_REMOTE_BACKEND_PROTOCOLS = new Set(["http:", "https:", "ws:", "wss:"]);
 
+export const RemoteQueryParameter = Schema.Struct({
+  key: Schema.String,
+  value: Schema.String,
+});
+export type RemoteQueryParameter = typeof RemoteQueryParameter.Type;
+
 export const readHashParams = (url: URL): URLSearchParams =>
   new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
 
@@ -60,22 +66,80 @@ export class RemotePairingCodeMissingError extends Schema.TaggedErrorClass<Remot
   }
 }
 
+export class RemoteQueryParameterKeyMissingError extends Schema.TaggedErrorClass<RemoteQueryParameterKeyMissingError>()(
+  "RemoteQueryParameterKeyMissingError",
+  { index: Schema.Number },
+) {
+  override get message(): string {
+    return "Query parameter keys cannot be empty.";
+  }
+}
+
+export class RemoteQueryParameterReservedError extends Schema.TaggedErrorClass<RemoteQueryParameterReservedError>()(
+  "RemoteQueryParameterReservedError",
+  { key: Schema.String },
+) {
+  override get message(): string {
+    return "Use the Pairing code field instead of a token query parameter.";
+  }
+}
+
 export const RemotePairingTargetError = Schema.Union([
   RemoteBackendUrlMissingError,
   RemotePairingUrlInvalidError,
   RemoteBackendUrlInvalidError,
   RemotePairingTokenMissingError,
   RemotePairingCodeMissingError,
+  RemoteQueryParameterKeyMissingError,
+  RemoteQueryParameterReservedError,
 ]);
 export type RemotePairingTargetError = typeof RemotePairingTargetError.Type;
 
 const hasSupportedRemoteBackendProtocol = (url: URL): boolean =>
   SUPPORTED_REMOTE_BACKEND_PROTOCOLS.has(url.protocol);
 
+const queryParametersFromUrl = (url: URL): ReadonlyArray<RemoteQueryParameter> =>
+  [...url.searchParams.entries()]
+    .filter(([key]) => key !== PAIRING_TOKEN_PARAM)
+    .map(([key, value]) => ({ key, value }));
+
+export const normalizeRemoteQueryParameters = (
+  input: ReadonlyArray<RemoteQueryParameter>,
+): ReadonlyArray<RemoteQueryParameter> =>
+  input.flatMap((parameter, index) => {
+    const key = parameter.key.trim();
+    if (key === "" && parameter.value === "") {
+      return [];
+    }
+    if (key === "") {
+      throw new RemoteQueryParameterKeyMissingError({ index });
+    }
+    if (key === PAIRING_TOKEN_PARAM) {
+      throw new RemoteQueryParameterReservedError({ key });
+    }
+    return [{ key, value: parameter.value }];
+  });
+
+export const appendRemoteQueryParameters = (
+  input: string,
+  parameters: ReadonlyArray<RemoteQueryParameter>,
+): string => {
+  const url = new URL(input);
+  for (const parameter of parameters) {
+    url.searchParams.append(parameter.key, parameter.value);
+  }
+  return url.toString();
+};
+
+interface NormalizedRemoteBaseUrl {
+  readonly url: URL;
+  readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
+}
+
 const normalizeRemoteBaseUrl = (
   rawValue: string,
   source: RemoteBackendUrlInvalidError["source"],
-): URL => {
+): NormalizedRemoteBaseUrl => {
   const trimmed = rawValue.trim();
   if (!trimmed) {
     throw new RemoteBackendUrlMissingError();
@@ -97,10 +161,11 @@ const normalizeRemoteBaseUrl = (
       protocol: url.protocol,
     });
   }
+  const queryParameters = queryParametersFromUrl(url);
   url.pathname = "/";
   url.search = "";
   url.hash = "";
-  return url;
+  return { url, queryParameters };
 };
 
 const toHttpBaseUrl = (url: URL): string => {
@@ -133,6 +198,13 @@ export interface ResolvedRemotePairingTarget {
   readonly credential: string;
   readonly httpBaseUrl: string;
   readonly wsBaseUrl: string;
+  readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
+}
+
+export interface ParsedRemotePairingFields {
+  readonly host: string;
+  readonly pairingCode: string;
+  readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
 }
 
 export interface HostedPairingRequest {
@@ -185,10 +257,42 @@ export const readHostedPairingRequest = (url: URL): HostedPairingRequest | null 
   };
 };
 
+export const parseRemotePairingUrlFields = (input: string): ParsedRemotePairingFields | null => {
+  const trimmed = input.trim();
+  if (trimmed === "") {
+    return null;
+  }
+  try {
+    const urlLikeInput =
+      /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//u.test(trimmed) || trimmed.startsWith("//")
+        ? trimmed
+        : `https://${trimmed}`;
+    const url = new URL(urlLikeInput);
+    const hosted = readHostedPairingRequest(url);
+    if (hosted) {
+      const normalized = normalizeRemoteBaseUrl(hosted.host, "hosted-pairing-host");
+      return {
+        host: toHttpBaseUrl(normalized.url).replace(/\/$/u, ""),
+        pairingCode: hosted.token,
+        queryParameters: normalized.queryParameters,
+      };
+    }
+    const normalized = normalizeRemoteBaseUrl(url.toString(), "direct-host");
+    return {
+      host: toHttpBaseUrl(normalized.url).replace(/\/$/u, ""),
+      pairingCode: getPairingTokenFromUrl(url) ?? "",
+      queryParameters: normalized.queryParameters,
+    };
+  } catch {
+    return null;
+  }
+};
+
 export const resolveRemotePairingTarget = (input: {
   readonly pairingUrl?: string;
   readonly host?: string;
   readonly pairingCode?: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
 }): ResolvedRemotePairingTarget => {
   const pairingUrl = input.pairingUrl?.trim() ?? "";
   if (pairingUrl.length > 0) {
@@ -205,14 +309,17 @@ export const resolveRemotePairingTarget = (input: {
     }
     const hostedPairingRequest = readHostedPairingRequest(url);
     if (hostedPairingRequest) {
-      const hostedBackendUrl = normalizeRemoteBaseUrl(
+      const hostedBackend = normalizeRemoteBaseUrl(
         hostedPairingRequest.host,
         "hosted-pairing-host",
       );
       return {
         credential: hostedPairingRequest.token,
-        httpBaseUrl: toHttpBaseUrl(hostedBackendUrl),
-        wsBaseUrl: toWsBaseUrl(hostedBackendUrl),
+        httpBaseUrl: toHttpBaseUrl(hostedBackend.url),
+        wsBaseUrl: toWsBaseUrl(hostedBackend.url),
+        queryParameters: normalizeRemoteQueryParameters(
+          input.queryParameters ?? hostedBackend.queryParameters,
+        ),
       };
     }
 
@@ -220,10 +327,14 @@ export const resolveRemotePairingTarget = (input: {
     if (!credential) {
       throw new RemotePairingTokenMissingError({ host: url.host });
     }
+    const normalized = normalizeRemoteBaseUrl(url.toString(), "direct-host");
     return {
       credential,
-      httpBaseUrl: toHttpBaseUrl(url),
-      wsBaseUrl: toWsBaseUrl(url),
+      httpBaseUrl: toHttpBaseUrl(normalized.url),
+      wsBaseUrl: toWsBaseUrl(normalized.url),
+      queryParameters: normalizeRemoteQueryParameters(
+        input.queryParameters ?? normalized.queryParameters,
+      ),
     };
   }
 
@@ -234,12 +345,15 @@ export const resolveRemotePairingTarget = (input: {
   }
   const normalizedHost = normalizeRemoteBaseUrl(host, "direct-host");
   if (!pairingCode) {
-    throw new RemotePairingCodeMissingError({ host: normalizedHost.host });
+    throw new RemotePairingCodeMissingError({ host: normalizedHost.url.host });
   }
 
   return {
     credential: pairingCode,
-    httpBaseUrl: toHttpBaseUrl(normalizedHost),
-    wsBaseUrl: toWsBaseUrl(normalizedHost),
+    httpBaseUrl: toHttpBaseUrl(normalizedHost.url),
+    wsBaseUrl: toWsBaseUrl(normalizedHost.url),
+    queryParameters: normalizeRemoteQueryParameters(
+      input.queryParameters ?? normalizedHost.queryParameters,
+    ),
   };
 };

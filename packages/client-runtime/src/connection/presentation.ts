@@ -1,4 +1,5 @@
 import type { ServerConfig } from "@t3tools/contracts";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import * as Option from "effect/Option";
 
 import type { ConnectionCatalogEntry } from "./catalog.ts";
@@ -97,6 +98,16 @@ export function connectionCatalogDisplayUrl(entry: ConnectionCatalogEntry): stri
         ? `${entry.profile.value.target.username}@${entry.profile.value.target.hostname}`
         : null;
   }
+}
+
+export function connectionCatalogQueryParameters(
+  entry: ConnectionCatalogEntry,
+): ReadonlyArray<RemoteQueryParameter> {
+  return entry.target._tag === "BearerConnectionTarget" &&
+    Option.isSome(entry.profile) &&
+    entry.profile.value._tag === "BearerConnectionProfile"
+    ? entry.profile.value.queryParameters
+    : [];
 }
 
 export function connectionPhaseMessage(

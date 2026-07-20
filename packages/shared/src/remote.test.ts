@@ -5,16 +5,76 @@ import {
   RemoteBackendUrlMissingError,
   RemotePairingTokenMissingError,
   RemotePairingUrlInvalidError,
+  RemoteQueryParameterKeyMissingError,
+  RemoteQueryParameterReservedError,
+  appendRemoteQueryParameters,
+  normalizeRemoteQueryParameters,
+  parseRemotePairingUrlFields,
   resolveRemotePairingTarget,
 } from "./remote.ts";
 
 describe("remote", () => {
+  it("extracts ordered query parameters while keeping the pairing token special", () => {
+    expect(
+      parseRemotePairingUrlFields(
+        "https://remote.example.com/pair?tag=a&token=query-token&empty=&tag=b#token=fragment-token",
+      ),
+    ).toEqual({
+      host: "https://remote.example.com",
+      pairingCode: "fragment-token",
+      queryParameters: [
+        { key: "tag", value: "a" },
+        { key: "empty", value: "" },
+        { key: "tag", value: "b" },
+      ],
+    });
+  });
+
+  it("extracts query parameters from the backend inside a hosted pairing link", () => {
+    expect(
+      parseRemotePairingUrlFields(
+        "https://app.t3.codes/pair?host=https%3A%2F%2Fremote.example.com%2F%3Fproxy%3Done%26proxy%3Dtwo&label=Remote#token=pairing-token",
+      ),
+    ).toEqual({
+      host: "https://remote.example.com",
+      pairingCode: "pairing-token",
+      queryParameters: [
+        { key: "proxy", value: "one" },
+        { key: "proxy", value: "two" },
+      ],
+    });
+  });
+
+  it("normalizes editable rows and rejects invalid or reserved keys", () => {
+    expect(
+      normalizeRemoteQueryParameters([
+        { key: "  proxy  ", value: "secret value" },
+        { key: "", value: "" },
+      ]),
+    ).toEqual([{ key: "proxy", value: "secret value" }]);
+    expect(() => normalizeRemoteQueryParameters([{ key: "", value: "value" }])).toThrowError(
+      RemoteQueryParameterKeyMissingError,
+    );
+    expect(() => normalizeRemoteQueryParameters([{ key: "token", value: "value" }])).toThrowError(
+      RemoteQueryParameterReservedError,
+    );
+  });
+
+  it("appends duplicate and encoded parameters without replacing endpoint parameters", () => {
+    expect(
+      appendRemoteQueryParameters("https://remote.example.com/ws?wsTicket=ticket", [
+        { key: "tag", value: "a b" },
+        { key: "tag", value: "c" },
+      ]),
+    ).toBe("https://remote.example.com/ws?wsTicket=ticket&tag=a+b&tag=c");
+  });
+
   it("derives backend urls and token from a pairing url", () => {
     expect(
       resolveRemotePairingTarget({
         pairingUrl: "https://remote.example.com/pair#token=pairing-token",
       }),
-    ).toEqual({
+    ).toMatchObject({
       credential: "pairing-token",
       httpBaseUrl: "https://remote.example.com/",
       wsBaseUrl: "wss://remote.example.com/",
@@ -24,12 +84,16 @@ describe("remote", () => {
   it("accepts pairing urls that still use a query token", () => {
     expect(
       resolveRemotePairingTarget({
-        pairingUrl: "https://remote.example.com/pair?token=pairing-token",
+        pairingUrl: "https://remote.example.com/pair?token=pairing-token&proxy=one&proxy=two",
       }),
-    ).toEqual({
+    ).toMatchObject({
       credential: "pairing-token",
       httpBaseUrl: "https://remote.example.com/",
       wsBaseUrl: "wss://remote.example.com/",
+      queryParameters: [
+        { key: "proxy", value: "one" },
+        { key: "proxy", value: "two" },
+      ],
     });
   });
 
@@ -39,7 +103,7 @@ describe("remote", () => {
         pairingUrl:
           "https://app.t3.codes/pair?host=https%3A%2F%2Fdesktop.tailnet.ts.net%3A44342%2F#token=pairing-token",
       }),
-    ).toEqual({
+    ).toMatchObject({
       credential: "pairing-token",
       httpBaseUrl: "https://desktop.tailnet.ts.net:44342/",
       wsBaseUrl: "wss://desktop.tailnet.ts.net:44342/",
@@ -52,7 +116,7 @@ describe("remote", () => {
         host: "https://remote.example.com",
         pairingCode: "pairing-token",
       }),
-    ).toEqual({
+    ).toMatchObject({
       credential: "pairing-token",
       httpBaseUrl: "https://remote.example.com/",
       wsBaseUrl: "wss://remote.example.com/",
@@ -65,7 +129,7 @@ describe("remote", () => {
         host: "//remote.example.com",
         pairingCode: "pairing-token",
       }),
-    ).toEqual({
+    ).toMatchObject({
       credential: "pairing-token",
       httpBaseUrl: "https://remote.example.com/",
       wsBaseUrl: "wss://remote.example.com/",
@@ -78,7 +142,7 @@ describe("remote", () => {
         host: "//remote.example.com:3000",
         pairingCode: "pairing-token",
       }),
-    ).toEqual({
+    ).toMatchObject({
       credential: "pairing-token",
       httpBaseUrl: "https://remote.example.com:3000/",
       wsBaseUrl: "wss://remote.example.com:3000/",
@@ -90,7 +154,7 @@ describe("remote", () => {
       resolveRemotePairingTarget({
         pairingUrl: "https://app.t3.codes/pair?host=%2F%2Fremote.example.com#token=pairing-token",
       }),
-    ).toEqual({
+    ).toMatchObject({
       credential: "pairing-token",
       httpBaseUrl: "https://remote.example.com/",
       wsBaseUrl: "wss://remote.example.com/",
@@ -103,7 +167,7 @@ describe("remote", () => {
         host: "///example.com",
         pairingCode: "pairing-token",
       }),
-    ).toEqual({
+    ).toMatchObject({
       credential: "pairing-token",
       httpBaseUrl: "https://example.com/",
       wsBaseUrl: "wss://example.com/",
@@ -116,7 +180,7 @@ describe("remote", () => {
         host: "//https://example.com",
         pairingCode: "pairing-token",
       }),
-    ).toEqual({
+    ).toMatchObject({
       credential: "pairing-token",
       httpBaseUrl: "https://example.com/",
       wsBaseUrl: "wss://example.com/",
@@ -129,7 +193,7 @@ describe("remote", () => {
         host: "myserver.com:3000",
         pairingCode: "pairing-token",
       }),
-    ).toEqual({
+    ).toMatchObject({
       credential: "pairing-token",
       httpBaseUrl: "https://myserver.com:3000/",
       wsBaseUrl: "wss://myserver.com:3000/",

@@ -1,5 +1,9 @@
 import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
-import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
+import {
+  normalizeRemoteQueryParameters,
+  resolveRemotePairingTarget,
+  type RemoteQueryParameter,
+} from "@t3tools/shared/remote";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -36,6 +40,7 @@ export interface PairingConnectionInput {
   readonly pairingUrl?: string;
   readonly host?: string;
   readonly pairingCode?: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
 }
 
 export interface SshConnectionInput {
@@ -47,6 +52,7 @@ export interface BearerConnectionUpdateInput {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly httpBaseUrl: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
 }
 
 export class ConnectionOnboarding extends Context.Service<
@@ -90,10 +96,12 @@ export const preparePairingRegistration = Effect.fn(
   const presentation = yield* ClientCapabilities.ClientPresentation;
   const descriptor = yield* fetchRemoteEnvironmentDescriptor({
     httpBaseUrl: target.httpBaseUrl,
+    queryParameters: target.queryParameters,
   }).pipe(Effect.mapError(mapRemoteEnvironmentError));
   const access = yield* bootstrapRemoteBearerSession({
     httpBaseUrl: target.httpBaseUrl,
     credential: target.credential,
+    queryParameters: target.queryParameters,
     scopes: presentation.scopes,
     clientMetadata: presentation.metadata,
   }).pipe(Effect.mapError(mapRemoteEnvironmentError));
@@ -111,6 +119,7 @@ export const preparePairingRegistration = Effect.fn(
       label: descriptor.label,
       httpBaseUrl: target.httpBaseUrl,
       wsBaseUrl: target.wsBaseUrl,
+      queryParameters: target.queryParameters,
     }),
     credential: new BearerConnectionCredential({
       token: access.access_token,
@@ -168,6 +177,7 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       detail: "Only saved bearer environments can be edited.",
     });
   }
+  const profile = entry.profile.value;
 
   const credential = options.credential;
   if (Option.isNone(credential) || !isBearerCredential(credential.value)) {
@@ -192,6 +202,17 @@ export const prepareBearerConnectionUpdate = Effect.fn(
         detail: cause instanceof Error ? cause.message : "The environment URL is invalid.",
       }),
   });
+  const queryParameters = yield* Effect.try({
+    try: () =>
+      options.input.queryParameters === undefined
+        ? profile.queryParameters
+        : normalizeRemoteQueryParameters(options.input.queryParameters),
+    catch: (cause) =>
+      new ConnectionBlockedError({
+        reason: "configuration",
+        detail: cause instanceof Error ? cause.message : "The query parameters are invalid.",
+      }),
+  });
   const connectionId = entry.target.connectionId;
   return new BearerConnectionRegistration({
     target: new BearerConnectionTarget({
@@ -205,6 +226,7 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       label,
       httpBaseUrl,
       wsBaseUrl: deriveWsBaseUrl(httpBaseUrl),
+      queryParameters,
     }),
     credential: credential.value,
   });

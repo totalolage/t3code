@@ -9,13 +9,19 @@ import {
   type EnvironmentScopeRequiredError,
 } from "@t3tools/contracts";
 import { httpHeaderRedactionLayer } from "@t3tools/shared/httpObservability";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { FetchHttpClient, HttpClient, HttpClientError } from "effect/unstable/http";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpClientError,
+  HttpClientRequest,
+} from "effect/unstable/http";
 import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
 
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
@@ -94,15 +100,46 @@ const remoteApiBaseUrl = (httpBaseUrl: string): string => {
   return url.toString();
 };
 
-export const makeEnvironmentHttpApiClient = (httpBaseUrl: string) =>
+const redactRequestUrl = (requestUrl: string): string => {
+  try {
+    const url = new URL(requestUrl);
+    for (const key of new Set(url.searchParams.keys())) {
+      url.searchParams.set(key, "[REDACTED]");
+    }
+    return url.toString();
+  } catch {
+    return requestUrl;
+  }
+};
+
+export const makeEnvironmentHttpApiClient = (
+  httpBaseUrl: string,
+  queryParameters: ReadonlyArray<RemoteQueryParameter> = [],
+) =>
   HttpApiClient.make(EnvironmentHttpApi, {
     baseUrl: remoteApiBaseUrl(httpBaseUrl),
+    transformClient: (client) =>
+      queryParameters.length === 0
+        ? client
+        : client.pipe(
+            HttpClient.mapRequest((request) =>
+              queryParameters.reduce(
+                (current, parameter) =>
+                  HttpClientRequest.appendUrlParam(current, parameter.key, parameter.value),
+                request,
+              ),
+            ),
+            HttpClient.transform((effect) =>
+              effect.pipe(Effect.provideService(HttpClient.TracerDisabledWhen, () => true)),
+            ),
+          ),
   });
 
 const failRemoteRequest = (
   requestUrl: string,
   cause: unknown,
 ): Effect.Effect<never, RemoteEnvironmentRequestError> => {
+  const safeRequestUrl = redactRequestUrl(requestUrl);
   if (cause instanceof RemoteEnvironmentAuthTimeoutError) {
     return Effect.fail(cause);
   }
@@ -112,7 +149,7 @@ const failRemoteRequest = (
   if (Schema.isSchemaError(cause)) {
     return Effect.fail(
       new RemoteEnvironmentAuthInvalidJsonError({
-        message: `Remote environment endpoint returned an invalid response from ${requestUrl}.`,
+        message: `Remote environment endpoint returned an invalid response from ${safeRequestUrl}.`,
         cause,
       }),
     );
@@ -121,19 +158,19 @@ const failRemoteRequest = (
     const response = cause.response;
     if (response.status < 200 || response.status >= 300) {
       return Effect.fail(
-        new RemoteEnvironmentAuthUndeclaredStatusError(requestUrl, response.status),
+        new RemoteEnvironmentAuthUndeclaredStatusError(safeRequestUrl, response.status),
       );
     }
     return Effect.fail(
       new RemoteEnvironmentAuthInvalidJsonError({
-        message: `Remote environment endpoint returned an invalid response from ${requestUrl}.`,
+        message: `Remote environment endpoint returned an invalid response from ${safeRequestUrl}.`,
         cause,
       }),
     );
   }
   return Effect.fail(
     new RemoteEnvironmentAuthFetchError({
-      message: `Failed to fetch remote environment endpoint ${requestUrl} (${String(cause)}).`,
+      message: `Failed to fetch remote environment endpoint ${safeRequestUrl}.`,
       cause,
     }),
   );
@@ -148,7 +185,10 @@ export const executeEnvironmentHttpRequest = <A, E, R>(
     Effect.timeoutOption(Duration.millis(timeoutMs)),
     Effect.flatMap(
       Option.match({
-        onNone: () => Effect.fail(new RemoteEnvironmentAuthTimeoutError(requestUrl, timeoutMs)),
+        onNone: () =>
+          Effect.fail(
+            new RemoteEnvironmentAuthTimeoutError(redactRequestUrl(requestUrl), timeoutMs),
+          ),
         onSome: Effect.succeed,
       }),
     ),

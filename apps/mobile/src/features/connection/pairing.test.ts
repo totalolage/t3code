@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  buildPairingUrl,
   extractPairingUrlFromQrPayload,
   PairingQrPayloadEmptyError,
   parsePairingUrl,
@@ -38,6 +39,38 @@ describe("parsePairingUrl", () => {
     ).toEqual({
       host: "https://desktop.tailnet.ts.net",
       code: "pairing-token",
+      queryParameters: [],
+    });
+  });
+
+  it("round-trips duplicate query parameters without treating the token as one", () => {
+    const pairingUrl = buildPairingUrl("https://remote.example.com", "pairing-token", [
+      { key: "tag", value: "a b" },
+      { key: "tag", value: "two" },
+    ]);
+
+    expect(parsePairingUrl(pairingUrl)).toEqual({
+      host: "https://remote.example.com",
+      code: "pairing-token",
+      queryParameters: [
+        { key: "tag", value: "a b" },
+        { key: "tag", value: "two" },
+      ],
+    });
+  });
+
+  it("reads parameters from the encoded backend in hosted pairing links", () => {
+    expect(
+      parsePairingUrl(
+        "https://app.t3.codes/pair?host=https%3A%2F%2Fdesktop.tailnet.ts.net%2F%3Fproxy%3Done%26proxy%3Dtwo#token=pairing-token",
+      ),
+    ).toEqual({
+      host: "https://desktop.tailnet.ts.net",
+      code: "pairing-token",
+      queryParameters: [
+        { key: "proxy", value: "one" },
+        { key: "proxy", value: "two" },
+      ],
     });
   });
 });

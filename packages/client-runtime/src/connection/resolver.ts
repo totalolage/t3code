@@ -68,6 +68,7 @@ const makePrimaryBroker = Effect.fn("clientRuntime.connection.broker.makePrimary
         label: target.label,
         httpBaseUrl: target.httpBaseUrl,
         socketUrl: primarySocketUrl(target),
+        queryParameters: [],
         httpAuthorization: null,
         target,
       } satisfies PreparedConnection;
@@ -78,9 +79,11 @@ const makePrimaryBroker = Effect.fn("clientRuntime.connection.broker.makePrimary
       httpBaseUrl: target.httpBaseUrl,
       wsBaseUrl: target.wsBaseUrl,
       bearerToken: bearerToken.value,
+      queryParameters: [],
     });
     return {
       ...authorized,
+      queryParameters: [],
       target,
     } satisfies PreparedConnection;
   });
@@ -126,12 +129,14 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
       httpBaseUrl: profile.httpBaseUrl,
       wsBaseUrl: profile.wsBaseUrl,
       bearerToken: credential.token,
+      queryParameters: profile.queryParameters,
     });
     return {
       environmentId: authorized.environmentId,
       label: authorized.label,
       httpBaseUrl: authorized.httpBaseUrl,
       socketUrl: authorized.socketUrl,
+      queryParameters: profile.queryParameters,
       httpAuthorization: authorized.httpAuthorization,
       target,
     } satisfies PreparedConnection;
@@ -177,6 +182,7 @@ const makeRelayBroker = Effect.fn("clientRuntime.connection.broker.makeRelay")(f
         label: authorized.label,
         httpBaseUrl: authorized.httpBaseUrl,
         socketUrl: authorized.socketUrl,
+        queryParameters: [],
         httpAuthorization: authorized.httpAuthorization,
         target,
       } satisfies PreparedConnection;
@@ -229,12 +235,14 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
       httpBaseUrl: prepared.bootstrap.httpBaseUrl,
       wsBaseUrl: prepared.bootstrap.wsBaseUrl,
       bearerToken: prepared.bearerToken,
+      queryParameters: [],
     });
     return {
       environmentId: authorized.environmentId,
       label: authorized.label,
       httpBaseUrl: authorized.httpBaseUrl,
       socketUrl: authorized.socketUrl,
+      queryParameters: [],
       httpAuthorization: authorized.httpAuthorization,
       target,
     } satisfies PreparedConnection;

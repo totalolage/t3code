@@ -1,4 +1,5 @@
 import { AssetResource, EnvironmentId, WS_METHODS } from "@t3tools/contracts";
+import { appendRemoteQueryParameters, type RemoteQueryParameter } from "@t3tools/shared/remote";
 import * as Schema from "effect/Schema";
 import { Atom } from "effect/unstable/reactivity";
 
@@ -35,9 +36,16 @@ export function parseAssetCollectionKey(
   }
 }
 
-export function resolveAssetUrl(httpBaseUrl: string, relativeUrl: string): string | null {
+export function resolveAssetUrl(
+  httpBaseUrl: string,
+  relativeUrl: string,
+  queryParameters: ReadonlyArray<RemoteQueryParameter> = [],
+): string | null {
   try {
-    return new URL(relativeUrl, httpBaseUrl).toString();
+    return appendRemoteQueryParameters(
+      new URL(relativeUrl, httpBaseUrl).toString(),
+      queryParameters,
+    );
   } catch {
     return null;
   }
