@@ -10,6 +10,7 @@ import {
 } from "./model.ts";
 import {
   connectionCatalogDisplayUrl,
+  connectionCatalogQueryParameters,
   connectionPhaseMessage,
   connectionStatusText,
   presentEnvironmentConnection,
@@ -31,6 +32,10 @@ const ENTRY: ConnectionCatalogEntry = {
       label: TARGET.label,
       httpBaseUrl: "https://environment.example.test",
       wsBaseUrl: "wss://environment.example.test",
+      queryParameters: [
+        { key: "proxy", value: "one" },
+        { key: "proxy", value: "two" },
+      ],
     }),
   ),
 };
@@ -52,6 +57,10 @@ function supervisorState(overrides: Partial<SupervisorConnectionState>): Supervi
 describe("connection presentation", () => {
   it("preserves profile display information without exposing credentials", () => {
     expect(connectionCatalogDisplayUrl(ENTRY)).toBe("https://environment.example.test");
+    expect(connectionCatalogQueryParameters(ENTRY)).toEqual([
+      { key: "proxy", value: "one" },
+      { key: "proxy", value: "two" },
+    ]);
   });
 
   it("distinguishes initial connection, reconnect, and retry errors", () => {

@@ -33,8 +33,9 @@ function pairingHttpLayer(
   const fetchFn = ((input, init = {}) => {
     const url = String(input);
     calls.push({ url, init });
+    const pathname = new URL(url).pathname;
 
-    if (url.endsWith("/.well-known/t3/environment")) {
+    if (pathname === "/.well-known/t3/environment") {
       if (options?.failDescriptor === true) {
         return Promise.resolve(
           Response.json({ message: "descriptor unavailable" }, { status: 503 }),
@@ -56,7 +57,7 @@ function pairingHttpLayer(
       );
     }
 
-    if (url.endsWith("/oauth/token")) {
+    if (pathname === "/oauth/token") {
       return Promise.resolve(
         Response.json({
           access_token: "bearer-token",
@@ -81,6 +82,10 @@ describe("connection onboarding", () => {
       const registration = yield* preparePairingRegistration({
         host: "remote.example.test",
         pairingCode: "pairing-token",
+        queryParameters: [
+          { key: "proxy", value: "one" },
+          { key: "proxy", value: "two" },
+        ],
       }).pipe(Effect.provide(Layer.mergeAll(CLIENT_PRESENTATION_LAYER, pairingHttpLayer(calls))));
 
       expect(registration).toMatchObject({
@@ -96,17 +101,21 @@ describe("connection onboarding", () => {
           connectionId: "bearer:environment-paired",
           httpBaseUrl: "https://remote.example.test/",
           wsBaseUrl: "wss://remote.example.test/",
+          queryParameters: [
+            { key: "proxy", value: "one" },
+            { key: "proxy", value: "two" },
+          ],
         },
         credential: {
           token: "bearer-token",
         },
       });
       expect(calls.map((call) => call.url)).toEqual([
-        "https://remote.example.test/.well-known/t3/environment",
-        "https://remote.example.test/oauth/token",
+        "https://remote.example.test/.well-known/t3/environment?proxy=one&proxy=two",
+        "https://remote.example.test/oauth/token?proxy=one&proxy=two",
       ]);
 
-      const tokenRequest = calls.find((call) => call.url.endsWith("/oauth/token"));
+      const tokenRequest = calls.find((call) => new URL(call.url).pathname === "/oauth/token");
       const tokenBody =
         tokenRequest?.init.body instanceof Uint8Array
           ? new TextDecoder().decode(tokenRequest.init.body)
@@ -161,6 +170,27 @@ describe("connection onboarding", () => {
     }),
   );
 
+  it.effect("rejects invalid query parameter rows before making a request", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const error = yield* preparePairingRegistration({
+        host: "remote.example.test",
+        pairingCode: "pairing-token",
+        queryParameters: [{ key: "token", value: "not-a-pairing-code" }],
+      }).pipe(
+        Effect.provide(Layer.mergeAll(CLIENT_PRESENTATION_LAYER, pairingHttpLayer(calls))),
+        Effect.flip,
+      );
+
+      expect(error).toMatchObject({
+        _tag: "ConnectionBlockedError",
+        reason: "configuration",
+        message: "Use the Pairing code field instead of a token query parameter.",
+      });
+      expect(calls).toEqual([]);
+    }),
+  );
+
   it.effect("updates bearer metadata while preserving the credential and identity", () =>
     Effect.gen(function* () {
       const environmentId = EnvironmentId.make("environment-paired");
@@ -183,6 +213,7 @@ describe("connection onboarding", () => {
               label: "Old label",
               httpBaseUrl: "http://old.example.test/",
               wsBaseUrl: "ws://old.example.test/",
+              queryParameters: [{ key: "old", value: "value" }],
             }),
           ),
         }),
@@ -200,6 +231,7 @@ describe("connection onboarding", () => {
           label: "Renamed environment",
           httpBaseUrl: "http://100.65.180.100:3773/",
           wsBaseUrl: "ws://100.65.180.100:3773/",
+          queryParameters: [{ key: "old", value: "value" }],
         },
         credential: { token: "bearer-token" },
       });

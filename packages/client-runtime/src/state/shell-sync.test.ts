@@ -34,6 +34,7 @@ const PREPARED: PreparedConnection = {
   label: TARGET.label,
   httpBaseUrl: TARGET.httpBaseUrl,
   socketUrl: TARGET.wsBaseUrl,
+  queryParameters: [],
   httpAuthorization: null,
   target: TARGET,
 };

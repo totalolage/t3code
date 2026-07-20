@@ -65,6 +65,7 @@ const PREPARED: PreparedConnection = {
   label: TARGET.label,
   httpBaseUrl: TARGET.httpBaseUrl,
   socketUrl: "wss://environment.example.test/ws",
+  queryParameters: [],
   httpAuthorization: null,
   target: TARGET,
 };

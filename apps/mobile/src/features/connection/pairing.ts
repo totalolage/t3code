@@ -1,4 +1,8 @@
-import { readHostedPairingRequest } from "@t3tools/shared/remote";
+import {
+  parseRemotePairingUrlFields,
+  normalizeRemoteQueryParameters,
+  type RemoteQueryParameter,
+} from "@t3tools/shared/remote";
 import * as Schema from "effect/Schema";
 
 const MOBILE_PAIRING_URL_PARAM = "pairingUrl";
@@ -12,47 +16,46 @@ export class PairingQrPayloadEmptyError extends Schema.TaggedErrorClass<PairingQ
   }
 }
 
-export function buildPairingUrl(host: string, code: string): string {
+export function buildPairingUrl(
+  host: string,
+  code: string,
+  queryParameters: ReadonlyArray<RemoteQueryParameter> = [],
+): string {
   const h = host.trim();
   const c = code.trim();
   if (!h) return "";
-  if (!c) return h;
+  const normalizedQueryParameters = normalizeRemoteQueryParameters(queryParameters);
 
   try {
     const url = new URL(h.includes("://") ? h : `https://${h}`);
-    url.hash = new URLSearchParams([["token", c]]).toString();
+    url.search = "";
+    for (const parameter of normalizedQueryParameters) {
+      url.searchParams.append(parameter.key, parameter.value);
+    }
+    url.hash = c === "" ? "" : new URLSearchParams([["token", c]]).toString();
     return url.toString();
   } catch {
     return `${h}#token=${c}`;
   }
 }
 
-export function parsePairingUrl(url: string): { host: string; code: string } {
+export function parsePairingUrl(url: string): {
+  host: string;
+  code: string;
+  queryParameters: ReadonlyArray<RemoteQueryParameter>;
+} {
   const trimmed = url.trim();
-  if (!trimmed) return { host: "", code: "" };
+  if (!trimmed) return { host: "", code: "", queryParameters: [] };
 
-  try {
-    const parsed = new URL(trimmed);
-    const hostedPairingRequest = readHostedPairingRequest(parsed);
-    if (hostedPairingRequest) {
-      return {
-        host: hostedPairingRequest.host.replace(/\/$/, ""),
-        code: hostedPairingRequest.token,
-      };
-    }
-
-    const hashParams = new URLSearchParams(parsed.hash.slice(1));
-    const hashToken = hashParams.get("token");
-    const queryToken = parsed.searchParams.get("token");
-    const code = hashToken || queryToken || "";
-
-    parsed.hash = "";
-    parsed.search = "";
-    parsed.pathname = "/";
-    return { host: parsed.toString().replace(/\/$/, ""), code };
-  } catch {
-    return { host: trimmed, code: "" };
+  const parsed = parseRemotePairingUrlFields(trimmed);
+  if (parsed) {
+    return {
+      host: parsed.host,
+      code: parsed.pairingCode,
+      queryParameters: parsed.queryParameters,
+    };
   }
+  return { host: trimmed, code: "", queryParameters: [] };
 }
 
 export function extractPairingUrlFromQrPayload(payload: string): string {

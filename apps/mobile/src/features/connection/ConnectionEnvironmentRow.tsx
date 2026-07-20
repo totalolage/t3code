@@ -14,6 +14,13 @@ import { cn } from "../../lib/cn";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
 import { ConnectionStatusDot } from "./ConnectionStatusDot";
+import { parsePairingUrl } from "./pairing";
+import {
+  ConnectionQueryParametersEditor,
+  makeQueryParameterRows,
+  queryParametersFromRows,
+  type QueryParameterRow,
+} from "./ConnectionQueryParametersEditor";
 
 function connectionStatusLabel(environment: ConnectedEnvironmentSummary): string | null {
   return connectionStatusText({
@@ -31,11 +38,21 @@ export function ConnectionEnvironmentRow(props: {
   readonly onRemove: (environmentId: EnvironmentId) => void;
   readonly onUpdate: (
     environmentId: EnvironmentId,
-    updates: { readonly label: string; readonly displayUrl: string },
+    updates: {
+      readonly label: string;
+      readonly displayUrl: string;
+      readonly queryParameters: ConnectedEnvironmentSummary["queryParameters"];
+    },
   ) => Promise<AtomCommandResult<unknown, unknown>>;
 }) {
   const [label, setLabel] = useState(props.environment.environmentLabel);
   const [url, setUrl] = useState(props.environment.displayUrl);
+  const [queryParameterRows, setQueryParameterRows] = useState<ReadonlyArray<QueryParameterRow>>(
+    () => makeQueryParameterRows(props.environment.queryParameters),
+  );
+  const [queryParametersOpen, setQueryParametersOpen] = useState(
+    props.environment.queryParameters.length > 0,
+  );
 
   const mutedColor = useThemeColor("--color-icon-subtle");
   const primaryFg = useThemeColor("--color-primary-foreground");
@@ -50,6 +67,7 @@ export function ConnectionEnvironmentRow(props: {
     const result = await props.onUpdate(props.environment.environmentId, {
       label: label.trim(),
       displayUrl: url.trim(),
+      queryParameters: queryParametersFromRows(queryParameterRows),
     });
     if (AsyncResult.isSuccess(result)) {
       props.onToggle();
@@ -60,7 +78,18 @@ export function ConnectionEnvironmentRow(props: {
       "Could not update environment",
       error instanceof Error ? error.message : "The environment could not be updated.",
     );
-  }, [label, url, props]);
+  }, [label, props, queryParameterRows, url]);
+
+  const handleUrlChange = useCallback((value: string) => {
+    const parsed = parsePairingUrl(value);
+    if (parsed.code !== "" || parsed.queryParameters.length > 0) {
+      setUrl(parsed.host);
+      setQueryParameterRows(makeQueryParameterRows(parsed.queryParameters));
+      setQueryParametersOpen(parsed.queryParameters.length > 0);
+      return;
+    }
+    setUrl(value);
+  }, []);
 
   return (
     <Animated.View layout={LinearTransition.duration(250)} className="bg-card">
@@ -161,10 +190,17 @@ export function ConnectionEnvironmentRow(props: {
                   keyboardType="url"
                   placeholder="192.168.1.100:8080"
                   value={url}
-                  onChangeText={setUrl}
+                  onChangeText={handleUrlChange}
                   className="rounded-[14px] border border-input-border bg-input px-4 py-3 text-base text-foreground"
                 />
               </View>
+
+              <ConnectionQueryParametersEditor
+                rows={queryParameterRows}
+                open={queryParametersOpen}
+                onOpenChange={setQueryParametersOpen}
+                onRowsChange={setQueryParameterRows}
+              />
             </>
           )}
 
