@@ -165,12 +165,17 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(publishConfig, undefined);
       assert.equal(buildConfig.appId, "com.f8y.t3code");
       assert.notProperty(buildConfig, "publish");
+      assert.equal(buildConfig.forceCodeSigning, true);
+      const mac = buildConfig.mac as Record<string, unknown>;
+      assert.equal(mac.identity, "-");
+      assert.equal(mac.notarize, false);
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(
           ConfigProvider.fromEnv({
             env: {
               GITHUB_REPOSITORY: "totalolage/t3code",
+              T3CODE_DESKTOP_AD_HOC_SIGN: "true",
               T3CODE_DESKTOP_APP_ID: "com.f8y.t3code",
               T3CODE_DESKTOP_DISABLE_UPDATE_CONFIG: "true",
             },
@@ -412,6 +417,21 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
   });
 
+  it("uses the configured desktop app ID in macOS signing entitlements", () => {
+    const configuration = resolveMacPasskeySigningConfiguration({
+      T3CODE_DESKTOP_APP_ID: " com.f8y.t3code ",
+      T3CODE_APPLE_TEAM_ID: "ABC1234567",
+      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code-f8y.provisionprofile",
+      T3CODE_CLERK_PASSKEY_RP_DOMAINS: "clerk.example.com",
+    });
+
+    assert.equal(configuration.appId, "com.f8y.t3code");
+    assert.include(
+      renderMacPasskeyEntitlements(configuration),
+      "<string>ABC1234567.com.f8y.t3code</string>",
+    );
+  });
+
   it("rejects incomplete macOS passkey signing configuration", () => {
     const captureError = (env: Readonly<Record<string, string | undefined>>) => {
       try {
@@ -502,8 +522,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
       const mac = config.mac as Record<string, unknown>;
       assert.equal(config.appId, "com.t3tools.t3code");
+      assert.equal(config.forceCodeSigning, true);
       assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
       assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
+      assert.equal(mac.notarize, true);
       assert.deepStrictEqual(mac.protocols, [
         { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
       ]);

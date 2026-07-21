@@ -8,7 +8,7 @@ const repoRoot = NodePath.resolve(import.meta.dirname, "..");
 const workflowPath = NodePath.join(repoRoot, ".github/workflows/f8y-release.yml");
 const workflow = NodeFS.readFileSync(workflowPath, "utf8");
 
-it("publishes one DMG and one Obtainium-compatible APK for every main push", () => {
+it("publishes one DMG, its checksum, and one Obtainium-compatible APK for every main push", () => {
   assert.match(workflow, /push:\n\s+branches:\n\s+- main/u);
   assert.include(workflow, "workflow_dispatch:");
   assert.include(workflow, "runs-on: macos-15");
@@ -18,11 +18,25 @@ it("publishes one DMG and one Obtainium-compatible APK for every main push", () 
   assert.include(workflow, "prerelease: true");
   assert.include(workflow, "make_latest: false");
   assert.include(workflow, "release-assets/*.dmg");
+  assert.include(workflow, "release-assets/*.dmg.sha256");
   assert.include(workflow, "release-assets/*.apk");
   assert.notInclude(workflow, "blacksmith-");
   assert.notInclude(workflow, "EXPO_TOKEN");
   assert.notInclude(workflow, "CSC_LINK");
   assert.notInclude(workflow.toLowerCase(), "personal");
+});
+
+it("ad-hoc-signs and integrity-checks the account-free macOS release", () => {
+  assert.include(workflow, 'T3CODE_DESKTOP_AD_HOC_SIGN: "true"');
+  assert.include(workflow, 'hdiutil verify "$dmg"');
+  assert.include(workflow, 'codesign --verify --deep --strict --verbose=2 "$app"');
+  assert.include(workflow, "Signature=adhoc");
+  assert.include(workflow, 'shasum -a 256 "$(basename "$dmg")"');
+  assert.include(workflow, 'bundle_id" != "com.f8y.t3code"');
+  assert.include(workflow, "Privacy & Security → Open Anyway");
+  assert.notInclude(workflow, "notarytool");
+  assert.notInclude(workflow, "stapler");
+  assert.notInclude(workflow, "--signed");
 });
 
 it("uses a stable f8y keystore and validates Android package metadata", () => {

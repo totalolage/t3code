@@ -588,6 +588,10 @@ export interface MacPasskeySigningConfiguration {
   readonly provisioningProfilePath: string;
 }
 
+export function resolveDesktopAppId(configuredAppId: string | undefined): string {
+  return configuredAppId?.trim() || DESKTOP_APP_ID;
+}
+
 export const InvalidMacPasskeyRpDomainReason = Schema.Literals([
   "empty",
   "scheme-not-allowed",
@@ -752,7 +756,7 @@ export function resolveMacPasskeySigningConfiguration(
   }
 
   return {
-    appId: DESKTOP_APP_ID,
+    appId: resolveDesktopAppId(env.T3CODE_DESKTOP_APP_ID),
     teamId,
     rpDomains: uniqueRpDomains,
     provisioningProfilePath,
@@ -1393,8 +1397,11 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
 ) {
   const appId = yield* Config.string("T3CODE_DESKTOP_APP_ID").pipe(
     Config.option,
-    Effect.map((configured) => Option.getOrElse(configured, () => DESKTOP_APP_ID).trim()),
-    Effect.map((configured) => configured || DESKTOP_APP_ID),
+    Effect.map(Option.getOrUndefined),
+    Effect.map(resolveDesktopAppId),
+  );
+  const adHocSignMac = yield* Config.boolean("T3CODE_DESKTOP_AD_HOC_SIGN").pipe(
+    Config.withDefault(false),
   );
   const buildConfig: Record<string, unknown> = {
     appId,
@@ -1417,6 +1424,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     // files through the asar (transparently redirected to the unpacked copy), so
     // there's no duplication.
     asarUnpack: [...DESKTOP_ASAR_UNPACK, "apps/server/dist/**", "**/node_modules/**"],
+    ...(platform === "mac" && (signed || adHocSignMac) ? { forceCodeSigning: true } : {}),
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
   const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
@@ -1436,6 +1444,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
+      notarize: signed,
+      ...(adHocSignMac ? { identity: "-" } : {}),
       protocols: [
         {
           name: "T3 Code",
