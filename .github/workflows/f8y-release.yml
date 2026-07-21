@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: f8y-release
+  cancel-in-progress: true
+
 jobs:
   metadata_and_checks:
     name: Metadata and focused checks
