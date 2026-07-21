@@ -7,8 +7,11 @@ import * as NodePath from "node:path";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  AuthAdministrativeScopes,
   CommandId,
+  EnvironmentHttpApi,
   EnvironmentOrchestrationHttpApi,
+  MessageId,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -17,10 +20,13 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as HttpApi from "effect/unstable/httpapi/HttpApi";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
+import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
+import { FetchHttpClient } from "effect/unstable/http";
 import * as CliError from "effect/unstable/cli/CliError";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/unstable/cli";
@@ -37,10 +43,14 @@ import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
 } from "./serverRuntimeState.ts";
+import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { environmentAuthenticatedAuthLayer } from "./auth/http.ts";
+import * as GitWorkflowService from "./git/GitWorkflowService.ts";
+import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
+import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
 class ProjectCliHttpApi extends HttpApi.make("environment").add(EnvironmentOrchestrationHttpApi) {}
@@ -130,6 +140,24 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
         ),
       ),
       Layer.provideMerge(makeProjectPersistenceLayer(config)),
+      Layer.provide(Layer.mock(GitWorkflowService.GitWorkflowService)({})),
+      Layer.provide(
+        Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
+          runForThread: () => Effect.succeed({ status: "no-script" as const }),
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({
+          refreshStatus: () => Effect.die("unexpected git status refresh"),
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+          awaitCommandReady: Effect.void,
+          markHttpListening: Effect.void,
+          enqueueCommand: (effect) => effect,
+        }),
+      ),
       Layer.provideMerge(
         NodeHttpServer.layer(NodeHttp.createServer, {
           host: "127.0.0.1",
@@ -567,6 +595,236 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
           assert.isTrue(addedProject !== undefined);
           assert.equal(addedProject?.title, "Live Project");
         }),
+      );
+    }),
+  );
+
+  it.effect("bootstraps and persists a first thread turn through the REST API", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-rest-bootstrap-test-"));
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-rest-bootstrap-workspace-"),
+      );
+
+      yield* withLiveProjectCliServer(baseDir, () =>
+        Effect.gen(function* () {
+          yield* runCliWithRuntime([
+            "project",
+            "add",
+            workspaceRoot,
+            "--title",
+            "REST Bootstrap Project",
+            "--base-dir",
+            baseDir,
+          ]);
+
+          const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+          const project = (yield* projectionSnapshotQuery.getSnapshot()).projects.find(
+            (candidate) =>
+              candidate.workspaceRoot === workspaceRoot && candidate.deletedAt === null,
+          );
+          assert.isTrue(project !== undefined);
+          if (project === undefined) {
+            return;
+          }
+
+          const server = yield* HttpServer.HttpServer;
+          const address = server.address;
+          if (typeof address === "string" || !("port" in address)) {
+            assert.fail(`Expected TCP address, got ${address}`);
+          }
+          const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+          const session = yield* environmentAuth.issueSession({
+            scopes: AuthAdministrativeScopes,
+            label: "REST bootstrap test",
+          });
+          const client = yield* HttpApiClient.make(EnvironmentHttpApi, {
+            baseUrl: `http://127.0.0.1:${address.port}`,
+          });
+          const createdAt = "2026-01-01T00:00:00.000Z";
+          const threadId = ThreadId.make("rest-bootstrap-thread");
+          const modelSelection = ServerRuntimeStartup.getAutoBootstrapDefaultModelSelection();
+          const headers = { authorization: `Bearer ${session.token}` };
+          const bootstrapPayload = {
+            type: "thread.turn.start",
+            commandId: CommandId.make("rest-bootstrap-turn"),
+            threadId,
+            message: {
+              messageId: MessageId.make("rest-bootstrap-message"),
+              role: "user",
+              text: "hello from REST",
+              attachments: [],
+            },
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            bootstrap: {
+              createThread: {
+                projectId: project.id,
+                title: "REST Bootstrap Thread",
+                modelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: null,
+                worktreePath: workspaceRoot,
+                createdAt,
+              },
+            },
+            createdAt,
+          } as const;
+
+          const result = yield* client.orchestration.dispatch({
+            headers,
+            payload: bootstrapPayload,
+          });
+
+          assert.equal(result.sequence > 0, true);
+          const snapshot = yield* projectionSnapshotQuery.getSnapshot();
+          const thread = snapshot.threads.find((candidate) => candidate.id === threadId);
+          assert.equal(thread?.title, "REST Bootstrap Thread");
+          assert.equal(thread?.projectId, project.id);
+          assert.deepEqual(thread?.modelSelection, modelSelection);
+          assert.equal(thread?.runtimeMode, "full-access");
+          assert.equal(thread?.interactionMode, "default");
+          assert.equal(thread?.branch, null);
+          assert.equal(thread?.worktreePath, workspaceRoot);
+          assert.deepEqual(
+            thread?.messages.map((message) => ({ role: message.role, text: message.text })),
+            [{ role: "user", text: "hello from REST" }],
+          );
+          const threadDetail = yield* client.orchestration.threadSnapshot({
+            headers,
+            params: { threadId },
+          });
+          assert.equal(threadDetail.thread.id, threadId);
+          assert.equal(threadDetail.thread.messages[0]?.text, "hello from REST");
+
+          const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+          const threadEvents = Array.from(
+            yield* Stream.runCollect(orchestrationEngine.readEvents(0)),
+          ).filter((event) => event.aggregateId === threadId);
+          assert.deepEqual(
+            threadEvents.map((event) => event.type),
+            ["thread.created", "thread.message-sent", "thread.turn-start-requested"],
+          );
+          assert.equal((threadEvents[1]?.sequence ?? -1) + 1, threadEvents[2]?.sequence);
+
+          const retryResult = yield* client.orchestration.dispatch({
+            headers,
+            payload: bootstrapPayload,
+          });
+          assert.equal(retryResult.sequence, result.sequence);
+          const eventsAfterRetry = Array.from(
+            yield* Stream.runCollect(orchestrationEngine.readEvents(0)),
+          ).filter((event) => event.aggregateId === threadId);
+          assert.deepEqual(eventsAfterRetry, threadEvents);
+
+          const existingThreadResult = yield* client.orchestration.dispatch({
+            headers,
+            payload: {
+              type: "thread.turn.start",
+              commandId: CommandId.make("rest-existing-thread-turn"),
+              threadId,
+              message: {
+                messageId: MessageId.make("rest-existing-thread-message"),
+                role: "user",
+                text: "second REST turn",
+                attachments: [],
+              },
+              modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt,
+            },
+          });
+          assert.equal(existingThreadResult.sequence, result.sequence + 2);
+          const existingThreadEvents = Array.from(
+            yield* Stream.runCollect(orchestrationEngine.readEvents(0)),
+          ).filter((event) => event.aggregateId === threadId);
+          assert.deepEqual(
+            existingThreadEvents.map((event) => event.type),
+            [
+              "thread.created",
+              "thread.message-sent",
+              "thread.turn-start-requested",
+              "thread.message-sent",
+              "thread.turn-start-requested",
+            ],
+          );
+
+          const missingThreadResult = yield* Effect.result(
+            client.orchestration.dispatch({
+              headers,
+              payload: {
+                type: "thread.turn.start",
+                commandId: CommandId.make("rest-missing-thread-turn"),
+                threadId: ThreadId.make("rest-missing-thread"),
+                message: {
+                  messageId: MessageId.make("rest-missing-thread-message"),
+                  role: "user",
+                  text: "missing thread",
+                  attachments: [],
+                },
+                modelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                createdAt,
+              },
+            }),
+          );
+          assert.equal(missingThreadResult._tag, "Failure");
+          if (missingThreadResult._tag === "Failure") {
+            assert.equal(missingThreadResult.failure._tag, "EnvironmentRequestInvalidError");
+            if (missingThreadResult.failure._tag === "EnvironmentRequestInvalidError") {
+              assert.equal(missingThreadResult.failure.code, "invalid_request");
+              assert.equal(missingThreadResult.failure.reason, "invalid_command");
+              assert.equal(missingThreadResult.failure.traceId.length > 0, true);
+            }
+          }
+
+          const failedThreadId = ThreadId.make("rest-bootstrap-cleanup-thread");
+          const failedBootstrapResult = yield* Effect.result(
+            client.orchestration.dispatch({
+              headers,
+              payload: {
+                ...bootstrapPayload,
+                commandId: CommandId.make("rest-bootstrap-cleanup-turn"),
+                threadId: failedThreadId,
+                message: {
+                  ...bootstrapPayload.message,
+                  messageId: MessageId.make("rest-bootstrap-cleanup-message"),
+                  text: "this bootstrap must roll back",
+                },
+                bootstrap: {
+                  createThread: {
+                    ...bootstrapPayload.bootstrap.createThread,
+                    title: "REST Bootstrap Cleanup Thread",
+                  },
+                },
+                sourceProposedPlan: {
+                  threadId,
+                  planId: "missing-plan",
+                },
+              },
+            }),
+          );
+          assert.equal(failedBootstrapResult._tag, "Failure");
+          if (failedBootstrapResult._tag === "Failure") {
+            assert.equal(failedBootstrapResult.failure._tag, "EnvironmentRequestInvalidError");
+          }
+          const failedThread = (yield* projectionSnapshotQuery.getSnapshot()).threads.find(
+            (candidate) => candidate.id === failedThreadId,
+          );
+          assert.equal(failedThread?.deletedAt !== null, true);
+          assert.deepEqual(failedThread?.messages, []);
+          const failedThreadEvents = Array.from(
+            yield* Stream.runCollect(orchestrationEngine.readEvents(0)),
+          ).filter((event) => event.aggregateId === failedThreadId);
+          assert.deepEqual(
+            failedThreadEvents.map((event) => event.type),
+            ["thread.created", "thread.deleted"],
+          );
+        }).pipe(Effect.provide(FetchHttpClient.layer)),
       );
     }),
   );

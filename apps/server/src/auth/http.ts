@@ -103,12 +103,21 @@ export function failEnvironmentAuthInvalid(reason: EnvironmentAuthInvalidReason)
   );
 }
 
-export function failEnvironmentInvalidRequest(reason: EnvironmentRequestInvalidReason) {
-  return currentEnvironmentTraceId.pipe(
-    Effect.flatMap((traceId) =>
-      Effect.fail(new EnvironmentRequestInvalidError({ code: "invalid_request", reason, traceId })),
-    ),
-  );
+export function failEnvironmentInvalidRequest(
+  reason: EnvironmentRequestInvalidReason,
+  error?: unknown,
+) {
+  return Effect.gen(function* () {
+    const traceId = yield* currentEnvironmentTraceId;
+    if (error !== undefined) {
+      yield* Effect.logWarning("environment api request rejected", {
+        reason,
+        traceId,
+        cause: error,
+      });
+    }
+    return yield* new EnvironmentRequestInvalidError({ code: "invalid_request", reason, traceId });
+  });
 }
 
 export function failEnvironmentScopeRequired(requiredScope: AuthEnvironmentScope) {
