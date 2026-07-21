@@ -23,15 +23,19 @@ import { isExpectedClientDispatchError, make } from "./OrchestrationCommandDispa
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
 import * as ProjectSetupScriptRunner from "../../project/ProjectSetupScriptRunner.ts";
 import * as ServerRuntimeStartup from "../../serverRuntimeStartup.ts";
+import * as TerminalManager from "../../terminal/Manager.ts";
 import * as VcsStatusBroadcaster from "../../vcs/VcsStatusBroadcaster.ts";
 import * as OrchestrationEngine from "./OrchestrationEngine.ts";
+import * as ProjectionSnapshotQuery from "./ProjectionSnapshotQuery.ts";
 
 const makeTestDispatcher = (dependencies: {
   readonly crypto: Crypto.Crypto;
   readonly orchestrationEngine: unknown;
+  readonly projectionSnapshotQuery?: unknown;
   readonly gitWorkflow: unknown;
   readonly projectSetupScriptRunner: unknown;
   readonly startup: unknown;
+  readonly terminalManager?: unknown;
   readonly vcsStatusBroadcaster: unknown;
 }) =>
   make.pipe(
@@ -40,12 +44,34 @@ const makeTestDispatcher = (dependencies: {
       OrchestrationEngine.OrchestrationEngineService,
       dependencies.orchestrationEngine as never,
     ),
+    Effect.provideService(
+      ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+      (dependencies.projectionSnapshotQuery ?? {
+        getProjectShellById: (projectId: ProjectId) =>
+          Effect.succeed(
+            Option.some({
+              id: projectId,
+              title: "Test project",
+              workspaceRoot: "/tmp/project",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            }),
+          ),
+        getThreadShellById: () => Effect.succeed(Option.none()),
+      }) as never,
+    ),
     Effect.provideService(GitWorkflowService.GitWorkflowService, dependencies.gitWorkflow as never),
     Effect.provideService(
       ProjectSetupScriptRunner.ProjectSetupScriptRunner,
       dependencies.projectSetupScriptRunner as never,
     ),
     Effect.provideService(ServerRuntimeStartup.ServerRuntimeStartup, dependencies.startup as never),
+    Effect.provideService(
+      TerminalManager.TerminalManager,
+      (dependencies.terminalManager ?? { close: () => Effect.void }) as never,
+    ),
     Effect.provideService(
       VcsStatusBroadcaster.VcsStatusBroadcaster,
       dependencies.vcsStatusBroadcaster as never,
@@ -86,6 +112,95 @@ describe("OrchestrationCommandDispatcher error classification", () => {
     ).toBe(false);
   });
 });
+
+effectIt.effect("rejects a bootstrap project cwd outside the registered project", () =>
+  Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto;
+    const projectId = ProjectId.make("project-path-boundary");
+    let dispatched = false;
+    let gitInvoked = false;
+    const dispatcher = yield* makeTestDispatcher({
+      crypto,
+      orchestrationEngine: {
+        dispatch: () => {
+          dispatched = true;
+          return Effect.succeed({ sequence: 1 });
+        },
+        getCommandReceipt: () => Effect.succeed(Option.none()),
+        withBootstrapDispatchLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      projectionSnapshotQuery: {
+        getProjectShellById: () =>
+          Effect.succeed(
+            Option.some({
+              id: projectId,
+              title: "Registered project",
+              workspaceRoot: "/srv/registered-project",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            }),
+          ),
+      },
+      gitWorkflow: {
+        createWorktree: () => {
+          gitInvoked = true;
+          return Effect.die("unexpected Git operation");
+        },
+      },
+      projectSetupScriptRunner: {},
+      startup: {
+        enqueueCommand: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      vcsStatusBroadcaster: {},
+    });
+    const modelSelection = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5.4",
+    };
+    const error = yield* dispatcher
+      .dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-path-boundary"),
+        threadId: ThreadId.make("thread-path-boundary"),
+        message: {
+          messageId: MessageId.make("msg-path-boundary"),
+          role: "user",
+          text: "do not escape",
+          attachments: [],
+        },
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        bootstrap: {
+          createThread: {
+            projectId,
+            title: "Path boundary",
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+          prepareWorktree: {
+            projectCwd: "/srv/unrelated-repository",
+            baseBranch: "main",
+            branch: "feat/path-boundary",
+          },
+          runSetupScript: true,
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      })
+      .pipe(Effect.flip);
+
+    expect(isExpectedClientDispatchError(error)).toBe(true);
+    expect(error.message).toContain("does not match the registered project");
+    expect(dispatched).toBe(false);
+    expect(gitInvoked).toBe(false);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
 
 effectIt.effect("compensates an interrupted bootstrap after worktree creation", () =>
   Effect.gen(function* () {
@@ -194,6 +309,128 @@ effectIt.effect("compensates an interrupted bootstrap after worktree creation", 
       "dispatch.thread.create",
       "worktree.create",
       "dispatch.thread.meta.update",
+      "worktree.remove",
+      "branch.delete",
+      "dispatch.thread.delete",
+    ]);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect("closes launched setup before rolling back a rejected final turn", () =>
+  Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto;
+    const effects: string[] = [];
+    let setupLaunches = 0;
+    const dispatcher = yield* makeTestDispatcher({
+      crypto,
+      orchestrationEngine: {
+        dispatch: (command: OrchestrationCommand) => {
+          effects.push(`dispatch.${command.type}`);
+          return command.type === "thread.turn.start"
+            ? Effect.fail(
+                new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail: "final dispatch rejected",
+                }),
+              )
+            : Effect.succeed({ sequence: effects.length });
+        },
+        getCommandReceipt: () => Effect.succeed(Option.none()),
+        withBootstrapDispatchLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      gitWorkflow: {
+        createWorktree: () =>
+          Effect.sync(() => {
+            effects.push("worktree.create");
+            return {
+              worktree: { refName: "feat/setup-order", path: "/tmp/setup-order" },
+            };
+          }),
+        removeWorktree: () =>
+          Effect.sync(() => {
+            effects.push("worktree.remove");
+          }),
+        deleteBranch: () =>
+          Effect.sync(() => {
+            effects.push("branch.delete");
+          }),
+      },
+      projectSetupScriptRunner: {
+        runForThread: () =>
+          Effect.sync(() => {
+            setupLaunches += 1;
+            effects.push("setup.start");
+            return {
+              status: "started" as const,
+              scriptId: "setup",
+              scriptName: "Setup",
+              terminalId: "setup-setup",
+              cwd: "/tmp/setup-order",
+            };
+          }),
+      },
+      startup: {
+        enqueueCommand: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      terminalManager: {
+        close: () =>
+          Effect.sync(() => {
+            effects.push("setup.close");
+          }),
+      },
+      vcsStatusBroadcaster: { refreshStatus: () => Effect.void },
+    });
+    const modelSelection = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5.4",
+    };
+
+    yield* dispatcher
+      .dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-setup-order"),
+        threadId: ThreadId.make("thread-setup-order"),
+        message: {
+          messageId: MessageId.make("msg-setup-order"),
+          role: "user",
+          text: "setup after acceptance",
+          attachments: [],
+        },
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        bootstrap: {
+          createThread: {
+            projectId: ProjectId.make("project-setup-order"),
+            title: "Setup order",
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+          prepareWorktree: {
+            projectCwd: "/tmp/project",
+            baseBranch: "main",
+            branch: "feat/setup-order",
+          },
+          runSetupScript: true,
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      })
+      .pipe(Effect.flip);
+
+    expect(setupLaunches).toBe(1);
+    expect(effects).toEqual([
+      "dispatch.thread.create",
+      "worktree.create",
+      "dispatch.thread.meta.update",
+      "setup.start",
+      "dispatch.thread.activity.append",
+      "dispatch.thread.activity.append",
+      "dispatch.thread.turn.start",
+      "setup.close",
       "worktree.remove",
       "branch.delete",
       "dispatch.thread.delete",

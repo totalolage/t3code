@@ -43,8 +43,18 @@ export const canonicalizeClientCommandTimestamps = (
   };
 };
 
+export const validateClientCommandId = (command: ClientOrchestrationCommand) =>
+  command.commandId.startsWith("server:")
+    ? Effect.fail(
+        new OrchestrationDispatchCommandError({
+          message: "Client command identifiers must not use the reserved server namespace.",
+        }),
+      )
+    : Effect.void;
+
 export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
   Effect.gen(function* () {
+    yield* validateClientCommandId(command);
     const receivedAt = DateTime.formatIso(yield* DateTime.now);
     const canonicalCommand = canonicalizeClientCommandTimestamps(command, receivedAt);
     const fileSystem = yield* FileSystem.FileSystem;
