@@ -2,6 +2,8 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  type EnvironmentInternalError,
+  type EnvironmentRequestInvalidError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -15,15 +17,25 @@ import {
   failEnvironmentNotFound,
   requireEnvironmentScope,
 } from "../auth/http.ts";
-import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
+import {
+  isExpectedClientDispatchError,
+  make as makeOrchestrationCommandDispatcher,
+} from "./Services/OrchestrationCommandDispatcher.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
+
+const failEnvironmentDispatch = (
+  cause: unknown,
+): Effect.Effect<never, EnvironmentInternalError | EnvironmentRequestInvalidError, never> =>
+  isExpectedClientDispatchError(cause)
+    ? failEnvironmentInvalidRequest("invalid_command", cause)
+    : failEnvironmentInternal("orchestration_dispatch_failed", cause);
 
 export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   EnvironmentHttpApi,
   "orchestration",
   Effect.fnUntraced(function* (handlers) {
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
-    const orchestrationEngine = yield* OrchestrationEngineService;
+    const orchestrationCommandDispatcher = yield* makeOrchestrationCommandDispatcher;
 
     return handlers
       .handle(
@@ -78,15 +90,11 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
           const normalizedCommand = yield* normalizeDispatchCommand(args.payload).pipe(
-            Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
+            Effect.catch((cause) => failEnvironmentInvalidRequest("invalid_command", cause)),
           );
-          return yield* orchestrationEngine
+          return yield* orchestrationCommandDispatcher
             .dispatch(normalizedCommand)
-            .pipe(
-              Effect.catch((cause) =>
-                failEnvironmentInternal("orchestration_dispatch_failed", cause),
-              ),
-            );
+            .pipe(Effect.catch(failEnvironmentDispatch));
         }),
       );
   }),

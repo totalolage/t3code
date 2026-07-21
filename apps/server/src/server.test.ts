@@ -676,6 +676,8 @@ const buildAppUnderTest = (options?: {
         Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
           readEvents: () => Stream.empty,
           dispatch: () => Effect.succeed({ sequence: 0 }),
+          getCommandReceipt: () => Effect.succeed(Option.none()),
+          withBootstrapDispatchLock: (effect) => effect,
           streamDomainEvents: Stream.empty,
           ...options?.layers?.orchestrationEngine,
         }),
@@ -6155,6 +6157,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       Effect.gen(function* () {
         const dispatchedCommands: Array<OrchestrationCommand> = [];
         const bootstrapGitOperations: string[] = [];
+        const createdAt = "2026-01-01T00:00:00.000Z";
+        const bootstrapCommandId = CommandId.make("cmd-bootstrap-turn-start");
+        const bootstrapThreadId = ThreadId.make("thread-bootstrap");
+        let acceptedSequence: number | null = null;
         const refreshStatus = vi.fn((_: string) =>
           Effect.succeed({
             isRepo: true,
@@ -6231,8 +6237,26 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               dispatch: (command) =>
                 Effect.sync(() => {
                   dispatchedCommands.push(command);
-                  return { sequence: dispatchedCommands.length };
+                  const sequence = dispatchedCommands.length;
+                  if (command.commandId === bootstrapCommandId) {
+                    acceptedSequence = sequence;
+                  }
+                  return { sequence };
                 }),
+              getCommandReceipt: (commandId) =>
+                Effect.sync(() =>
+                  commandId === bootstrapCommandId && acceptedSequence !== null
+                    ? Option.some({
+                        commandId,
+                        aggregateKind: "thread" as const,
+                        aggregateId: bootstrapThreadId,
+                        acceptedAt: createdAt,
+                        resultSequence: acceptedSequence,
+                        status: "accepted" as const,
+                        error: null,
+                      })
+                    : Option.none(),
+                ),
               readEvents: () => Stream.empty,
             },
             projectSetupScriptRunner: {
@@ -6241,48 +6265,53 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           },
         });
 
-        const createdAt = "2026-01-01T00:00:00.000Z";
         const wsUrl = yield* getWsServerUrl("/ws");
-        const response = yield* Effect.scoped(
+        const [response, retryResponse] = yield* Effect.scoped(
           withWsRpcClient(wsUrl, (client) =>
-            client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
-              type: "thread.turn.start",
-              commandId: CommandId.make("cmd-bootstrap-turn-start"),
-              threadId: ThreadId.make("thread-bootstrap"),
-              message: {
-                messageId: MessageId.make("msg-bootstrap"),
-                role: "user",
-                text: "hello",
-                attachments: [],
-              },
-              modelSelection: defaultModelSelection,
-              runtimeMode: "full-access",
-              interactionMode: "default",
-              bootstrap: {
-                createThread: {
-                  projectId: defaultProjectId,
-                  title: "Bootstrap Thread",
-                  modelSelection: defaultModelSelection,
-                  runtimeMode: "full-access",
-                  interactionMode: "default",
-                  branch: "main",
-                  worktreePath: null,
-                  createdAt,
+            Effect.gen(function* () {
+              const payload = {
+                type: "thread.turn.start",
+                commandId: bootstrapCommandId,
+                threadId: bootstrapThreadId,
+                message: {
+                  messageId: MessageId.make("msg-bootstrap"),
+                  role: "user",
+                  text: "hello",
+                  attachments: [],
                 },
-                prepareWorktree: {
-                  projectCwd: "/tmp/project",
-                  baseBranch: "main",
-                  branch: "t3code/bootstrap-refName",
-                  startFromOrigin: true,
+                modelSelection: defaultModelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                bootstrap: {
+                  createThread: {
+                    projectId: defaultProjectId,
+                    title: "Bootstrap Thread",
+                    modelSelection: defaultModelSelection,
+                    runtimeMode: "full-access",
+                    interactionMode: "default",
+                    branch: "main",
+                    worktreePath: null,
+                    createdAt,
+                  },
+                  prepareWorktree: {
+                    projectCwd: "/tmp/project",
+                    baseBranch: "main",
+                    branch: "t3code/bootstrap-refName",
+                    startFromOrigin: true,
+                  },
+                  runSetupScript: true,
                 },
-                runSetupScript: true,
-              },
-              createdAt,
+                createdAt,
+              } as const;
+              const first = yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand](payload);
+              const retry = yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand](payload);
+              return [first, retry] as const;
             }),
           ),
         );
 
         assert.equal(response.sequence, 5);
+        assert.equal(retryResponse.sequence, response.sequence);
         assert.deepEqual(
           dispatchedCommands.map((command) => command.type),
           [
@@ -6315,12 +6344,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           "create-worktree",
         ]);
         assert.deepEqual(runForThread.mock.calls[0]?.[0], {
-          threadId: ThreadId.make("thread-bootstrap"),
+          threadId: bootstrapThreadId,
           projectId: defaultProjectId,
           projectCwd: "/tmp/project",
           worktreePath: "/tmp/bootstrap-worktree",
         });
         assert.deepEqual(refreshStatus.mock.calls[0]?.[0], "/tmp/bootstrap-worktree");
+        assert.equal(createWorktree.mock.calls.length, 1);
+        assert.equal(runForThread.mock.calls.length, 1);
 
         const setupActivities = dispatchedCommands.filter(
           (command): command is Extract<OrchestrationCommand, { type: "thread.activity.append" }> =>
@@ -6636,6 +6667,159 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.deepEqual(
         dispatchedCommands.map((command) => command.type),
         ["thread.create", "thread.delete"],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("compensates created worktrees and retries bootstrap with fresh internal ids", () =>
+    Effect.gen(function* () {
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      const effects: string[] = [];
+      let metaUpdateAttempts = 0;
+      const createWorktree = vi.fn(
+        (_: Parameters<GitVcsDriver.GitVcsDriver["Service"]["createWorktree"]>[0]) =>
+          Effect.sync(() => {
+            effects.push("worktree.create");
+            return {
+              worktree: {
+                refName: "t3code/bootstrap-retry",
+                path: "/tmp/bootstrap-retry-worktree",
+              },
+            };
+          }),
+      );
+      const removeWorktree = vi.fn(
+        (_: Parameters<GitVcsDriver.GitVcsDriver["Service"]["removeWorktree"]>[0]) =>
+          Effect.sync(() => {
+            effects.push("worktree.remove");
+          }),
+      );
+      const deleteBranch = vi.fn(
+        (_: Parameters<GitVcsDriver.GitVcsDriver["Service"]["deleteBranch"]>[0]) =>
+          Effect.sync(() => {
+            effects.push("branch.delete");
+          }),
+      );
+
+      yield* buildAppUnderTest({
+        layers: {
+          gitVcsDriver: {
+            createWorktree,
+            removeWorktree,
+            deleteBranch,
+          },
+          orchestrationEngine: {
+            dispatch: (command) => {
+              dispatchedCommands.push(command);
+              effects.push(`dispatch.${command.type}`);
+              if (command.type === "thread.meta.update" && metaUpdateAttempts++ === 0) {
+                return Effect.fail(
+                  new OrchestrationListenerCallbackError({
+                    listener: "domain-event",
+                    detail: "simulated post-worktree failure",
+                  }),
+                );
+              }
+              return Effect.succeed({ sequence: dispatchedCommands.length });
+            },
+            readEvents: () => Stream.empty,
+          },
+        },
+      });
+
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const payload = {
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-bootstrap-retry-after-cleanup"),
+        threadId: ThreadId.make("thread-bootstrap-retry-after-cleanup"),
+        message: {
+          messageId: MessageId.make("msg-bootstrap-retry-after-cleanup"),
+          role: "user",
+          text: "retry me",
+          attachments: [],
+        },
+        modelSelection: defaultModelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        bootstrap: {
+          createThread: {
+            projectId: defaultProjectId,
+            title: "Bootstrap Retry Thread",
+            modelSelection: defaultModelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: "main",
+            worktreePath: null,
+            createdAt,
+          },
+          prepareWorktree: {
+            projectCwd: "/tmp/project",
+            baseBranch: "main",
+            branch: "t3code/bootstrap-retry",
+          },
+          runSetupScript: false,
+        },
+        createdAt,
+      } as const;
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const [firstResult, retryResult] = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const first = yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand](payload).pipe(
+              Effect.result,
+            );
+            const retry = yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand](payload);
+            return [first, retry] as const;
+          }),
+        ),
+      );
+
+      assert.equal(firstResult._tag, "Failure");
+      assert.equal(retryResult.sequence, 6);
+      assert.deepEqual(
+        dispatchedCommands.map((command) => command.type),
+        [
+          "thread.create",
+          "thread.meta.update",
+          "thread.delete",
+          "thread.create",
+          "thread.meta.update",
+          "thread.turn.start",
+        ],
+      );
+      assert.deepEqual(effects, [
+        "dispatch.thread.create",
+        "worktree.create",
+        "dispatch.thread.meta.update",
+        "worktree.remove",
+        "branch.delete",
+        "dispatch.thread.delete",
+        "dispatch.thread.create",
+        "worktree.create",
+        "dispatch.thread.meta.update",
+        "dispatch.thread.turn.start",
+      ]);
+      assert.deepEqual(removeWorktree.mock.calls[0]?.[0], {
+        cwd: "/tmp/project",
+        path: "/tmp/bootstrap-retry-worktree",
+        force: true,
+      });
+      assert.deepEqual(deleteBranch.mock.calls[0]?.[0], {
+        cwd: "/tmp/project",
+        refName: "t3code/bootstrap-retry",
+        force: true,
+      });
+      const createCommands = dispatchedCommands.filter(
+        (command): command is Extract<OrchestrationCommand, { type: "thread.create" }> =>
+          command.type === "thread.create",
+      );
+      assert.equal(createCommands.length, 2);
+      assert.notEqual(createCommands[0]?.commandId, createCommands[1]?.commandId);
+      assert.isTrue(
+        createCommands.every((command) =>
+          command.commandId.startsWith("server:bootstrap-thread-create:"),
+        ),
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );

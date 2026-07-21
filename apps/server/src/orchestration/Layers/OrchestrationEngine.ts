@@ -19,6 +19,7 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -88,6 +89,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   let commandReadModel = createEmptyReadModel(yield* nowIso);
 
   const commandQueue = yield* Queue.unbounded<CommandEnvelope>();
+  const bootstrapDispatchLock = yield* Semaphore.make(1);
   const eventPubSub = yield* PubSub.unbounded<OrchestrationEvent>();
 
   const projectEventsOntoReadModel = (
@@ -276,7 +278,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               ),
             );
 
-            if (isOrchestrationCommandInvariantError(error)) {
+            if (isOrchestrationCommandInvariantError(error) && error.cause === undefined) {
               yield* commandReceiptRepository
                 .upsert({
                   commandId: envelope.command.commandId,
@@ -320,9 +322,17 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       return yield* Deferred.await(result);
     });
 
+  const getCommandReceipt: OrchestrationEngineShape["getCommandReceipt"] = (commandId) =>
+    commandReceiptRepository.getByCommandId({ commandId });
+  const withBootstrapDispatchLock: OrchestrationEngineShape["withBootstrapDispatchLock"] = (
+    effect,
+  ) => bootstrapDispatchLock.withPermits(1)(effect);
+
   return {
     readEvents,
     dispatch,
+    getCommandReceipt,
+    withBootstrapDispatchLock,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (wsServer, ProviderRuntimeIngestion, CheckpointReactor, etc.)
     // each independently receive all domain events.
