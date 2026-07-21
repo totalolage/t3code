@@ -7,6 +7,7 @@ import {
   ProviderInstanceId,
   ProviderDriverKind,
   type ProviderInstanceConfig,
+  type ProviderInstanceEnvironmentVariable,
 } from "@t3tools/contracts";
 
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
@@ -125,6 +126,9 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   // Driver-specific config drafts keyed by driver so toggling between drivers
   // during the same dialog session does not lose in-progress input.
   const [configByDriver, setConfigByDriver] = useState<Record<string, Record<string, unknown>>>({});
+  const [environmentByDriver, setEnvironmentByDriver] = useState<
+    Record<string, ReadonlyArray<ProviderInstanceEnvironmentVariable>>
+  >({});
   // Errors are suppressed until the user has tried to submit once. After that
   // they update live so fixing the problem clears the message in place.
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
@@ -167,6 +171,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
     if (instanceIdError !== null) return;
 
     const config = configByDriver[driver] ?? {};
+    const environment = environmentByDriver[driver] ?? [];
     const hasConfig = Object.keys(config).length > 0;
     const normalizedAccentColor = normalizeProviderAccentColor(accentColor);
 
@@ -176,6 +181,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
       ...(label.trim().length > 0 ? { displayName: label.trim() } : {}),
       ...(normalizedAccentColor ? { accentColor: normalizedAccentColor } : {}),
       ...(hasConfig ? { config } : {}),
+      ...(environment.length > 0 ? { environment } : {}),
     };
     // `ProviderInstanceId.make` revalidates the slug; we've already checked
     // it via `validateInstanceId`, but going through the brand constructor
@@ -205,6 +211,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
     driver,
     driverOption,
     configByDriver,
+    environmentByDriver,
     instanceId,
     instanceIdError,
     label,
@@ -426,6 +433,10 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                     idPrefix={`add-provider-${driver}`}
                     variant="dialog"
                     onChange={setConfigDraft}
+                    environment={environmentByDriver[driver] ?? []}
+                    onEnvironmentChange={(next) =>
+                      setEnvironmentByDriver((existing) => ({ ...existing, [driver]: next }))
+                    }
                   />
                 </div>
               ) : wizardStep === 2 ? (

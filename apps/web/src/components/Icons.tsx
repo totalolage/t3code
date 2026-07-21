@@ -663,6 +663,19 @@ export const OpenCodeIcon: Icon = (props) => (
   </svg>
 );
 
+export const HermesIcon: Icon = ({ className, ...props }) => (
+  <svg {...props} viewBox="0 0 24 24" fill="none" className={cn("text-[#7c5cff]", className)}>
+    <path
+      d="M12 3v18M8.5 6.5C6 4 3.5 5 3 8c2.8-.3 4.7.5 5.5 2.5M15.5 6.5C18 4 20.5 5 21 8c-2.8-.3-4.7.5-5.5 2.5M7 13h10M9 17h6"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <circle cx="12" cy="3" r="1.5" fill="currentColor" />
+  </svg>
+);
+
 export const GithubCopilotIcon: Icon = ({ className, ...props }) => (
   <svg
     {...props}
