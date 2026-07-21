@@ -684,6 +684,52 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         yield* driver.deleteBranch({ cwd, refName: "feature/worktree", force: true });
       }),
     );
+
+    it.effect("rolls back a worktree when post-create branch configuration fails", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const pathService = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const worktreePath = pathService.join(
+          yield* makeTmpDir("git-worktrees-config-failure-"),
+          "feature-worktree",
+        );
+        const configLockPath = pathService.join(cwd, ".git", "config.lock");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        yield* fileSystem.writeFileString(configLockPath, "locked");
+        const result = yield* Effect.result(
+          driver.createWorktree({
+            cwd,
+            path: worktreePath,
+            refName: initialBranch,
+            newRefName: "feature/config-failure",
+            baseRefName: initialBranch,
+          }),
+        );
+
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.equal(result.failure.operation, "GitVcsDriver.createWorktree.configureBaseRef");
+        }
+        assert.equal(yield* fileSystem.exists(worktreePath), false);
+        assert.notInclude(yield* driver.listLocalBranchNames(cwd), "feature/config-failure");
+
+        yield* fileSystem.remove(configLockPath);
+        const retry = yield* driver.createWorktree({
+          cwd,
+          path: worktreePath,
+          refName: initialBranch,
+          newRefName: "feature/config-failure",
+          baseRefName: initialBranch,
+        });
+        assert.equal(retry.worktree.path, worktreePath);
+
+        yield* driver.removeWorktree({ cwd, path: worktreePath });
+        yield* driver.deleteBranch({ cwd, refName: "feature/config-failure", force: true });
+      }),
+    );
   });
 
   describe("commit context", () => {

@@ -97,7 +97,7 @@ export interface OrchestrationCommandDispatcherShape {
   ) => Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError, never>;
 }
 
-export interface OrchestrationCommandDispatcherDependencies {
+interface OrchestrationCommandDispatcherDependencies {
   readonly crypto: Crypto.Crypto;
   readonly orchestrationEngine: OrchestrationEngine.OrchestrationEngineService["Service"];
   readonly gitWorkflow: GitWorkflowService.GitWorkflowService["Service"];
@@ -106,7 +106,7 @@ export interface OrchestrationCommandDispatcherDependencies {
   readonly vcsStatusBroadcaster: VcsStatusBroadcaster.VcsStatusBroadcaster["Service"];
 }
 
-export function make(
+function makeDispatcher(
   dependencies: OrchestrationCommandDispatcherDependencies,
 ): OrchestrationCommandDispatcherShape {
   const {
@@ -150,6 +150,7 @@ export function make(
       const bootstrap = command.bootstrap;
       const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
       let createdThread = false;
+      let finalCommandAccepted = false;
       let createdWorktreeBranch: string | null = null;
       let createdWorktreePath: string | null = null;
       let targetProjectId = bootstrap?.createThread?.projectId;
@@ -403,11 +404,20 @@ export function make(
 
         yield* runSetupProgram();
 
-        return yield* orchestrationEngine.dispatch(finalTurnStartCommand);
+        return yield* orchestrationEngine.dispatch(finalTurnStartCommand).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              finalCommandAccepted = true;
+            }),
+          ),
+          Effect.uninterruptible,
+        );
       });
 
       return yield* bootstrapProgram.pipe(
-        Effect.onInterrupt(() => Effect.uninterruptible(cleanupCreatedResources())),
+        Effect.onInterrupt(() =>
+          finalCommandAccepted ? Effect.void : Effect.uninterruptible(cleanupCreatedResources()),
+        ),
         Effect.catchCause((cause) => {
           const squashed = Cause.squash(cause);
           const dispatchError = toDispatchCommandError(
@@ -449,3 +459,14 @@ export function make(
 
   return { dispatch };
 }
+
+export const make = Effect.gen(function* () {
+  return makeDispatcher({
+    crypto: yield* Crypto.Crypto,
+    orchestrationEngine: yield* OrchestrationEngine.OrchestrationEngineService,
+    gitWorkflow: yield* GitWorkflowService.GitWorkflowService,
+    projectSetupScriptRunner: yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner,
+    startup: yield* ServerRuntimeStartup.ServerRuntimeStartup,
+    vcsStatusBroadcaster: yield* VcsStatusBroadcaster.VcsStatusBroadcaster,
+  });
+});
