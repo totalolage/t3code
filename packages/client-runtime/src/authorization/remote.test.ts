@@ -467,9 +467,20 @@ describe("remote environment authorization", () => {
         wsBaseUrl: "wss://remote.example.com/",
         httpBaseUrl: "https://remote.example.com/",
         bearerToken: "bearer-token",
+        queryParameters: [
+          { key: "proxy", value: "secret value" },
+          { key: "proxy", value: "second" },
+        ],
       }).pipe(provideRemoteHttp(fetch.fetchFn));
 
-      expect(url).toBe("wss://remote.example.com/ws?wsTicket=ws-ticket");
+      expectFetchCall(fetch.calls, 1, {
+        url: "https://remote.example.com/api/auth/websocket-ticket?proxy=secret+value&proxy=second",
+        method: "POST",
+        headers: { authorization: "Bearer bearer-token" },
+      });
+      expect(url).toBe(
+        "wss://remote.example.com/ws?wsTicket=ws-ticket&proxy=secret+value&proxy=second",
+      );
     }),
   );
 });

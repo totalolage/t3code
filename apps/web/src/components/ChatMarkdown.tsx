@@ -1339,6 +1339,7 @@ function ChatMarkdown({
         threadRef,
         filePath: path,
         httpBaseUrl: preparedConnection.value.httpBaseUrl,
+        queryParameters: preparedConnection.value.queryParameters,
         createAssetUrl,
         openPreview,
       });

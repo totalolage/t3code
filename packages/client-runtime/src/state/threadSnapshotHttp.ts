@@ -37,8 +37,12 @@ export const fetchEnvironmentThreadSnapshot = Effect.fn(
   const requestUrl = environmentEndpointUrl(
     input.prepared.httpBaseUrl,
     `/api/orchestration/threads/${input.threadId}`,
+    input.prepared.queryParameters,
   );
-  const client = yield* makeEnvironmentHttpApiClient(input.prepared.httpBaseUrl);
+  const client = yield* makeEnvironmentHttpApiClient(
+    input.prepared.httpBaseUrl,
+    input.prepared.queryParameters,
+  );
   const headers = yield* buildEnvironmentAuthHeaders(
     input.prepared.httpAuthorization,
     "GET",

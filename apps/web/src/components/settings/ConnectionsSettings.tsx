@@ -36,6 +36,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
+import { parseRemotePairingUrlFields, type RemoteQueryParameter } from "@t3tools/shared/remote";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
@@ -92,8 +93,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { Textarea } from "../ui/textarea";
-import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "../../pairingUrl";
-import { readHostedPairingRequest } from "../../hostedPairing";
+import { setPairingTokenOnUrl } from "../../pairingUrl";
 import {
   createServerPairingCredential,
   revokeOtherServerClientSessions,
@@ -114,6 +114,7 @@ import { environmentCatalog } from "~/connection/catalog";
 import {
   connectPairing as connectPairingAtom,
   connectSshEnvironment as connectSshEnvironmentAtom,
+  updateBearerConnection as updateBearerConnectionAtom,
 } from "~/connection/onboarding";
 import { useEnvironmentQuery } from "~/state/query";
 import {
@@ -131,6 +132,13 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
 import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "./itemRows";
+import {
+  ConnectionQueryParametersEditor,
+  makeQueryParameterRow,
+  makeQueryParameterRows,
+  queryParametersFromRows,
+  type QueryParameterRow,
+} from "./ConnectionQueryParametersEditor";
 
 const DEFAULT_TAILSCALE_SERVE_PORT = 443;
 const EMPTY_ADVERTISED_ENDPOINTS: ReadonlyArray<AdvertisedEndpoint> = [];
@@ -309,44 +317,15 @@ function parseManualDesktopSshTarget(input: {
   };
 }
 
-function parsePairingUrlFields(
-  input: string,
-): { readonly host: string; readonly pairingCode: string } | null {
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-
-  try {
-    const urlLikeInput =
-      /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//u.test(trimmed) || trimmed.startsWith("//")
-        ? trimmed
-        : `https://${trimmed}`;
-    const url = new URL(urlLikeInput, window.location.origin);
-    const hostedPairingRequest = readHostedPairingRequest(url);
-    if (hostedPairingRequest) {
-      return {
-        host: hostedPairingRequest.host,
-        pairingCode: hostedPairingRequest.token,
-      };
-    }
-
-    const pairingCode = getPairingTokenFromUrl(url);
-    if (!pairingCode) return null;
-    return {
-      host: url.origin,
-      pairingCode,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function parseRemotePairingFields(input: { readonly host: string; readonly pairingCode: string }): {
+function parseRemotePairingFields(input: {
   readonly host: string;
   readonly pairingCode: string;
+  readonly queryParameterRows: ReadonlyArray<QueryParameterRow>;
+}): {
+  readonly host: string;
+  readonly pairingCode: string;
+  readonly queryParameters: ReturnType<typeof queryParametersFromRows>;
 } {
-  const parsedPairingUrl = parsePairingUrlFields(input.host);
-  if (parsedPairingUrl) return parsedPairingUrl;
-
   const host = input.host.trim();
   const pairingCode = input.pairingCode.trim();
   if (!host) {
@@ -355,7 +334,11 @@ function parseRemotePairingFields(input: { readonly host: string; readonly pairi
   if (!pairingCode) {
     throw new Error("Enter a pairing code.");
   }
-  return { host, pairingCode };
+  return {
+    host,
+    pairingCode,
+    queryParameters: queryParametersFromRows(input.queryParameterRows),
+  };
 }
 
 function formatDesktopSshConnectionError(error: unknown): string {
@@ -1340,6 +1323,12 @@ type SavedBackendListRowProps = {
   removingEnvironmentId: EnvironmentId | null;
   onConnect: (environmentId: EnvironmentId) => void;
   onRemove: (environmentId: EnvironmentId) => void;
+  onUpdateQueryParameters: (input: {
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+    readonly httpBaseUrl: string;
+    readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
+  }) => Promise<string | null>;
 };
 
 function SavedBackendListRow({
@@ -1347,11 +1336,19 @@ function SavedBackendListRow({
   removingEnvironmentId,
   onConnect,
   onRemove,
+  onUpdateQueryParameters,
 }: SavedBackendListRowProps) {
   const environmentId = environment.environmentId;
   const connectionState = environment.connection.phase;
   const isConnected = connectionState === "connected";
   const isConnecting = connectionState === "connecting" || connectionState === "reconnecting";
+  const [editQueryParametersOpen, setEditQueryParametersOpen] = useState(false);
+  const [editQueryParameterRows, setEditQueryParameterRows] = useState<
+    ReadonlyArray<QueryParameterRow>
+  >([]);
+  const [editQueryParametersExpanded, setEditQueryParametersExpanded] = useState(true);
+  const [editQueryParametersError, setEditQueryParametersError] = useState<string | null>(null);
+  const [isSavingQueryParameters, setIsSavingQueryParameters] = useState(false);
   const stateDotClassName =
     connectionState === "connected"
       ? "bg-success"
@@ -1394,6 +1391,12 @@ function SavedBackendListRow({
     environment.entry.profile.value._tag === "SshConnectionProfile"
       ? environment.entry.profile.value.target
       : null;
+  const bearerProfile =
+    environment.entry.target._tag === "BearerConnectionTarget" &&
+    Option.isSome(environment.entry.profile) &&
+    environment.entry.profile.value._tag === "BearerConnectionProfile"
+      ? environment.entry.profile.value
+      : null;
   const metadataBits = [
     sshTarget ? `SSH ${formatDesktopSshTarget(sshTarget)}` : null,
     environment.relayManaged ? "T3 Connect" : null,
@@ -1404,6 +1407,46 @@ function SavedBackendListRow({
   // environment you connect to or remove here — its lifecycle is driven by the
   // WSL on/off + distro picker on this page.
   const isWslEnvironment = isDesktopLocalConnectionTarget(environment.entry.target);
+
+  const handleEditQueryParametersOpenChange = (open: boolean) => {
+    setEditQueryParametersOpen(open);
+    setEditQueryParametersError(null);
+    if (open && bearerProfile !== null) {
+      const rows = makeQueryParameterRows(bearerProfile.queryParameters);
+      setEditQueryParameterRows(rows.length === 0 ? [makeQueryParameterRow()] : rows);
+      setEditQueryParametersExpanded(true);
+    }
+  };
+
+  const handleSaveQueryParameters = async () => {
+    if (bearerProfile === null) {
+      return;
+    }
+    let queryParameters: ReadonlyArray<RemoteQueryParameter>;
+    try {
+      queryParameters = queryParametersFromRows(editQueryParameterRows);
+    } catch (error) {
+      setEditQueryParametersError(
+        error instanceof Error ? error.message : "The query parameters are invalid.",
+      );
+      return;
+    }
+
+    setIsSavingQueryParameters(true);
+    setEditQueryParametersError(null);
+    const error = await onUpdateQueryParameters({
+      environmentId,
+      label: bearerProfile.label,
+      httpBaseUrl: bearerProfile.httpBaseUrl,
+      queryParameters,
+    });
+    setIsSavingQueryParameters(false);
+    if (error === null) {
+      setEditQueryParametersOpen(false);
+      return;
+    }
+    setEditQueryParametersError(error);
+  };
 
   return (
     <div className={ITEM_ROW_CLASSNAME}>
@@ -1462,6 +1505,62 @@ function SavedBackendListRow({
             </Tooltip>
           ) : (
             <>
+              {bearerProfile !== null ? (
+                <Dialog
+                  open={editQueryParametersOpen}
+                  onOpenChange={handleEditQueryParametersOpenChange}
+                >
+                  <DialogTrigger
+                    render={
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        aria-label={`Edit query parameters for ${environment.label}`}
+                        disabled={
+                          isSavingQueryParameters || removingEnvironmentId === environmentId
+                        }
+                      />
+                    }
+                  >
+                    Edit
+                  </DialogTrigger>
+                  <DialogPopup className="max-w-lg">
+                    <DialogHeader>
+                      <DialogTitle>Edit query parameters</DialogTitle>
+                      <DialogDescription>
+                        These parameters are sent with every request to {environment.label}.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <DialogPanel className="space-y-3">
+                      <ConnectionQueryParametersEditor
+                        rows={editQueryParameterRows}
+                        open={editQueryParametersExpanded}
+                        disabled={isSavingQueryParameters}
+                        onOpenChange={setEditQueryParametersExpanded}
+                        onRowsChange={setEditQueryParameterRows}
+                      />
+                      {editQueryParametersError ? (
+                        <p className="text-xs text-destructive">{editQueryParametersError}</p>
+                      ) : null}
+                    </DialogPanel>
+                    <DialogFooter>
+                      <Button
+                        variant="outline"
+                        disabled={isSavingQueryParameters}
+                        onClick={() => setEditQueryParametersOpen(false)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        disabled={isSavingQueryParameters}
+                        onClick={() => void handleSaveQueryParameters()}
+                      >
+                        {isSavingQueryParameters ? "Saving…" : "Save"}
+                      </Button>
+                    </DialogFooter>
+                  </DialogPopup>
+                </Dialog>
+              ) : null}
               {!isConnected ? (
                 <Button
                   size="xs"
@@ -1708,6 +1807,9 @@ export function ConnectionsSettings() {
   const connectSshEnvironment = useAtomCommand(connectSshEnvironmentAtom, {
     reportFailure: false,
   });
+  const updateBearerEnvironment = useAtomCommand(updateBearerConnectionAtom, {
+    reportFailure: false,
+  });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const primaryEnvironmentId = primaryEnvironment?.environmentId ?? null;
@@ -1780,6 +1882,10 @@ export function ConnectionsSettings() {
   const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "ssh">("remote");
   const [savedBackendHost, setSavedBackendHost] = useState("");
   const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
+  const [savedBackendQueryParameterRows, setSavedBackendQueryParameterRows] = useState<
+    ReadonlyArray<QueryParameterRow>
+  >([]);
+  const [savedBackendQueryParametersOpen, setSavedBackendQueryParametersOpen] = useState(false);
   const [savedBackendSshHost, setSavedBackendSshHost] = useState("");
   const [savedBackendSshUsername, setSavedBackendSshUsername] = useState("");
   const [savedBackendSshPort, setSavedBackendSshPort] = useState("");
@@ -2123,6 +2229,8 @@ export function ConnectionsSettings() {
 
       setSavedBackendHost("");
       setSavedBackendPairingCode("");
+      setSavedBackendQueryParameterRows([]);
+      setSavedBackendQueryParametersOpen(false);
       setSavedBackendSshHost("");
       setSavedBackendSshUsername("");
       setSavedBackendSshPort("");
@@ -2143,6 +2251,7 @@ export function ConnectionsSettings() {
       remotePairingInput = parseRemotePairingFields({
         host: savedBackendHost,
         pairingCode: savedBackendPairingCode,
+        queryParameterRows: savedBackendQueryParameterRows,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to add backend.";
@@ -2178,6 +2287,8 @@ export function ConnectionsSettings() {
 
     setSavedBackendHost("");
     setSavedBackendPairingCode("");
+    setSavedBackendQueryParameterRows([]);
+    setSavedBackendQueryParametersOpen(false);
     setSavedBackendSshHost("");
     setSavedBackendSshUsername("");
     setSavedBackendSshPort("");
@@ -2194,6 +2305,7 @@ export function ConnectionsSettings() {
     savedBackendHost,
     savedBackendMode,
     savedBackendPairingCode,
+    savedBackendQueryParameterRows,
     savedBackendSshHost,
     savedBackendSshPort,
     savedBackendSshUsername,
@@ -2239,6 +2351,39 @@ export function ConnectionsSettings() {
       }
     },
     [removeEnvironment],
+  );
+
+  const handleUpdateSavedBackendQueryParameters = useCallback(
+    async (input: {
+      readonly environmentId: EnvironmentId;
+      readonly label: string;
+      readonly httpBaseUrl: string;
+      readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
+    }): Promise<string | null> => {
+      const result = await updateBearerEnvironment(input);
+      if (result._tag === "Success") {
+        toastManager.add({
+          type: "success",
+          title: "Query parameters updated",
+          description: `Saved request parameters for ${input.label}.`,
+        });
+        return null;
+      }
+      if (isAtomCommandInterrupted(result)) {
+        return "The update was interrupted.";
+      }
+      const error = squashAtomCommandFailure(result);
+      const message = error instanceof Error ? error.message : "Failed to update query parameters.";
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not update query parameters",
+          description: message,
+        }),
+      );
+      return message;
+    },
+    [updateBearerEnvironment],
   );
 
   const handleConnectSshHost = useCallback(
@@ -2326,10 +2471,17 @@ export function ConnectionsSettings() {
     [setDefaultAdvertisedEndpointKey],
   );
   const handleSavedBackendHostChange = useCallback((value: string) => {
-    const parsedPairingUrl = parsePairingUrlFields(value);
-    if (parsedPairingUrl) {
+    const parsedPairingUrl = parseRemotePairingUrlFields(value);
+    if (
+      parsedPairingUrl &&
+      (parsedPairingUrl.pairingCode !== "" || parsedPairingUrl.queryParameters.length > 0)
+    ) {
       setSavedBackendHost(parsedPairingUrl.host);
-      setSavedBackendPairingCode(parsedPairingUrl.pairingCode);
+      if (parsedPairingUrl.pairingCode !== "") {
+        setSavedBackendPairingCode(parsedPairingUrl.pairingCode);
+      }
+      setSavedBackendQueryParameterRows(makeQueryParameterRows(parsedPairingUrl.queryParameters));
+      setSavedBackendQueryParametersOpen(parsedPairingUrl.queryParameters.length > 0);
       return;
     }
     setSavedBackendHost(value);
@@ -2403,9 +2555,16 @@ export function ConnectionsSettings() {
       </div>
       <div>
         <span className="mt-1 block text-[11px] text-muted-foreground">
-          Paste a full pairing URL here to fill both fields automatically.
+          Paste a full pairing URL here to fill the connection fields automatically.
         </span>
       </div>
+      <ConnectionQueryParametersEditor
+        rows={savedBackendQueryParameterRows}
+        open={savedBackendQueryParametersOpen}
+        disabled={isAddingSavedBackend}
+        onOpenChange={setSavedBackendQueryParametersOpen}
+        onRowsChange={setSavedBackendQueryParameterRows}
+      />
     </div>
   );
   const renderRemoteModeBody = () => (
@@ -3367,6 +3526,7 @@ export function ConnectionsSettings() {
             removingEnvironmentId={removingSavedEnvironmentId}
             onConnect={handleConnectSavedBackend}
             onRemove={handleRemoveSavedBackend}
+            onUpdateQueryParameters={handleUpdateSavedBackendQueryParameters}
           />
         ))}
         <CloudRemoteEnvironmentRows

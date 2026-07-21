@@ -217,6 +217,7 @@ describe("ConnectionResolver", () => {
         label: "Primary",
         httpBaseUrl: "http://127.0.0.1:3777",
         socketUrl: "ws://127.0.0.1:3777/ws",
+        queryParameters: [],
         httpAuthorization: null,
         target,
       });
@@ -273,6 +274,10 @@ describe("ConnectionResolver", () => {
         label: "Saved",
         httpBaseUrl: ENDPOINT.httpBaseUrl,
         wsBaseUrl: ENDPOINT.wsBaseUrl,
+        queryParameters: [
+          { key: "proxy", value: "one" },
+          { key: "proxy", value: "two" },
+        ],
       });
       const brokerLayer = yield* makeDependencies({
         credentials: [["saved-1", new BearerConnectionCredential({ token: "secret-bearer" })]],
@@ -292,9 +297,9 @@ describe("ConnectionResolver", () => {
       });
       const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(brokerLayer));
 
-      expect(
-        (yield* broker.prepare(catalogEntry(target, Option.some(profile)))).socketUrl,
-      ).toContain("wsTicket=ticket");
+      const prepared = yield* broker.prepare(catalogEntry(target, Option.some(profile)));
+      expect(prepared.socketUrl).toContain("wsTicket=ticket");
+      expect(prepared.queryParameters).toEqual(profile.queryParameters);
       expect(yield* Ref.get(bearerInputs)).toEqual(["secret-bearer"]);
     }),
   );

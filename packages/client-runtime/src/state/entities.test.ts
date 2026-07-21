@@ -227,6 +227,20 @@ describe("environment entity projections", () => {
     expect(merged?.messages).toBe(messages);
   });
 
+  it("does not resurrect cached detail after the shell removes a thread", () => {
+    const detail = {
+      ...THREAD_SHELL,
+      environmentId: ENVIRONMENT_ID,
+      deletedAt: null,
+      messages: [],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+    } satisfies OrchestrationThread & { readonly environmentId: EnvironmentId };
+
+    expect(mergeEnvironmentThread(detail, null)).toBeNull();
+  });
+
   it("preserves untouched project and thread identities across unrelated shell updates", () => {
     const harness = makeHarness();
     const projectRefsAtom = harness.projects.environmentProjectRefsAtom(ENVIRONMENT_ID);

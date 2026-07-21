@@ -21,6 +21,10 @@ function environment(
     label: "Julius's MacBook Pro",
     displayUrl: "https://environment.example.test",
     relayManaged: false,
+    queryParameters: [
+      { key: "proxy", value: "one" },
+      { key: "proxy", value: "two" },
+    ],
     entry: {
       target: new BearerConnectionTarget({
         environmentId: ENVIRONMENT_ID,
@@ -69,6 +73,10 @@ describe("mobile workspace projection", () => {
 
     expect(projected.connectionState).toBe("offline");
     expect(projected.connectionError).toBeNull();
+    expect(projected.queryParameters).toEqual([
+      { key: "proxy", value: "one" },
+      { key: "proxy", value: "two" },
+    ]);
   });
 
   it("reports offline before stale connected presentations", () => {

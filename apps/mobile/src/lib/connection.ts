@@ -1,5 +1,6 @@
 import { EnvironmentId } from "@t3tools/contracts";
 import { stripPairingTokenFromUrl } from "@t3tools/shared/remote";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 
 export { authClientMetadata } from "./authClientMetadata";
@@ -15,6 +16,7 @@ export interface SavedRemoteConnection {
   readonly authenticationMethod?: "bearer" | "dpop";
   readonly dpopAccessToken?: string;
   readonly relayManaged?: true;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
 }
 
 export type RemoteClientConnectionState = EnvironmentConnectionPhase;

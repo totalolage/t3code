@@ -17,6 +17,7 @@
 - `vp run dist:desktop:dmg:x64` — Builds an Intel macOS `.dmg`.
 - `vp run dist:desktop:linux` — Builds a Linux AppImage into `./release`.
 - `vp run dist:desktop:win` — Builds a Windows NSIS installer into `./release`.
+- `vp run dist:mobile:apk:f8y` — Generates the native Android project and builds the `f8y` release APK using the persistent keystore environment variables.
 
 ## Desktop `.dmg` packaging notes
 

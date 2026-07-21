@@ -13,6 +13,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import { AsyncResult } from "effect/unstable/reactivity";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 
 import { resolveAssetUrl } from "~/assets/assetUrls";
 import {
@@ -56,6 +57,7 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly filePath: string;
   readonly httpBaseUrl: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
   readonly createAssetUrl: (input: {
     readonly environmentId: EnvironmentId;
     readonly input: { readonly resource: AssetResource };
@@ -84,7 +86,11 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
   if (assetResult._tag === "Failure") {
     return AsyncResult.failure(assetResult.cause);
   }
-  const assetUrl = resolveAssetUrl(input.httpBaseUrl, assetResult.value.relativeUrl);
+  const assetUrl = resolveAssetUrl(
+    input.httpBaseUrl,
+    assetResult.value.relativeUrl,
+    input.queryParameters,
+  );
   if (assetUrl === null) {
     return AsyncResult.failure(
       Cause.die(new Error("The environment returned an invalid asset URL.")),

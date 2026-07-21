@@ -23,6 +23,7 @@ import * as Result from "effect/Result";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 
 import type { PreparedHttpAuthorization } from "../connection/model.ts";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 
 export interface RelayEnvironmentAuthorization {
   readonly environmentId: EnvironmentId;
@@ -46,6 +47,7 @@ export class RemoteEnvironmentAuthorization extends Context.Service<
       readonly httpBaseUrl: string;
       readonly wsBaseUrl: string;
       readonly bearerToken: string;
+      readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
     }) => Effect.Effect<AuthorizedRemoteEnvironment, ConnectionAttemptError>;
     readonly authorizeDpop: (input: {
       readonly expectedEnvironmentId: EnvironmentId;
@@ -68,8 +70,9 @@ function mapDpopSocketError(error: RemoteEnvironmentAuthError | ConnectionAttemp
 
 const fetchDescriptor = Effect.fn("clientRuntime.connection.remote.fetchDescriptor")(function* (
   httpBaseUrl: string,
+  queryParameters: ReadonlyArray<RemoteQueryParameter> = [],
 ) {
-  return yield* fetchRemoteEnvironmentDescriptor({ httpBaseUrl }).pipe(
+  return yield* fetchRemoteEnvironmentDescriptor({ httpBaseUrl, queryParameters }).pipe(
     Effect.mapError(mapRemoteEnvironmentError),
   );
 });
@@ -107,8 +110,9 @@ export const make = Effect.gen(function* () {
       readonly httpBaseUrl: string;
       readonly wsBaseUrl: string;
       readonly bearerToken: string;
+      readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
     }) {
-      const descriptor = yield* fetchDescriptor(input.httpBaseUrl).pipe(
+      const descriptor = yield* fetchDescriptor(input.httpBaseUrl, input.queryParameters).pipe(
         Effect.provideService(HttpClient.HttpClient, httpClient),
       );
       if (descriptor.environmentId !== input.expectedEnvironmentId) {
@@ -121,6 +125,7 @@ export const make = Effect.gen(function* () {
         wsBaseUrl: input.wsBaseUrl,
         httpBaseUrl: input.httpBaseUrl,
         bearerToken: input.bearerToken,
+        queryParameters: input.queryParameters,
       }).pipe(
         Effect.mapError(mapRemoteEnvironmentError),
         Effect.provideService(HttpClient.HttpClient, httpClient),

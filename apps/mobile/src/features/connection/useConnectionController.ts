@@ -8,6 +8,7 @@ import type {
   RelayClientEnvironmentRecord,
   RelayEnvironmentStatusResponse,
 } from "@t3tools/contracts/relay";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import * as Option from "effect/Option";
 import { useCallback, useMemo } from "react";
 
@@ -95,12 +96,17 @@ export function useConnectionController() {
   const updateEnvironment = useCallback(
     (
       environmentId: EnvironmentId,
-      updates: { readonly label: string; readonly displayUrl: string },
+      updates: {
+        readonly label: string;
+        readonly displayUrl: string;
+        readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
+      },
     ) =>
       updateBearer({
         environmentId,
         label: updates.label,
         httpBaseUrl: updates.displayUrl,
+        queryParameters: updates.queryParameters,
       }),
     [updateBearer],
   );

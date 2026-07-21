@@ -1,5 +1,6 @@
 import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Schema from "effect/Schema";
 
 import * as TokenStore from "../authorization/tokenStore.ts";
 import {
@@ -17,11 +18,13 @@ import {
 } from "../connection/model.ts";
 import {
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
+  ConnectionCatalogDocument,
   registerConnectionInCatalog,
   removeConnectionFromCatalog,
 } from "./storageDocument.ts";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-1");
+const decodeConnectionCatalogDocument = Schema.decodeUnknownSync(ConnectionCatalogDocument);
 
 const BEARER_TARGET = new BearerConnectionTarget({
   environmentId: ENVIRONMENT_ID,
@@ -52,6 +55,25 @@ const REMOTE_TOKEN = new TokenStore.RemoteDpopAccessToken({
 });
 
 describe("ConnectionCatalogDocument", () => {
+  it("defaults missing bearer query parameters when decoding an existing catalog", () => {
+    const legacyDocument = {
+      ...EMPTY_CONNECTION_CATALOG_DOCUMENT,
+      profiles: [
+        {
+          _tag: "BearerConnectionProfile",
+          connectionId: BEARER_TARGET.connectionId,
+          environmentId: ENVIRONMENT_ID,
+          label: "Remote",
+          httpBaseUrl: "https://remote.example.test",
+          wsBaseUrl: "wss://remote.example.test",
+        },
+      ],
+    };
+
+    const decoded = decodeConnectionCatalogDocument(legacyDocument);
+    expect(decoded.profiles[0]).toMatchObject({ queryParameters: [] });
+  });
+
   it("registers a bearer connection as one catalog mutation", () => {
     const document = registerConnectionInCatalog(
       EMPTY_CONNECTION_CATALOG_DOCUMENT,
@@ -70,6 +92,26 @@ describe("ConnectionCatalogDocument", () => {
         credential: BEARER_CREDENTIAL,
       },
     ]);
+  });
+
+  it("preserves ordered duplicate query parameters in bearer profiles", () => {
+    const profile = new BearerConnectionProfile({
+      ...BEARER_PROFILE,
+      queryParameters: [
+        { key: "tag", value: "a" },
+        { key: "tag", value: "b" },
+      ],
+    });
+    const document = registerConnectionInCatalog(
+      EMPTY_CONNECTION_CATALOG_DOCUMENT,
+      new BearerConnectionRegistration({
+        target: BEARER_TARGET,
+        profile,
+        credential: BEARER_CREDENTIAL,
+      }),
+    );
+
+    expect(document.profiles[0]).toMatchObject({ queryParameters: profile.queryParameters });
   });
 
   it("replaces obsolete connection metadata without discarding a reusable DPoP token", () => {

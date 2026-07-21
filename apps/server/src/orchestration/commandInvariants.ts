@@ -102,15 +102,23 @@ export function requireThread(input: {
   readonly threadId: ThreadId;
 }): Effect.Effect<OrchestrationThread, OrchestrationCommandInvariantError> {
   const thread = findThreadById(input.readModel, input.threadId);
-  if (thread) {
-    return Effect.succeed(thread);
+  if (!thread) {
+    return Effect.fail(
+      invariantError(
+        input.command.type,
+        `Thread '${input.threadId}' does not exist for command '${input.command.type}'.`,
+      ),
+    );
   }
-  return Effect.fail(
-    invariantError(
-      input.command.type,
-      `Thread '${input.threadId}' does not exist for command '${input.command.type}'.`,
-    ),
-  );
+  if (thread.deletedAt !== null) {
+    return Effect.fail(
+      invariantError(
+        input.command.type,
+        `Thread '${input.threadId}' is deleted and cannot handle command '${input.command.type}'.`,
+      ),
+    );
+  }
+  return Effect.succeed(thread);
 }
 
 export function requireThreadArchived(input: {
@@ -156,7 +164,14 @@ export function requireThreadAbsent(input: {
   readonly command: OrchestrationCommand;
   readonly threadId: ThreadId;
 }): Effect.Effect<void, OrchestrationCommandInvariantError> {
-  if (!findThreadById(input.readModel, input.threadId)) {
+  const existingThread = findThreadById(input.readModel, input.threadId);
+  if (!existingThread) {
+    return Effect.void;
+  }
+  // Bootstrap rollback soft-deletes a newly created thread while the client
+  // retains its preallocated id. A retry may carry refreshed draft metadata,
+  // so the tombstone itself is the stable signal that this id can be reused.
+  if (input.command.type === "thread.create" && existingThread.deletedAt !== null) {
     return Effect.void;
   }
   return Effect.fail(
