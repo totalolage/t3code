@@ -64,6 +64,11 @@ export interface OrchestrationEngineShape {
     never
   >;
 
+  /** Serialize bootstrap effects so receipt preflight and external setup are atomic in-process. */
+  readonly withBootstrapDispatchLock: <A, E, R>(
+    effect: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E, R>;
+
   /**
    * Stream persisted domain events in dispatch order.
    *

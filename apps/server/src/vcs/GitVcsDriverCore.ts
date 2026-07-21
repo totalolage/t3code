@@ -2404,6 +2404,20 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     });
   });
 
+  const deleteBranch: GitVcsDriver.GitVcsDriver["Service"]["deleteBranch"] = Effect.fn(
+    "deleteBranch",
+  )((input) =>
+    executeGit(
+      "GitVcsDriver.deleteBranch",
+      input.cwd,
+      ["branch", input.force ? "-D" : "-d", "--", input.refName],
+      {
+        timeoutMs: 10_000,
+        fallbackErrorDetail: "git branch delete failed",
+      },
+    ),
+  );
+
   const renameBranch: GitVcsDriver.GitVcsDriver["Service"]["renameBranch"] = Effect.fn(
     "renameBranch",
   )(function* (input) {
@@ -2572,6 +2586,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     fetchRemoteTrackingBranch,
     setBranchUpstream,
     removeWorktree,
+    deleteBranch,
     renameBranch,
     createRef,
     switchRef,

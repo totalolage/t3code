@@ -474,6 +474,7 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
           readEvents: () => Stream.empty,
           dispatch: () => Effect.succeed({ sequence: 1 }),
           getCommandReceipt: () => Effect.succeed(Option.none()),
+          withBootstrapDispatchLock: (effect) => effect,
           streamDomainEvents: Stream.fromQueue(events),
           latestSequence: Effect.succeed(0),
         } satisfies OrchestrationEngineShape;
@@ -667,6 +668,7 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
             readEvents: () => Stream.empty,
             dispatch: () => Effect.succeed({ sequence: 1 }),
             getCommandReceipt: () => Effect.succeed(Option.none()),
+            withBootstrapDispatchLock: (effect) => effect,
             streamDomainEvents: Stream.fromQueue(events),
             latestSequence: Effect.succeed(0),
           } satisfies OrchestrationEngineShape),

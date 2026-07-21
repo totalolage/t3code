@@ -599,7 +599,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
     }),
   );
 
-  it.effect("bootstraps and persists a first thread turn through the REST API", () =>
+  it.effect("deduplicates and persists concurrent REST bootstrap delivery", () =>
     Effect.gen(function* () {
       const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-rest-bootstrap-test-"));
       const workspaceRoot = NodeFS.mkdtempSync(
@@ -673,12 +673,16 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
             createdAt,
           } as const;
 
-          const result = yield* client.orchestration.dispatch({
-            headers,
-            payload: bootstrapPayload,
-          });
+          const [result, concurrentResult] = yield* Effect.all(
+            [
+              client.orchestration.dispatch({ headers, payload: bootstrapPayload }),
+              client.orchestration.dispatch({ headers, payload: bootstrapPayload }),
+            ],
+            { concurrency: "unbounded" },
+          );
 
           assert.equal(result.sequence > 0, true);
+          assert.equal(concurrentResult.sequence, result.sequence);
           const snapshot = yield* projectionSnapshotQuery.getSnapshot();
           const thread = snapshot.threads.find((candidate) => candidate.id === threadId);
           assert.equal(thread?.title, "REST Bootstrap Thread");
