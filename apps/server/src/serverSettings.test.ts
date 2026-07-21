@@ -528,66 +528,71 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
-  it.effect("stores sensitive provider instance environment values outside settings.json", () =>
+  it.effect("stores the Hermes gateway secret outside settings.json", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
       const serverConfig = yield* ServerConfig.ServerConfig;
       const fileSystem = yield* FileSystem.FileSystem;
-      const instanceId = ProviderInstanceId.make("codex_personal");
+      const instanceId = ProviderInstanceId.make("hermes_gateway");
 
       const next = yield* serverSettings.updateSettings({
         providerInstances: {
           [instanceId]: {
-            driver: ProviderDriverKind.make("codex"),
+            driver: ProviderDriverKind.make("hermes"),
             environment: [
-              { name: "OPENROUTER_API_KEY", value: "sk-or-secret", sensitive: true },
-              { name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api", sensitive: false },
+              { name: "HERMES_GATEWAY_SECRET", value: "hermes-test-secret", sensitive: true },
+              { name: "HERMES_LOG_LEVEL", value: "debug", sensitive: false },
             ],
-            config: {},
+            config: { gatewayUrl: "https://hermes.example.test" },
           },
         },
       });
 
       assert.deepEqual(next.providerInstances[instanceId]?.environment, [
         {
-          name: "OPENROUTER_API_KEY",
-          value: "sk-or-secret",
+          name: "HERMES_GATEWAY_SECRET",
+          value: "hermes-test-secret",
           sensitive: true,
           valueRedacted: true,
         },
-        { name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api", sensitive: false },
+        { name: "HERMES_LOG_LEVEL", value: "debug", sensitive: false },
       ]);
 
       const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
-      assert.notInclude(raw, "sk-or-secret");
+      assert.notInclude(raw, "hermes-test-secret");
       // @effect-diagnostics-next-line preferSchemaOverJson:off
-      assert.deepEqual(JSON.parse(raw).providerInstances.codex_personal.environment, [
+      assert.deepEqual(JSON.parse(raw).providerInstances.hermes_gateway.environment, [
         {
-          name: "OPENROUTER_API_KEY",
+          name: "HERMES_GATEWAY_SECRET",
           value: "",
           sensitive: true,
           valueRedacted: true,
         },
-        { name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api", sensitive: false },
+        { name: "HERMES_LOG_LEVEL", value: "debug", sensitive: false },
       ]);
 
       const roundTripped = yield* serverSettings.updateSettings({
         providerInstances: {
           [instanceId]: {
-            driver: ProviderDriverKind.make("codex"),
-            displayName: "Codex Personal",
+            driver: ProviderDriverKind.make("hermes"),
+            displayName: "Hermes Gateway",
             environment: [
-              { name: "OPENROUTER_API_KEY", value: "", sensitive: true, valueRedacted: true },
-              { name: "ANTHROPIC_BASE_URL", value: "https://openrouter.ai/api", sensitive: false },
+              {
+                name: "HERMES_GATEWAY_SECRET",
+                value: "",
+                sensitive: true,
+                valueRedacted: true,
+              },
+              { name: "HERMES_LOG_LEVEL", value: "debug", sensitive: false },
             ],
-            config: {},
+            config: { gatewayUrl: "https://hermes.example.test" },
           },
         },
       });
 
       assert.equal(
         roundTripped.providerInstances[instanceId]?.environment?.[0]?.value,
-        "sk-or-secret",
+        "hermes-test-secret",
       );
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );

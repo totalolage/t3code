@@ -7,6 +7,7 @@ import type {
   ProviderSettingsFormAnnotation,
   ProviderSettingsFormControl,
   ProviderSettingsFormSchemaAnnotation,
+  ProviderInstanceEnvironmentVariable,
 } from "@t3tools/contracts";
 
 import { cn } from "../../lib/utils";
@@ -160,6 +161,30 @@ interface ProviderSettingsFormProps {
   readonly idPrefix: string;
   readonly variant: "card" | "dialog";
   readonly onChange: (nextConfig: Record<string, unknown> | undefined) => void;
+  readonly environment?: ReadonlyArray<ProviderInstanceEnvironmentVariable>;
+  readonly onEnvironmentChange?: (next: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => void;
+}
+
+const EMPTY_PROVIDER_ENVIRONMENT: ReadonlyArray<ProviderInstanceEnvironmentVariable> = [];
+
+export function nextProviderSecretEnvironment(
+  environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>,
+  name: string,
+  value: string,
+): ReadonlyArray<ProviderInstanceEnvironmentVariable> {
+  const existingIndex = environment.findIndex((variable) => variable.name === name);
+  const nextVariable: ProviderInstanceEnvironmentVariable = {
+    name,
+    value,
+    sensitive: true,
+    ...(value.length === 0 && existingIndex >= 0 && environment[existingIndex]?.valueRedacted
+      ? { valueRedacted: true }
+      : {}),
+  };
+  if (existingIndex < 0) {
+    return value.length > 0 ? [...environment, nextVariable] : environment;
+  }
+  return environment.map((variable, index) => (index === existingIndex ? nextVariable : variable));
 }
 
 function FieldFrame(props: {
@@ -280,10 +305,16 @@ export function ProviderSettingsForm({
   idPrefix,
   variant,
   onChange,
+  environment = EMPTY_PROVIDER_ENVIRONMENT,
+  onEnvironmentChange,
 }: ProviderSettingsFormProps) {
   const fields = useMemo(() => deriveProviderSettingsFields(definition), [definition]);
+  const secretField = definition.secretEnvironmentVariable;
+  const secretVariable = secretField
+    ? environment.find((variable) => variable.name === secretField.name)
+    : undefined;
 
-  if (fields.length === 0) {
+  if (fields.length === 0 && !secretField) {
     return null;
   }
 
@@ -299,6 +330,64 @@ export function ProviderSettingsForm({
           onChange={onChange}
         />
       ))}
+      {secretField && onEnvironmentChange ? (
+        <FieldFrame variant={variant}>
+          <label
+            htmlFor={`${idPrefix}-${secretField.name}`}
+            className={cn(variant === "card" && "block")}
+          >
+            <span className="text-xs font-medium text-foreground">{secretField.label}</span>
+            {variant === "card" ? (
+              <DraftInput
+                id={`${idPrefix}-${secretField.name}`}
+                className="mt-1.5"
+                type="password"
+                autoComplete="off"
+                value={secretVariable?.valueRedacted ? "" : (secretVariable?.value ?? "")}
+                onCommit={(next) =>
+                  onEnvironmentChange(
+                    nextProviderSecretEnvironment(environment, secretField.name, next),
+                  )
+                }
+                placeholder={
+                  secretVariable?.valueRedacted
+                    ? "Stored secret - enter a new value to replace"
+                    : secretField.placeholder
+                }
+                spellCheck={false}
+              />
+            ) : (
+              <Input
+                id={`${idPrefix}-${secretField.name}`}
+                className="bg-background"
+                type="password"
+                autoComplete="off"
+                value={secretVariable?.value ?? ""}
+                onChange={(event) =>
+                  onEnvironmentChange(
+                    nextProviderSecretEnvironment(
+                      environment,
+                      secretField.name,
+                      event.target.value,
+                    ),
+                  )
+                }
+                placeholder={secretField.placeholder}
+                spellCheck={false}
+              />
+            )}
+            <span
+              className={
+                variant === "card"
+                  ? "mt-1 block text-xs text-muted-foreground"
+                  : "text-[11px] text-muted-foreground"
+              }
+            >
+              {secretField.description}
+            </span>
+          </label>
+        </FieldFrame>
+      ) : null}
     </>
   );
 }

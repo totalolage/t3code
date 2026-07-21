@@ -156,9 +156,12 @@ function ProviderAuthEmail(props: {
 function ProviderEnvironmentSection(props: {
   readonly environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>;
   readonly onChange: (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => void;
+  readonly hiddenNames?: ReadonlySet<string>;
 }) {
   const [rows, setRows] = useState<ReadonlyArray<EnvironmentDraftRow>>(() =>
-    props.environment.map(makeEnvironmentDraftRow),
+    props.environment
+      .filter((variable) => !props.hiddenNames?.has(variable.name))
+      .map(makeEnvironmentDraftRow),
   );
 
   const publishRows = (nextRows: ReadonlyArray<EnvironmentDraftRow>) => {
@@ -179,7 +182,8 @@ function ProviderEnvironmentSection(props: {
       const { id: _id, ...rest } = row;
       published.push({ ...rest, name });
     }
-    props.onChange(published);
+    const hidden = props.environment.filter((variable) => props.hiddenNames?.has(variable.name));
+    props.onChange([...hidden, ...published]);
   };
 
   const updateVariable = (id: string, patch: Partial<Omit<EnvironmentDraftRow, "id">>) => {
@@ -500,6 +504,9 @@ export function ProviderInstanceCard({
         : (rest as ProviderInstanceConfig),
     );
   };
+  const managedEnvironmentNames = new Set(
+    driverOption?.secretEnvironmentVariable ? [driverOption.secretEnvironmentVariable.name] : [],
+  );
 
   const titleIconNode = driverKind ? (
     <ProviderInstanceIcon
@@ -761,6 +768,7 @@ export function ProviderInstanceCard({
               <ProviderEnvironmentSection
                 environment={instance.environment ?? []}
                 onChange={updateEnvironment}
+                hiddenNames={managedEnvironmentNames}
               />
             </div>
 
@@ -771,6 +779,8 @@ export function ProviderInstanceCard({
                 idPrefix={`provider-instance-${instanceId}`}
                 variant="card"
                 onChange={updateConfig}
+                environment={instance.environment ?? []}
+                onEnvironmentChange={updateEnvironment}
               />
             ) : null}
 
