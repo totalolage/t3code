@@ -39,6 +39,10 @@ it("ad-hoc-signs and integrity-checks the account-free macOS release", () => {
   assert.notInclude(workflow, "--signed");
 });
 
+it("cancels an in-progress f8y release when a newer one is queued", () => {
+  assert.match(workflow, /concurrency:\n\s+group: f8y-release\n\s+cancel-in-progress: true/u);
+});
+
 it("uses a stable f8y keystore and validates Android package metadata", () => {
   assert.include(workflow, "F8Y_ANDROID_KEYSTORE_BASE64");
   assert.include(workflow, "F8Y_ANDROID_STORE_PASSWORD");
