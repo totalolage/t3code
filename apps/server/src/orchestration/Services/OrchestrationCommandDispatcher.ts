@@ -150,6 +150,7 @@ export function make(
       const bootstrap = command.bootstrap;
       const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
       let createdThread = false;
+      let createdWorktreeBranch: string | null = null;
       let createdWorktreePath: string | null = null;
       let targetProjectId = bootstrap?.createThread?.projectId;
       let targetProjectCwd = bootstrap?.prepareWorktree?.projectCwd;
@@ -174,6 +175,15 @@ export function make(
                 force: true,
               })
               .pipe(Effect.ignoreCause({ log: true }));
+            if (createdWorktreeBranch) {
+              yield* gitWorkflow
+                .deleteBranch({
+                  cwd: targetProjectCwd,
+                  refName: createdWorktreeBranch,
+                  force: true,
+                })
+                .pipe(Effect.ignoreCause({ log: true }));
+            }
           }
           if (createdThread) {
             yield* serverCommandId("bootstrap-thread-delete").pipe(
@@ -379,6 +389,7 @@ export function make(
             path: null,
           });
           targetWorktreePath = worktree.worktree.path;
+          createdWorktreeBranch = worktree.worktree.refName;
           createdWorktreePath = targetWorktreePath;
           yield* orchestrationEngine.dispatch({
             type: "thread.meta.update",
@@ -396,16 +407,18 @@ export function make(
       });
 
       return yield* bootstrapProgram.pipe(
+        Effect.onInterrupt(() => Effect.uninterruptible(cleanupCreatedResources())),
         Effect.catchCause((cause) => {
           const squashed = Cause.squash(cause);
           const dispatchError = toDispatchCommandError(
             squashed,
             "Failed to bootstrap thread turn start.",
           );
+          const cleanup = Effect.uninterruptible(cleanupCreatedResources());
           if (Cause.hasInterruptsOnly(cause)) {
-            return Effect.fail(dispatchError);
+            return Effect.interrupt;
           }
-          return cleanupCreatedResources().pipe(Effect.flatMap(() => Effect.fail(dispatchError)));
+          return cleanup.pipe(Effect.flatMap(() => Effect.fail(dispatchError)));
         }),
       );
     },
@@ -416,7 +429,7 @@ export function make(
   ): Effect.fn.Return<{ readonly sequence: number }, OrchestrationDispatchCommandError, never> {
     const dispatchEffect =
       command.type === "thread.turn.start" && command.bootstrap
-        ? dispatchBootstrapTurnStart(command)
+        ? orchestrationEngine.withBootstrapDispatchLock(dispatchBootstrapTurnStart(command))
         : orchestrationEngine
             .dispatch(command)
             .pipe(

@@ -677,6 +677,7 @@ const buildAppUnderTest = (options?: {
           readEvents: () => Stream.empty,
           dispatch: () => Effect.succeed({ sequence: 0 }),
           getCommandReceipt: () => Effect.succeed(Option.none()),
+          withBootstrapDispatchLock: (effect) => effect,
           streamDomainEvents: Stream.empty,
           ...options?.layers?.orchestrationEngine,
         }),
@@ -6693,12 +6694,19 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             effects.push("worktree.remove");
           }),
       );
+      const deleteBranch = vi.fn(
+        (_: Parameters<GitVcsDriver.GitVcsDriver["Service"]["deleteBranch"]>[0]) =>
+          Effect.sync(() => {
+            effects.push("branch.delete");
+          }),
+      );
 
       yield* buildAppUnderTest({
         layers: {
           gitVcsDriver: {
             createWorktree,
             removeWorktree,
+            deleteBranch,
           },
           orchestrationEngine: {
             dispatch: (command) => {
@@ -6785,6 +6793,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         "worktree.create",
         "dispatch.thread.meta.update",
         "worktree.remove",
+        "branch.delete",
         "dispatch.thread.delete",
         "dispatch.thread.create",
         "worktree.create",
@@ -6794,6 +6803,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.deepEqual(removeWorktree.mock.calls[0]?.[0], {
         cwd: "/tmp/project",
         path: "/tmp/bootstrap-retry-worktree",
+        force: true,
+      });
+      assert.deepEqual(deleteBranch.mock.calls[0]?.[0], {
+        cwd: "/tmp/project",
+        refName: "t3code/bootstrap-retry",
         force: true,
       });
       const createCommands = dispatchedCommands.filter(
