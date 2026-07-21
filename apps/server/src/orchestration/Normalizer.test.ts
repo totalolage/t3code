@@ -7,13 +7,32 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import { it as effectIt } from "@effect/vitest";
 
-import { canonicalizeClientCommandTimestamps } from "./Normalizer.ts";
+import * as Effect from "effect/Effect";
+
+import { canonicalizeClientCommandTimestamps, validateClientCommandId } from "./Normalizer.ts";
 
 const clientCreatedAt = "2031-01-01T00:00:00.000Z";
 const serverReceivedAt = "2026-07-18T00:00:00.000Z";
 
 describe("canonicalizeClientCommandTimestamps", () => {
+  effectIt.effect("rejects client command ids in the reserved server namespace", () =>
+    Effect.gen(function* () {
+      const command: ClientOrchestrationCommand = {
+        type: "project.create",
+        commandId: CommandId.make("server:bootstrap-thread-create:spoofed"),
+        projectId: ProjectId.make("project-spoofed"),
+        title: "Spoofed",
+        workspaceRoot: "/tmp/spoofed",
+        createdAt: clientCreatedAt,
+      };
+
+      const error = yield* validateClientCommandId(command).pipe(Effect.flip);
+      expect(error.message).toContain("reserved server namespace");
+    }),
+  );
+
   it("replaces a client command timestamp with the server receipt timestamp", () => {
     const command: ClientOrchestrationCommand = {
       type: "project.create",

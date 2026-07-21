@@ -238,6 +238,35 @@ describe("remote environment authorization", () => {
     }),
   );
 
+  it.effect("requests only the supported remote orchestration CLI scopes", () =>
+    Effect.gen(function* () {
+      const fetch = recordedFetch(
+        Response.json(
+          {
+            access_token: "orchestration-token",
+            issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
+            token_type: "Bearer",
+            expires_in: 3600,
+            scope: "orchestration:read orchestration:operate",
+          },
+          { status: 200 },
+        ),
+      );
+
+      yield* bootstrapRemoteBearerSession({
+        httpBaseUrl: "https://remote.example.com/",
+        credential: "one-time-bootstrap",
+        scopes: ["orchestration:read", "orchestration:operate"],
+      }).pipe(provideRemoteHttp(fetch.fetchFn));
+
+      expectFetchCall(fetch.calls, 1, {
+        url: "https://remote.example.com/oauth/token",
+        method: "POST",
+        body: "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=one-time-bootstrap&subject_token_type=urn%3At3%3Aparams%3Aoauth%3Atoken-type%3Aenvironment-bootstrap&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&scope=orchestration%3Aread+orchestration%3Aoperate",
+      });
+    }),
+  );
+
   it.effect("loads remote session state and websocket tickets over bearer auth", () =>
     Effect.gen(function* () {
       const fetch = recordedFetch(

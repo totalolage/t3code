@@ -40,6 +40,7 @@ export class ProjectSetupScriptOperationError extends Schema.TaggedErrorClass<Pr
     projectId: Schema.optional(Schema.String),
     projectCwd: Schema.optional(Schema.String),
     worktreePath: Schema.String,
+    terminalId: Schema.optional(Schema.String),
     operation: Schema.Literals(["resolveProject", "openTerminal", "writeCommand"]),
     cause: Schema.Defect(),
   },
@@ -151,6 +152,7 @@ export const make = Effect.gen(function* () {
           (cause) =>
             new ProjectSetupScriptOperationError({
               ...errorContext,
+              terminalId,
               operation: "openTerminal",
               cause,
             }),
@@ -167,6 +169,7 @@ export const make = Effect.gen(function* () {
           (cause) =>
             new ProjectSetupScriptOperationError({
               ...errorContext,
+              terminalId,
               operation: "writeCommand",
               cause,
             }),

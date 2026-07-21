@@ -463,7 +463,9 @@ describe("OrchestrationEngine", () => {
       }),
     );
     const retriedCreatedAt = "2026-01-03T00:00:00.000Z";
-    await system.run(createThread("cmd-bootstrap-retry-thread-recreate", retriedCreatedAt));
+    await system.run(
+      createThread("server:bootstrap-thread-create:retry-thread-recreate", retriedCreatedAt),
+    );
     await expect(
       system.run(createThread("cmd-bootstrap-retry-thread-active-duplicate")),
     ).rejects.toThrow("already exists");
