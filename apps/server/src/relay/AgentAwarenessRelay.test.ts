@@ -469,6 +469,7 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
         const orchestrationEngine = {
           readEvents: () => Stream.empty,
           dispatch: () => Effect.succeed({ sequence: 1 }),
+          getCommandReceipt: () => Effect.succeed(Option.none()),
           streamDomainEvents: Stream.fromQueue(events),
         } satisfies OrchestrationEngineShape;
 
@@ -658,6 +659,7 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
           Layer.succeed(OrchestrationEngineService, {
             readEvents: () => Stream.empty,
             dispatch: () => Effect.succeed({ sequence: 1 }),
+            getCommandReceipt: () => Effect.succeed(Option.none()),
             streamDomainEvents: Stream.fromQueue(events),
           } satisfies OrchestrationEngineShape),
           Layer.succeed(ProjectionSnapshotQuery, {

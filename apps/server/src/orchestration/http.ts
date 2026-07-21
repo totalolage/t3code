@@ -6,6 +6,7 @@ import {
   type EnvironmentRequestInvalidError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Crypto from "effect/Crypto";
 import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
@@ -41,6 +42,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const orchestrationCommandDispatcher = makeOrchestrationCommandDispatcher({
+      crypto: yield* Crypto.Crypto,
       orchestrationEngine: yield* OrchestrationEngineService,
       gitWorkflow: yield* GitWorkflowService.GitWorkflowService,
       projectSetupScriptRunner: yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner,

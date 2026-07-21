@@ -276,7 +276,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               ),
             );
 
-            if (isOrchestrationCommandInvariantError(error)) {
+            if (isOrchestrationCommandInvariantError(error) && error.cause === undefined) {
               yield* commandReceiptRepository
                 .upsert({
                   commandId: envelope.command.commandId,
@@ -320,9 +320,13 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       return yield* Deferred.await(result);
     });
 
+  const getCommandReceipt: OrchestrationEngineShape["getCommandReceipt"] = (commandId) =>
+    commandReceiptRepository.getByCommandId({ commandId });
+
   return {
     readEvents,
     dispatch,
+    getCommandReceipt,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (wsServer, ProviderRuntimeIngestion, CheckpointReactor, etc.)
     // each independently receive all domain events.
