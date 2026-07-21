@@ -10,13 +10,18 @@
  *
  * @module OrchestrationEngineService
  */
-import type { OrchestrationCommand, OrchestrationEvent } from "@t3tools/contracts";
+import type { CommandId, OrchestrationCommand, OrchestrationEvent } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
+import type * as Option from "effect/Option";
 import type * as Stream from "effect/Stream";
 
 import type { OrchestrationDispatchError } from "../Errors.ts";
-import type { OrchestrationEventStoreError } from "../../persistence/Errors.ts";
+import type {
+  OrchestrationCommandReceiptRepositoryError,
+  OrchestrationEventStoreError,
+} from "../../persistence/Errors.ts";
+import type { OrchestrationCommandReceipt } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 
 /**
  * OrchestrationEngineShape - Service API for orchestration command and event flow.
@@ -49,6 +54,15 @@ export interface OrchestrationEngineShape {
   readonly dispatch: (
     command: OrchestrationCommand,
   ) => Effect.Effect<{ sequence: number }, OrchestrationDispatchError, never>;
+
+  /** Read a command receipt without dispatching or running external side effects. */
+  readonly getCommandReceipt: (
+    commandId: CommandId,
+  ) => Effect.Effect<
+    Option.Option<OrchestrationCommandReceipt>,
+    OrchestrationCommandReceiptRepositoryError,
+    never
+  >;
 
   /**
    * Stream persisted domain events in dispatch order.

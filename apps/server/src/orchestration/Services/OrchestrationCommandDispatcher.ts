@@ -6,8 +6,10 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
@@ -66,11 +68,11 @@ const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
       });
 
 function isExpectedClientDispatchCause(cause: unknown, seen: Set<unknown>): boolean {
-  if (
-    isOrchestrationCommandInvariantError(cause) ||
-    isOrchestrationCommandPreviouslyRejectedError(cause)
-  ) {
-    return true;
+  if (isOrchestrationCommandInvariantError(cause)) {
+    return cause.cause === undefined;
+  }
+  if (isOrchestrationCommandPreviouslyRejectedError(cause)) {
+    return cause.cause === undefined;
   }
   if (typeof cause !== "object" || cause === null || seen.has(cause)) {
     return false;
@@ -96,6 +98,7 @@ export interface OrchestrationCommandDispatcherShape {
 }
 
 export interface OrchestrationCommandDispatcherDependencies {
+  readonly crypto: Crypto.Crypto;
   readonly orchestrationEngine: OrchestrationEngine.OrchestrationEngineService["Service"];
   readonly gitWorkflow: GitWorkflowService.GitWorkflowService["Service"];
   readonly projectSetupScriptRunner: ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"];
@@ -107,6 +110,7 @@ export function make(
   dependencies: OrchestrationCommandDispatcherDependencies,
 ): OrchestrationCommandDispatcherShape {
   const {
+    crypto,
     orchestrationEngine,
     gitWorkflow,
     projectSetupScriptRunner,
@@ -123,26 +127,67 @@ export function make(
     function* (
       command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
     ): Effect.fn.Return<{ readonly sequence: number }, OrchestrationDispatchCommandError, never> {
+      const existingReceipt = yield* orchestrationEngine
+        .getCommandReceipt(command.commandId)
+        .pipe(
+          Effect.mapError((cause) =>
+            toDispatchCommandError(cause, "Failed to read orchestration command receipt."),
+          ),
+        );
+      if (Option.isSome(existingReceipt)) {
+        if (existingReceipt.value.status === "accepted") {
+          return { sequence: existingReceipt.value.resultSequence };
+        }
+        return yield* toDispatchCommandError(
+          new OrchestrationCommandPreviouslyRejectedError({
+            commandId: command.commandId,
+            detail: existingReceipt.value.error ?? "Previously rejected.",
+          }),
+          "Orchestration command was previously rejected.",
+        );
+      }
+
       const bootstrap = command.bootstrap;
       const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
       let createdThread = false;
+      let createdWorktreePath: string | null = null;
       let targetProjectId = bootstrap?.createThread?.projectId;
       let targetProjectCwd = bootstrap?.prepareWorktree?.projectCwd;
       let targetWorktreePath = bootstrap?.createThread?.worktreePath ?? null;
 
-      const serverCommandId = (tag: string) => CommandId.make(`server:${tag}:${command.commandId}`);
-      const serverEventId = (tag: string) => EventId.make(`server:${tag}:${command.commandId}`);
+      const randomUUID = crypto.randomUUIDv4.pipe(
+        Effect.mapError((cause) =>
+          toDispatchCommandError(cause, "Failed to generate orchestration command identifier."),
+        ),
+      );
+      const serverCommandId = (tag: string) =>
+        randomUUID.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
+      const serverEventId = randomUUID.pipe(Effect.map(EventId.make));
 
-      const cleanupCreatedThread = () =>
-        createdThread
-          ? orchestrationEngine
-              .dispatch({
-                type: "thread.delete",
-                commandId: serverCommandId("bootstrap-thread-delete"),
-                threadId: command.threadId,
+      const cleanupCreatedResources = () =>
+        Effect.gen(function* () {
+          if (createdWorktreePath && targetProjectCwd) {
+            yield* gitWorkflow
+              .removeWorktree({
+                cwd: targetProjectCwd,
+                path: createdWorktreePath,
+                force: true,
               })
-              .pipe(Effect.ignoreCause({ log: true }))
-          : Effect.void;
+              .pipe(Effect.ignoreCause({ log: true }));
+          }
+          if (createdThread) {
+            yield* serverCommandId("bootstrap-thread-delete").pipe(
+              Effect.flatMap((commandId) =>
+                orchestrationEngine.dispatch({
+                  type: "thread.delete",
+                  commandId,
+                  threadId: command.threadId,
+                }),
+              ),
+              Effect.ignoreCause({ log: true }),
+            );
+          }
+        });
 
       const appendSetupScriptActivity = (input: {
         readonly tag: "requested" | "started" | "failed";
@@ -153,21 +198,28 @@ export function make(
         readonly payload: Record<string, unknown>;
         readonly tone: "info" | "error";
       }) =>
-        orchestrationEngine.dispatch({
-          type: "thread.activity.append",
+        Effect.all({
           commandId: serverCommandId(`setup-script-${input.tag}`),
-          threadId: input.threadId,
-          activity: {
-            id: serverEventId(`setup-script-${input.tag}`),
-            tone: input.tone,
-            kind: input.kind,
-            summary: input.summary,
-            payload: input.payload,
-            turnId: null,
-            createdAt: input.createdAt,
-          },
-          createdAt: input.createdAt,
-        });
+          activityId: serverEventId,
+        }).pipe(
+          Effect.flatMap(({ commandId, activityId }) =>
+            orchestrationEngine.dispatch({
+              type: "thread.activity.append",
+              commandId,
+              threadId: input.threadId,
+              activity: {
+                id: activityId,
+                tone: input.tone,
+                kind: input.kind,
+                summary: input.summary,
+                payload: input.payload,
+                turnId: null,
+                createdAt: input.createdAt,
+              },
+              createdAt: input.createdAt,
+            }),
+          ),
+        );
 
       const recordSetupScriptLaunchFailure = (input: {
         readonly error: ProjectSetupScriptRunner.ProjectSetupScriptRunnerError;
@@ -291,7 +343,7 @@ export function make(
         if (bootstrap?.createThread) {
           yield* orchestrationEngine.dispatch({
             type: "thread.create",
-            commandId: serverCommandId("bootstrap-thread-create"),
+            commandId: yield* serverCommandId("bootstrap-thread-create"),
             threadId: command.threadId,
             projectId: bootstrap.createThread.projectId,
             title: bootstrap.createThread.title,
@@ -327,9 +379,10 @@ export function make(
             path: null,
           });
           targetWorktreePath = worktree.worktree.path;
+          createdWorktreePath = targetWorktreePath;
           yield* orchestrationEngine.dispatch({
             type: "thread.meta.update",
-            commandId: serverCommandId("bootstrap-thread-meta-update"),
+            commandId: yield* serverCommandId("bootstrap-thread-meta-update"),
             threadId: command.threadId,
             branch: worktree.worktree.refName,
             worktreePath: targetWorktreePath,
@@ -352,7 +405,7 @@ export function make(
           if (Cause.hasInterruptsOnly(cause)) {
             return Effect.fail(dispatchError);
           }
-          return cleanupCreatedThread().pipe(Effect.flatMap(() => Effect.fail(dispatchError)));
+          return cleanupCreatedResources().pipe(Effect.flatMap(() => Effect.fail(dispatchError)));
         }),
       );
     },
