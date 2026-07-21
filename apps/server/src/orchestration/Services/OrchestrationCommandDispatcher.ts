@@ -15,12 +15,14 @@ import * as Schema from "effect/Schema";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
 import * as ProjectSetupScriptRunner from "../../project/ProjectSetupScriptRunner.ts";
 import * as ServerRuntimeStartup from "../../serverRuntimeStartup.ts";
+import * as TerminalManager from "../../terminal/Manager.ts";
 import * as VcsStatusBroadcaster from "../../vcs/VcsStatusBroadcaster.ts";
 import {
   OrchestrationCommandInvariantError,
   OrchestrationCommandPreviouslyRejectedError,
 } from "../Errors.ts";
 import * as OrchestrationEngine from "./OrchestrationEngine.ts";
+import * as ProjectionSnapshotQuery from "./ProjectionSnapshotQuery.ts";
 
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 const isOrchestrationCommandInvariantError = Schema.is(OrchestrationCommandInvariantError);
@@ -100,9 +102,11 @@ export interface OrchestrationCommandDispatcherShape {
 interface OrchestrationCommandDispatcherDependencies {
   readonly crypto: Crypto.Crypto;
   readonly orchestrationEngine: OrchestrationEngine.OrchestrationEngineService["Service"];
+  readonly projectionSnapshotQuery: ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
   readonly gitWorkflow: GitWorkflowService.GitWorkflowService["Service"];
   readonly projectSetupScriptRunner: ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"];
   readonly startup: ServerRuntimeStartup.ServerRuntimeStartup["Service"];
+  readonly terminalManager: TerminalManager.TerminalManager["Service"];
   readonly vcsStatusBroadcaster: VcsStatusBroadcaster.VcsStatusBroadcaster["Service"];
 }
 
@@ -112,9 +116,11 @@ function makeDispatcher(
   const {
     crypto,
     orchestrationEngine,
+    projectionSnapshotQuery,
     gitWorkflow,
     projectSetupScriptRunner,
     startup,
+    terminalManager,
     vcsStatusBroadcaster,
   } = dependencies;
 
@@ -149,12 +155,56 @@ function makeDispatcher(
 
       const bootstrap = command.bootstrap;
       const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
+      const invalidBootstrap = (detail: string) =>
+        toDispatchCommandError(
+          new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail,
+          }),
+          detail,
+        );
+      const resolvedBootstrapProject = yield* Effect.gen(function* () {
+        if (!bootstrap?.prepareWorktree) {
+          return null;
+        }
+        let projectId = bootstrap.createThread?.projectId;
+        if (projectId === undefined) {
+          const thread = yield* projectionSnapshotQuery
+            .getThreadShellById(command.threadId)
+            .pipe(
+              Effect.mapError((cause) =>
+                toDispatchCommandError(cause, "Failed to resolve bootstrap thread project."),
+              ),
+            );
+          if (Option.isNone(thread)) {
+            return yield* invalidBootstrap("Bootstrap thread project could not be resolved.");
+          }
+          projectId = thread.value.projectId;
+        }
+        const project = yield* projectionSnapshotQuery
+          .getProjectShellById(projectId)
+          .pipe(
+            Effect.mapError((cause) =>
+              toDispatchCommandError(cause, "Failed to resolve bootstrap project."),
+            ),
+          );
+        if (Option.isNone(project)) {
+          return yield* invalidBootstrap("Bootstrap project does not exist.");
+        }
+        if (project.value.workspaceRoot !== bootstrap.prepareWorktree.projectCwd) {
+          return yield* invalidBootstrap(
+            "Bootstrap project working directory does not match the registered project.",
+          );
+        }
+        return project.value;
+      });
       let createdThread = false;
       let finalCommandAccepted = false;
+      let setupTerminalId: string | null = null;
       let createdWorktreeBranch: string | null = null;
       let createdWorktreePath: string | null = null;
-      let targetProjectId = bootstrap?.createThread?.projectId;
-      let targetProjectCwd = bootstrap?.prepareWorktree?.projectCwd;
+      let targetProjectId = resolvedBootstrapProject?.id ?? bootstrap?.createThread?.projectId;
+      let targetProjectCwd = resolvedBootstrapProject?.workspaceRoot;
       let targetWorktreePath = bootstrap?.createThread?.worktreePath ?? null;
 
       const randomUUID = crypto.randomUUIDv4.pipe(
@@ -168,6 +218,15 @@ function makeDispatcher(
 
       const cleanupCreatedResources = () =>
         Effect.gen(function* () {
+          if (setupTerminalId) {
+            yield* terminalManager
+              .close({
+                threadId: command.threadId,
+                terminalId: setupTerminalId,
+                deleteHistory: true,
+              })
+              .pipe(Effect.ignoreCause({ log: true }));
+          }
           if (createdWorktreePath && targetProjectCwd) {
             yield* gitWorkflow
               .removeWorktree({
@@ -328,16 +387,22 @@ function makeDispatcher(
             })
             .pipe(
               Effect.matchEffect({
-                onFailure: (error) =>
-                  recordSetupScriptLaunchFailure({
+                onFailure: (error) => {
+                  setupTerminalId =
+                    error._tag === "ProjectSetupScriptOperationError"
+                      ? (error.terminalId ?? null)
+                      : null;
+                  return recordSetupScriptLaunchFailure({
                     error,
                     requestedAt,
                     worktreePath,
-                  }),
+                  });
+                },
                 onSuccess: (setupResult) => {
                   if (setupResult.status !== "started") {
                     return Effect.void;
                   }
+                  setupTerminalId = setupResult.terminalId;
                   return recordSetupScriptStarted({
                     requestedAt,
                     worktreePath,
@@ -369,21 +434,25 @@ function makeDispatcher(
         }
 
         if (bootstrap?.prepareWorktree) {
+          const projectCwd = targetProjectCwd;
+          if (projectCwd === undefined) {
+            return yield* invalidBootstrap("Bootstrap project working directory is unavailable.");
+          }
           let worktreeBaseRef = bootstrap.prepareWorktree.baseBranch;
           if (bootstrap.prepareWorktree.startFromOrigin) {
             yield* gitWorkflow.fetchRemote({
-              cwd: bootstrap.prepareWorktree.projectCwd,
+              cwd: projectCwd,
               remoteName: "origin",
             });
             const resolvedRemoteBase = yield* gitWorkflow.resolveRemoteTrackingCommit({
-              cwd: bootstrap.prepareWorktree.projectCwd,
+              cwd: projectCwd,
               refName: bootstrap.prepareWorktree.baseBranch,
               fallbackRemoteName: "origin",
             });
             worktreeBaseRef = resolvedRemoteBase.commitSha;
           }
           const worktree = yield* gitWorkflow.createWorktree({
-            cwd: bootstrap.prepareWorktree.projectCwd,
+            cwd: projectCwd,
             refName: worktreeBaseRef,
             newRefName: bootstrap.prepareWorktree.branch,
             baseRefName: bootstrap.prepareWorktree.baseBranch,
@@ -403,7 +472,6 @@ function makeDispatcher(
         }
 
         yield* runSetupProgram();
-
         return yield* orchestrationEngine.dispatch(finalTurnStartCommand).pipe(
           Effect.tap(() =>
             Effect.sync(() => {
@@ -464,9 +532,11 @@ export const make = Effect.gen(function* () {
   return makeDispatcher({
     crypto: yield* Crypto.Crypto,
     orchestrationEngine: yield* OrchestrationEngine.OrchestrationEngineService,
+    projectionSnapshotQuery: yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery,
     gitWorkflow: yield* GitWorkflowService.GitWorkflowService,
     projectSetupScriptRunner: yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner,
     startup: yield* ServerRuntimeStartup.ServerRuntimeStartup,
+    terminalManager: yield* TerminalManager.TerminalManager,
     vcsStatusBroadcaster: yield* VcsStatusBroadcaster.VcsStatusBroadcaster,
   });
 });

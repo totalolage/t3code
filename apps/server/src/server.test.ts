@@ -701,7 +701,20 @@ const buildAppUnderTest = (options?: {
               updatedAt: "1970-01-01T00:00:00.000Z",
             }),
           getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
-          getProjectShellById: () => Effect.succeed(Option.none()),
+          getProjectShellById: (projectId) =>
+            Effect.succeed(
+              projectId === defaultProjectId
+                ? Option.some({
+                    id: defaultProjectId,
+                    title: "Default Project",
+                    workspaceRoot: "/tmp/project",
+                    defaultModelSelection,
+                    scripts: [],
+                    createdAt: "2026-01-01T00:00:00.000Z",
+                    updatedAt: "2026-01-01T00:00:00.000Z",
+                  })
+                : Option.none(),
+            ),
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshot: () => Effect.succeed(Option.none()),

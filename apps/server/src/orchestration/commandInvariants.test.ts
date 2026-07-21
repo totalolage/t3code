@@ -217,6 +217,46 @@ describe("commandInvariants", () => {
     }),
   );
 
+  it.effect("allows only internal bootstrap commands to reuse a deleted thread id", () =>
+    Effect.gen(function* () {
+      const deletedReadModel: OrchestrationReadModel = {
+        ...readModel,
+        threads: readModel.threads.map((thread) =>
+          thread.id === ThreadId.make("thread-1") ? { ...thread, deletedAt: now } : thread,
+        ),
+      };
+      const createDeletedThread = (commandId: string): OrchestrationCommand => ({
+        type: "thread.create",
+        commandId: CommandId.make(commandId),
+        threadId: ThreadId.make("thread-1"),
+        projectId: ProjectId.make("project-a"),
+        title: "retry",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      });
+
+      const clientError = yield* requireThreadAbsent({
+        readModel: deletedReadModel,
+        command: createDeletedThread("client-recreate-deleted"),
+        threadId: ThreadId.make("thread-1"),
+      }).pipe(Effect.flip);
+      expect(clientError.message).toContain("already exists");
+
+      yield* requireThreadAbsent({
+        readModel: deletedReadModel,
+        command: createDeletedThread("server:bootstrap-thread-create:retry"),
+        threadId: ThreadId.make("thread-1"),
+      });
+    }),
+  );
+
   it.effect("requires non-negative integers", () =>
     Effect.gen(function* () {
       yield* requireNonNegativeInteger({
