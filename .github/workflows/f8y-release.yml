@@ -93,8 +93,9 @@ jobs:
       - name: Align package versions
         run: node scripts/update-release-package-versions.ts "${{ needs.metadata_and_checks.outputs.version }}"
 
-      - name: Build unsigned DMG
+      - name: Build ad-hoc-signed DMG
         env:
+          T3CODE_DESKTOP_AD_HOC_SIGN: "true"
           T3CODE_DESKTOP_APP_ID: com.f8y.t3code
           T3CODE_DESKTOP_DISABLE_UPDATE_CONFIG: "true"
         run: |
@@ -105,22 +106,58 @@ jobs:
             --build-version "${{ needs.metadata_and_checks.outputs.version }}" \
             --verbose
 
-      - name: Collect DMG
+      - name: Verify and collect DMG
         run: |
+          set -euo pipefail
           shopt -s nullglob
           dmgs=(release/*.dmg)
           if (( ${#dmgs[@]} != 1 )); then
             echo "Expected exactly one DMG, found ${#dmgs[@]}." >&2
             exit 1
           fi
+
+          dmg="${dmgs[0]}"
+          hdiutil verify "$dmg"
+
+          mount_dir="$RUNNER_TEMP/t3code-f8y-dmg"
+          mkdir -p "$mount_dir"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_dir"
+          trap 'hdiutil detach "$mount_dir"' EXIT
+          apps=("$mount_dir"/*.app)
+          if (( ${#apps[@]} != 1 )); then
+            echo "Expected exactly one app in the DMG, found ${#apps[@]}." >&2
+            exit 1
+          fi
+          app="${apps[0]}"
+          bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")"
+          if [[ "$bundle_id" != "com.f8y.t3code" ]]; then
+            echo "Unexpected macOS bundle ID: $bundle_id" >&2
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$app"
+          signature_info="$(codesign --display --verbose=4 "$app" 2>&1)"
+          if [[ "$signature_info" != *"Signature=adhoc"* ]]; then
+            echo "Expected an ad-hoc code signature." >&2
+            printf '%s\n' "$signature_info" >&2
+            exit 1
+          fi
+          hdiutil detach "$mount_dir"
+          trap - EXIT
+
           mkdir -p release-publish
-          cp "${dmgs[0]}" release-publish/
+          cp "$dmg" release-publish/
+          (
+            cd "$(dirname "$dmg")"
+            shasum -a 256 "$(basename "$dmg")"
+          ) > "release-publish/$(basename "$dmg").sha256"
 
       - name: Upload DMG
         uses: actions/upload-artifact@v7
         with:
           name: f8y-release-macos-arm64
-          path: release-publish/*.dmg
+          path: |
+            release-publish/*.dmg
+            release-publish/*.dmg.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -258,9 +295,10 @@ jobs:
         run: |
           shopt -s nullglob
           dmgs=(release-assets/*.dmg)
+          dmg_checksums=(release-assets/*.dmg.sha256)
           apks=(release-assets/*.apk)
-          if (( ${#dmgs[@]} != 1 || ${#apks[@]} != 1 )); then
-            echo "Expected one DMG and one APK; found ${#dmgs[@]} DMG(s) and ${#apks[@]} APK(s)." >&2
+          if (( ${#dmgs[@]} != 1 || ${#dmg_checksums[@]} != 1 || ${#apks[@]} != 1 )); then
+            echo "Expected one DMG, one DMG checksum, and one APK; found ${#dmgs[@]} DMG(s), ${#dmg_checksums[@]} checksum(s), and ${#apks[@]} APK(s)." >&2
             exit 1
           fi
           if [[ "${apks[0]##*/}" != T3-Code-*-android.apk ]]; then
@@ -280,7 +318,7 @@ jobs:
           body: |
             Automated f8y build of `${{ github.sha }}` from `main`.
 
-            - macOS: unsigned arm64 DMG; install updates manually and use right-click → Open on first launch.
+            - macOS: ad-hoc-signed arm64 DMG with a SHA-256 checksum. It is not Apple-notarized. After copying the app to Applications and trying to open it once, use System Settings → Privacy & Security → Open Anyway.
             - Android: signed APK for installation on your devices and guided updates through Obtainium.
 
             Obtainium source: `https://github.com/totalolage/t3code`
@@ -288,4 +326,5 @@ jobs:
             Enable prereleases and disable “Verify Latest Tag” in Obtainium.
           files: |
             release-assets/*.dmg
+            release-assets/*.dmg.sha256
             release-assets/*.apk
