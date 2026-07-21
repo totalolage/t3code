@@ -6,7 +6,6 @@ import {
   type EnvironmentRequestInvalidError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as Crypto from "effect/Crypto";
 import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
@@ -22,12 +21,7 @@ import {
   isExpectedClientDispatchError,
   make as makeOrchestrationCommandDispatcher,
 } from "./Services/OrchestrationCommandDispatcher.ts";
-import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
-import * as GitWorkflowService from "../git/GitWorkflowService.ts";
-import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
-import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
-import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 
 const failEnvironmentDispatch = (
   cause: unknown,
@@ -41,14 +35,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   "orchestration",
   Effect.fnUntraced(function* (handlers) {
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
-    const orchestrationCommandDispatcher = makeOrchestrationCommandDispatcher({
-      crypto: yield* Crypto.Crypto,
-      orchestrationEngine: yield* OrchestrationEngineService,
-      gitWorkflow: yield* GitWorkflowService.GitWorkflowService,
-      projectSetupScriptRunner: yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner,
-      startup: yield* ServerRuntimeStartup.ServerRuntimeStartup,
-      vcsStatusBroadcaster: yield* VcsStatusBroadcaster.VcsStatusBroadcaster,
-    });
+    const orchestrationCommandDispatcher = yield* makeOrchestrationCommandDispatcher;
 
     return handlers
       .handle(

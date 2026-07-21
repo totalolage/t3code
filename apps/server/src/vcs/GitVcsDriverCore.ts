@@ -2276,18 +2276,42 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       fallbackErrorDetail: "git worktree add failed",
     });
 
-    if (input.newRefName && input.baseRefName) {
-      const remoteNames = yield* listRemoteNames(input.cwd).pipe(Effect.orElseSucceed(() => []));
-      const parsedBaseRef = parseRemoteRefWithRemoteNames(
-        input.baseRefName,
-        remoteNames.toSorted((left, right) => right.length - left.length),
+    const newRefName = input.newRefName;
+    const baseRefName = input.baseRefName;
+    if (newRefName && baseRefName) {
+      const configureBaseRef = Effect.gen(function* () {
+        const remoteNames = yield* listRemoteNames(input.cwd).pipe(Effect.orElseSucceed(() => []));
+        const parsedBaseRef = parseRemoteRefWithRemoteNames(
+          baseRefName,
+          remoteNames.toSorted((left, right) => right.length - left.length),
+        );
+        const baseBranch = parsedBaseRef?.branchName ?? baseRefName;
+        yield* runGit("GitVcsDriver.createWorktree.configureBaseRef", input.cwd, [
+          "config",
+          `branch.${newRefName}.gh-merge-base`,
+          baseBranch,
+        ]);
+      });
+      yield* configureBaseRef.pipe(
+        Effect.catchCause((cause) =>
+          Effect.uninterruptible(
+            Effect.gen(function* () {
+              yield* executeGit(
+                "GitVcsDriver.createWorktree.rollbackWorktree",
+                input.cwd,
+                ["worktree", "remove", "--force", worktreePath],
+                { fallbackErrorDetail: "git worktree rollback failed" },
+              ).pipe(Effect.ignoreCause({ log: true }));
+              yield* executeGit(
+                "GitVcsDriver.createWorktree.rollbackBranch",
+                input.cwd,
+                ["branch", "-D", "--", newRefName],
+                { fallbackErrorDetail: "git branch rollback failed" },
+              ).pipe(Effect.ignoreCause({ log: true }));
+            }),
+          ).pipe(Effect.andThen(Effect.failCause(cause))),
+        ),
       );
-      const baseBranch = parsedBaseRef?.branchName ?? input.baseRefName;
-      yield* runGit("GitVcsDriver.createWorktree.configureBaseRef", input.cwd, [
-        "config",
-        `branch.${input.newRefName}.gh-merge-base`,
-        baseBranch,
-      ]);
     }
 
     return {
