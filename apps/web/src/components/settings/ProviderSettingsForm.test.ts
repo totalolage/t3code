@@ -5,6 +5,7 @@ import { DRIVER_OPTION_BY_VALUE } from "./providerDriverMeta";
 import {
   deriveProviderSettingsFields,
   nextProviderConfigWithFieldValue,
+  nextProviderSecretEnvironment,
   readProviderConfigBoolean,
   readProviderConfigString,
 } from "./ProviderSettingsForm";
@@ -127,5 +128,36 @@ describe("ProviderSettingsForm helpers", () => {
 
   it("reads missing boolean config values from the supplied default", () => {
     expect(readProviderConfigBoolean({}, "experimental", true)).toBe(true);
+  });
+
+  it("exposes Hermes gateway config and a managed server-secret field", () => {
+    const hermes = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("hermes")];
+    expect(hermes).toBeDefined();
+    expect(deriveProviderSettingsFields(hermes!).map((field) => field.key)).toEqual(["gatewayUrl"]);
+    expect(hermes?.secretEnvironmentVariable).toMatchObject({
+      name: "HERMES_GATEWAY_SECRET",
+      label: "Shared secret",
+    });
+  });
+
+  it("preserves a redacted Hermes secret until an administrator replaces it", () => {
+    const existing = [
+      {
+        name: "HERMES_GATEWAY_SECRET",
+        value: "",
+        sensitive: true,
+        valueRedacted: true,
+      },
+    ];
+    expect(nextProviderSecretEnvironment(existing, "HERMES_GATEWAY_SECRET", "")).toEqual(existing);
+    expect(nextProviderSecretEnvironment(existing, "HERMES_GATEWAY_SECRET", "replacement")).toEqual(
+      [
+        {
+          name: "HERMES_GATEWAY_SECRET",
+          value: "replacement",
+          sensitive: true,
+        },
+      ],
+    );
   });
 });

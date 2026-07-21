@@ -6,6 +6,6 @@
 - [Integrations](./integrations/source-control-providers.md)
 - [Mobile](./mobile/app.md)
 - [Operations](./operations/ci.md)
-- [Providers](./providers/codex.md)
+- [Providers](./providers/codex.md), including [Hermes gateways](./providers/hermes.md)
 - [Reference](./reference/encyclopedia.md)
 - [User guides](./user/keybindings.md)
