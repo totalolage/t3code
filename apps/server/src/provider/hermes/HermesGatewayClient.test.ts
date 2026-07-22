@@ -29,10 +29,11 @@ describe("HermesGatewayClient", () => {
     expect(requests[0]?.url).not.toContain("shared-secret-sentinel");
   });
 
-  it("preserves non-secret gateway query parameters after the endpoint path", async () => {
+  it("preserves arbitrary gateway query parameters after the endpoint path", async () => {
     const requests: Request[] = [];
     const client = makeHermesGatewayClient({
-      gatewayUrl: "https://hermes.example.test/p/work/?profile=engineering&region=us-east-1",
+      gatewayUrl:
+        "https://hermes.example.test/p/work/?profile=engineering&access_token=gateway-token",
       secret: "header-only-secret",
       fetch: async (input, init) => {
         requests.push(
@@ -51,7 +52,7 @@ describe("HermesGatewayClient", () => {
     expect(requestUrl.pathname).toBe("/p/work/v1/models");
     expect([...requestUrl.searchParams]).toEqual([
       ["profile", "engineering"],
-      ["region", "us-east-1"],
+      ["access_token", "gateway-token"],
     ]);
     expect(requestUrl.href).not.toContain("header-only-secret");
     expect(requests[0]?.headers.get("authorization")).toBe("Bearer header-only-secret");
@@ -97,25 +98,9 @@ describe("HermesGatewayClient", () => {
     expect(JSON.stringify(error)).not.toContain(secret);
   });
 
-  it("rejects gateway URLs that embed credentials or secret-bearing query parameters", () => {
+  it("rejects invalid gateway URLs and embedded userinfo", () => {
     expect(() => normalizeHermesGatewayUrl("https://user:pass@example.test")).toThrow();
-    expect(() => normalizeHermesGatewayUrl("https://example.test?token=value")).toThrow();
-    expect(() => normalizeHermesGatewayUrl("https://example.test?X-API-Key=value")).toThrow();
-    expect(() => normalizeHermesGatewayUrl("https://example.test?client_secret=value")).toThrow();
-    expect(() => normalizeHermesGatewayUrl("https://example.test?%74oken=value")).toThrow();
     expect(() => normalizeHermesGatewayUrl("https://example.test#access_token=value")).toThrow();
     expect(() => normalizeHermesGatewayUrl("file:///tmp/hermes.sock")).toThrow();
-
-    const embeddedSecret = "query-secret-sentinel";
-    const error = (() => {
-      try {
-        normalizeHermesGatewayUrl(`https://example.test?access_token=${embeddedSecret}`);
-      } catch (cause) {
-        return cause;
-      }
-    })();
-    expect(error).toBeInstanceOf(HermesGatewayClientError);
-    expect(String(error)).not.toContain(embeddedSecret);
-    expect(JSON.stringify(error)).not.toContain(embeddedSecret);
   });
 });

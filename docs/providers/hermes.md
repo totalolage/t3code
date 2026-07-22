@@ -12,11 +12,10 @@ In **Settings → Providers → Hermes**, configure:
   the base URL.
 - **Shared secret**: the gateway's API server key.
 
-Use HTTPS whenever the gateway is not on a trusted local network. T3 Code preserves non-secret query
-parameters used for gateway routing on every Hermes endpoint request. It rejects embedded userinfo,
-fragments, credential-shaped query parameters such as tokens, API keys, passwords, and secrets, and
-non-HTTP schemes. It also refuses automatic redirects so the bearer secret cannot be forwarded to a
-different origin.
+Use HTTPS whenever the gateway is not on a trusted local network. T3 Code preserves gateway query
+parameters used for routing on every Hermes endpoint request. It rejects embedded userinfo, fragments,
+and non-HTTP schemes. It also refuses automatic redirects so the bearer secret cannot be forwarded to
+a different origin.
 
 The gateway URL is normal provider configuration. The shared secret is marked sensitive and stored
 through T3 Code's server-side secret store; persisted settings and subsequent browser responses contain
