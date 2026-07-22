@@ -21,8 +21,10 @@ import {
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  buildToolSummariesPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
+  normalizeGeneratedToolSummaries,
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
@@ -97,7 +99,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle",
+      | "generateThreadTitle"
+      | "generateToolSummaries",
     value: unknown,
   ): Effect.Effect<string, TextGenerationError> =>
     encodeJsonString(value).pipe(
@@ -158,7 +161,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateToolSummaries";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -395,10 +399,29 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       } satisfies TextGeneration.ThreadTitleGenerationResult;
     });
 
+  const generateToolSummaries: TextGeneration.TextGeneration["Service"]["generateToolSummaries"] =
+    Effect.fn("CodexTextGeneration.generateToolSummaries")(function* (input) {
+      const { prompt, outputSchema } = buildToolSummariesPrompt({ tools: input.tools });
+      const generated = yield* runCodexJson({
+        operation: "generateToolSummaries",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+      return {
+        summaries: normalizeGeneratedToolSummaries(
+          new Set(input.tools.map((tool) => tool.activityId)),
+          generated.summaries,
+        ),
+      };
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateToolSummaries,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

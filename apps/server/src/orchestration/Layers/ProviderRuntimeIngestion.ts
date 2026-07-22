@@ -8,6 +8,7 @@ import {
   type OrchestrationProposedPlanId,
   CheckpointRef,
   isToolLifecycleItemType,
+  type ToolLifecycleItemType,
   ThreadId,
   type ThreadTokenUsageSnapshot,
   TurnId,
@@ -25,6 +26,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -38,6 +40,9 @@ import {
   type ProviderRuntimeIngestionShape,
 } from "../Services/ProviderRuntimeIngestion.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
+import type { ToolSummaryCandidate } from "../../textGeneration/TextGeneration.ts";
+import { normalizeGeneratedToolSummaries } from "../../textGeneration/TextGenerationUtils.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 
@@ -55,6 +60,7 @@ const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
+const encodeUnknownJsonString = Schema.encodeEffect(Schema.UnknownFromJsonString);
 
 type TurnStartRequestedDomainEvent = Extract<
   OrchestrationEvent,
@@ -70,6 +76,17 @@ type RuntimeIngestionInput =
       source: "domain";
       event: TurnStartRequestedDomainEvent;
     };
+
+interface ToolSummaryJob {
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
 
 function toTurnId(value: TurnId | string | undefined): TurnId | undefined {
   return value === undefined ? undefined : TurnId.make(String(value));
@@ -567,6 +584,7 @@ function runtimeEventToActivities(
           summary: event.payload.title ?? "Tool updated",
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId !== undefined ? { toolCallId: event.itemId } : {}),
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
@@ -590,6 +608,8 @@ function runtimeEventToActivities(
           summary: event.payload.title ?? "Tool",
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId !== undefined ? { toolCallId: event.itemId } : {}),
+            ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
           },
@@ -612,7 +632,10 @@ function runtimeEventToActivities(
           summary: `${event.payload.title ?? "Tool"} started`,
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId !== undefined ? { toolCallId: event.itemId } : {}),
+            ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -634,6 +657,7 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
+  const textGeneration = yield* TextGeneration;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
@@ -677,6 +701,108 @@ const make = Effect.gen(function* () {
       .getThreadShellById(threadId)
       .pipe(Effect.map(Option.getOrUndefined));
   });
+
+  const serializeToolData = (value: unknown) => encodeUnknownJsonString(value);
+
+  const processToolSummaryJob = Effect.fn("processToolSummaryJob")(function* (job: ToolSummaryJob) {
+    const thread = yield* resolveThreadDetail(job.threadId);
+    if (!thread) return;
+
+    const completedActivities = thread.activities
+      .filter((activity) => {
+        if (activity.turnId !== job.turnId || activity.kind !== "tool.completed") return false;
+        return asRecord(activity.payload)?.summarySource !== "text-generation";
+      })
+      .slice(0, 32);
+    if (completedActivities.length === 0) return;
+
+    const checkpointContext = yield* projectionSnapshotQuery
+      .getThreadCheckpointContext(job.threadId)
+      .pipe(Effect.map(Option.getOrUndefined));
+    const cwd = thread.worktreePath ?? checkpointContext?.workspaceRoot;
+    if (!cwd) {
+      yield* Effect.logWarning("skipping tool summary generation without a working directory", {
+        threadId: job.threadId,
+        turnId: job.turnId,
+      });
+      return;
+    }
+
+    const candidates = yield* Effect.forEach(
+      completedActivities,
+      (activity) =>
+        Effect.gen(function* () {
+          const payload = asRecord(activity.payload);
+          const itemType = payload?.itemType;
+          if (typeof itemType !== "string" || !isToolLifecycleItemType(itemType)) return null;
+          const serializedData =
+            payload?.data === undefined ? undefined : yield* serializeToolData(payload.data);
+          const status = payload?.status;
+          const detail = payload?.detail;
+          return {
+            activityId: activity.id,
+            itemType: itemType satisfies ToolLifecycleItemType,
+            currentSummary: activity.summary,
+            ...(typeof status === "string" ? { status } : {}),
+            ...(typeof detail === "string" ? { detail } : {}),
+            ...(serializedData !== undefined ? { serializedData } : {}),
+          } satisfies ToolSummaryCandidate;
+        }),
+      { concurrency: 1 },
+    ).pipe(Effect.map((values) => values.filter((value) => value !== null)));
+    if (candidates.length === 0) return;
+
+    const settings = yield* serverSettingsService.getSettings;
+    const generated = yield* textGeneration.generateToolSummaries({
+      cwd,
+      tools: candidates,
+      modelSelection: settings.textGenerationModelSelection,
+    });
+    const knownActivityIds = new Set(candidates.map((candidate) => candidate.activityId));
+    const summaries = normalizeGeneratedToolSummaries(knownActivityIds, generated.summaries);
+    const activitiesById = new Map(
+      completedActivities.map((activity) => [String(activity.id), activity]),
+    );
+
+    yield* Effect.forEach(
+      summaries,
+      ({ activityId, summary }) => {
+        const activity = activitiesById.get(activityId);
+        if (!activity) return Effect.void;
+        const payload = asRecord(activity.payload) ?? {};
+        return orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`tool-summary:${activity.id}`),
+          threadId: job.threadId,
+          activity: {
+            ...activity,
+            summary,
+            payload: {
+              ...payload,
+              originalSummary: activity.summary,
+              summarySource: "text-generation",
+            },
+          },
+          createdAt: activity.createdAt,
+        });
+      },
+      { concurrency: 1 },
+    ).pipe(Effect.asVoid);
+  });
+
+  const processToolSummaryJobSafely = (job: ToolSummaryJob) =>
+    processToolSummaryJob(job).pipe(
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
+        return Effect.logWarning("tool summary generation failed", {
+          threadId: job.threadId,
+          turnId: job.turnId,
+          cause: Cause.pretty(cause),
+        });
+      }),
+    );
+
+  const toolSummaryWorker = yield* makeDrainableWorker(processToolSummaryJobSafely);
 
   const rememberAssistantMessageId = (threadId: ThreadId, turnId: TurnId, messageId: MessageId) =>
     Cache.getOption(turnMessageIdsByTurnKey, providerTurnKey(threadId, turnId)).pipe(
@@ -1668,6 +1794,10 @@ const make = Effect.gen(function* () {
           ),
         ),
       ).pipe(Effect.asVoid);
+
+      if (event.type === "turn.completed" && shouldApplyThreadLifecycle && eventTurnId) {
+        yield* toolSummaryWorker.enqueue({ threadId: thread.id, turnId: eventTurnId });
+      }
     });
 
   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
@@ -1711,7 +1841,7 @@ const make = Effect.gen(function* () {
 
   return {
     start,
-    drain: worker.drain,
+    drain: worker.drain.pipe(Effect.andThen(toolSummaryWorker.drain)),
   } satisfies ProviderRuntimeIngestionShape;
 });
 

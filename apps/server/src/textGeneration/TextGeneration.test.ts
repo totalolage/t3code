@@ -22,6 +22,9 @@ const makeStubTextGeneration = (
     generateBranchName: () => Effect.die("generateBranchName stub not configured for this test"),
     generateThreadTitle: () => Effect.die("generateThreadTitle stub not configured for this test"),
     ...overrides,
+    generateToolSummaries:
+      overrides.generateToolSummaries ??
+      (() => Effect.die("generateToolSummaries stub not configured for this test")),
   });
 
 const makeStubInstance = (
@@ -115,6 +118,55 @@ describe("makeTextGenerationFromRegistry", () => {
         expect(result.failure._tag).toBe("TextGenerationError");
         expect(result.failure.operation).toBe("generateBranchName");
         expect(result.failure.detail).toContain("missing_instance");
+      }
+    }),
+  );
+
+  it.effect("routes tool summaries to the selected instance and returns its result", () =>
+    Effect.gen(function* () {
+      const selectedId = ProviderInstanceId.make("claude_work");
+      const selected = makeStubInstance(
+        selectedId,
+        makeStubTextGeneration({
+          generateToolSummaries: () =>
+            Effect.succeed({
+              summaries: [{ activityId: "activity-1", summary: "Inspected provider events" }],
+            }),
+        }),
+      );
+      const tg = TextGeneration.makeTextGenerationFromRegistry(makeStubRegistry([selected]));
+
+      const result = yield* tg.generateToolSummaries({
+        cwd: process.cwd(),
+        tools: [
+          {
+            activityId: "activity-1",
+            itemType: "command_execution",
+            currentSummary: "Ran command",
+          },
+        ],
+        modelSelection: createModelSelection(selectedId, "claude-sonnet"),
+      });
+      expect(result.summaries).toEqual([
+        { activityId: "activity-1", summary: "Inspected provider events" },
+      ]);
+    }),
+  );
+
+  it.effect("reports generateToolSummaries for an unknown selected instance", () =>
+    Effect.gen(function* () {
+      const tg = TextGeneration.makeTextGenerationFromRegistry(makeStubRegistry([]));
+      const result = yield* tg
+        .generateToolSummaries({
+          cwd: process.cwd(),
+          tools: [],
+          modelSelection: createModelSelection(ProviderInstanceId.make("missing"), "model"),
+        })
+        .pipe(Effect.result);
+
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result)) {
+        expect(result.failure.operation).toBe("generateToolSummaries");
       }
     }),
   );

@@ -93,6 +93,10 @@ interface FakeGitTextGeneration {
     message: string;
     modelSelection: ModelSelection;
   }) => Effect.Effect<{ title: string }, TextGenerationError>;
+  generateToolSummaries: () => Effect.Effect<
+    { summaries: ReadonlyArray<{ activityId: string; summary: string }> },
+    TextGenerationError
+  >;
 }
 
 type FakePullRequest = NonNullable<FakeGhScenario["pullRequest"]>;
@@ -314,6 +318,7 @@ function createTextGeneration(
       Effect.succeed({
         title: "Update workflow",
       }),
+    generateToolSummaries: () => Effect.succeed({ summaries: [] }),
     ...overrides,
   };
 
@@ -362,6 +367,7 @@ function createTextGeneration(
             }),
         ),
       ),
+    generateToolSummaries: () => implementation.generateToolSummaries(),
   };
 }
 

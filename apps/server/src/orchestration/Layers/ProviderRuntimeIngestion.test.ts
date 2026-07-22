@@ -20,6 +20,7 @@ import {
   ProviderItemId,
   type ServerSettings,
   ThreadId,
+  TextGenerationError,
   TurnId,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -50,6 +51,10 @@ import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts"
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import {
+  TextGeneration,
+  type ToolSummaryGenerationInput,
+} from "../../textGeneration/TextGeneration.ts";
 
 function makeTestServerSettingsLayer(overrides: Partial<ServerSettings> = {}) {
   return ServerSettingsService.layerTest(overrides);
@@ -217,10 +222,24 @@ describe("ProviderRuntimeIngestion", () => {
     }
   });
 
-  async function createHarness(options?: { serverSettings?: Partial<ServerSettings> }) {
+  async function createHarness(options?: {
+    serverSettings?: Partial<ServerSettings>;
+    generateToolSummaries?: TextGeneration["Service"]["generateToolSummaries"];
+  }) {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
+    const toolSummaryCalls: ToolSummaryGenerationInput[] = [];
+    const textGeneration = TextGeneration.of({
+      generateCommitMessage: () => Effect.die("unused text generation operation"),
+      generatePrContent: () => Effect.die("unused text generation operation"),
+      generateBranchName: () => Effect.die("unused text generation operation"),
+      generateThreadTitle: () => Effect.die("unused text generation operation"),
+      generateToolSummaries: (input) => {
+        toolSummaryCalls.push(input);
+        return options?.generateToolSummaries?.(input) ?? Effect.succeed({ summaries: [] });
+      },
+    });
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(OrchestrationProjectionPipelineLive),
@@ -239,6 +258,7 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
+      Layer.provideMerge(Layer.succeed(TextGeneration, textGeneration)),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Layer.provideMerge(NodeServices.layer),
     );
@@ -314,6 +334,7 @@ describe("ProviderRuntimeIngestion", () => {
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       emit: provider.emit,
       setProviderSession: provider.setSession,
+      toolSummaryCalls,
       drain,
     };
   }
@@ -805,6 +826,239 @@ describe("ProviderRuntimeIngestion", () => {
     expect(data?.toolCallId).toBe("tool-read-1");
     expect(data?.kind).toBe("read");
     expect(rawOutput?.content).toBe('import * as Effect from "effect/Effect"\n');
+  });
+
+  it("correlates lifecycle activities with the provider item ID and preserves completion status", async () => {
+    const harness = await createHarness();
+    const itemId = asItemId("shared-tool-item");
+    const base = {
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-correlated"),
+      itemId,
+    };
+    harness.emit({
+      ...base,
+      type: "item.started",
+      eventId: asEventId("evt-correlated-started"),
+      payload: {
+        itemType: "command_execution",
+        status: "inProgress",
+        data: { command: "vp check" },
+      },
+    });
+    harness.emit({
+      ...base,
+      type: "item.updated",
+      eventId: asEventId("evt-correlated-updated"),
+      payload: { itemType: "command_execution", status: "inProgress" },
+    });
+    harness.emit({
+      ...base,
+      type: "item.completed",
+      eventId: asEventId("evt-correlated-completed"),
+      payload: { itemType: "command_execution", status: "failed", detail: "exit code 1" },
+    });
+    await harness.drain();
+
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    const correlated = thread?.activities.filter((activity) =>
+      String(activity.id).startsWith("evt-correlated-"),
+    );
+    expect(correlated).toHaveLength(3);
+    expect(
+      correlated?.map((activity) => (activity.payload as Record<string, unknown>).toolCallId),
+    ).toEqual([itemId, itemId, itemId]);
+    const completed = correlated?.find((activity) => activity.kind === "tool.completed");
+    expect((completed?.payload as Record<string, unknown> | undefined)?.status).toBe("failed");
+  });
+
+  it("summarizes all completed tools from one accepted turn in one request and updates by ID", async () => {
+    const selectedModel = {
+      instanceId: ProviderInstanceId.make("claude_work"),
+      model: "claude-sonnet",
+      options: [{ id: "effort", value: "low" }],
+    };
+    const harness = await createHarness({
+      serverSettings: { textGenerationModelSelection: selectedModel },
+      generateToolSummaries: () =>
+        Effect.succeed({
+          summaries: [
+            { activityId: "evt-summary-command", summary: "  **Ran project checks.** " },
+            { activityId: "evt-summary-file", summary: "first duplicate" },
+            { activityId: "evt-summary-file", summary: "second duplicate" },
+            { activityId: "unknown-activity", summary: "Invented a result" },
+            { activityId: "evt-summary-empty", summary: ' "" ' },
+          ],
+        }),
+    });
+    const common = {
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-summary"),
+    };
+    harness.emit({
+      ...common,
+      type: "item.completed",
+      eventId: asEventId("evt-summary-command"),
+      itemId: asItemId("tool-command"),
+      payload: {
+        itemType: "command_execution",
+        status: "completed",
+        title: "Ran command",
+        detail: "vp check",
+        data: { command: "vp check", output: "passed" },
+      },
+    });
+    harness.emit({
+      ...common,
+      type: "item.completed",
+      eventId: asEventId("evt-summary-file"),
+      itemId: asItemId("tool-file"),
+      payload: { itemType: "file_change", status: "completed", title: "Tool call" },
+    });
+    harness.emit({
+      ...common,
+      type: "item.completed",
+      eventId: asEventId("evt-summary-empty"),
+      itemId: asItemId("tool-empty"),
+      payload: { itemType: "web_search", status: "completed", title: "Tool call" },
+    });
+    harness.emit({
+      ...common,
+      turnId: asTurnId("other-turn"),
+      type: "item.completed",
+      eventId: asEventId("evt-other-turn"),
+      payload: { itemType: "web_search", status: "completed", title: "Search" },
+    });
+    harness.emit({
+      ...common,
+      type: "turn.completed",
+      eventId: asEventId("evt-summary-turn-completed"),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+
+    expect(harness.toolSummaryCalls).toHaveLength(1);
+    expect(harness.toolSummaryCalls[0]?.modelSelection).toEqual(selectedModel);
+    expect(harness.toolSummaryCalls[0]?.tools.map((tool) => tool.activityId)).toHaveLength(3);
+    expect(harness.toolSummaryCalls[0]?.tools.map((tool) => tool.activityId)).toEqual(
+      expect.arrayContaining(["evt-summary-command", "evt-summary-file", "evt-summary-empty"]),
+    );
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    const command = thread?.activities.find((activity) => activity.id === "evt-summary-command");
+    const commandPayload = command?.payload as Record<string, unknown>;
+    expect(command?.summary).toBe("Ran project checks");
+    expect(command?.kind).toBe("tool.completed");
+    expect(command?.tone).toBe("tool");
+    expect(command?.turnId).toBe("turn-summary");
+    expect(command?.createdAt).toBe(common.createdAt);
+    expect(commandPayload.originalSummary).toBe("Ran command");
+    expect(commandPayload.summarySource).toBe("text-generation");
+    expect(commandPayload.detail).toBe("vp check");
+    expect(commandPayload.data).toEqual({ command: "vp check", output: "passed" });
+    expect(thread?.activities.find((activity) => activity.id === "evt-summary-file")?.summary).toBe(
+      "Tool call",
+    );
+    expect(
+      thread?.activities.find((activity) => activity.id === "evt-summary-empty")?.summary,
+    ).toBe("Tool call");
+
+    harness.emit({
+      ...common,
+      type: "turn.completed",
+      eventId: asEventId("evt-summary-turn-completed-again"),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+    expect(harness.toolSummaryCalls).toHaveLength(2);
+    expect(harness.toolSummaryCalls[1]?.tools.map((tool) => tool.activityId)).toEqual(
+      expect.arrayContaining(["evt-summary-file", "evt-summary-empty"]),
+    );
+  });
+
+  it("leaves original activities unchanged when generation fails and skips turns without tools", async () => {
+    const harness = await createHarness({
+      generateToolSummaries: () =>
+        Effect.fail(
+          new TextGenerationError({
+            operation: "generateToolSummaries",
+            detail: "provider unavailable",
+          }),
+        ),
+    });
+    const common = {
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-failed-summary"),
+    };
+    harness.emit({
+      ...common,
+      type: "item.completed",
+      eventId: asEventId("evt-failed-summary-tool"),
+      payload: { itemType: "command_execution", status: "failed", title: "Ran command" },
+    });
+    harness.emit({
+      ...common,
+      type: "turn.completed",
+      eventId: asEventId("evt-failed-summary-turn"),
+      payload: { state: "failed" },
+    });
+    await harness.drain();
+    let thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    expect(
+      thread?.activities.find((activity) => activity.id === "evt-failed-summary-tool")?.summary,
+    ).toBe("Ran command");
+    expect(harness.toolSummaryCalls).toHaveLength(1);
+
+    harness.emit({
+      ...common,
+      turnId: asTurnId("turn-without-tools"),
+      type: "turn.completed",
+      eventId: asEventId("evt-no-tools-turn"),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+    thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    expect(thread).toBeDefined();
+    expect(harness.toolSummaryCalls).toHaveLength(1);
+  });
+
+  it("does not summarize a stale turn completion", async () => {
+    const harness = await createHarness();
+    const common = {
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: asThreadId("thread-1"),
+    };
+    harness.emit({
+      ...common,
+      type: "turn.started",
+      eventId: asEventId("evt-current-turn-started"),
+      turnId: asTurnId("current-turn"),
+      payload: {},
+    });
+    await harness.drain();
+    harness.emit({
+      ...common,
+      type: "item.completed",
+      eventId: asEventId("evt-stale-tool"),
+      turnId: asTurnId("stale-turn"),
+      payload: { itemType: "command_execution", status: "completed", title: "Ran command" },
+    });
+    harness.emit({
+      ...common,
+      type: "turn.completed",
+      eventId: asEventId("evt-stale-turn-completed"),
+      turnId: asTurnId("stale-turn"),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+
+    expect(harness.toolSummaryCalls).toHaveLength(0);
   });
 
   it("normalizes command execution activities to ran-command summaries", async () => {

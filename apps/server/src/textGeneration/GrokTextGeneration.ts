@@ -17,8 +17,10 @@ import {
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  buildToolSummariesPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
+  normalizeGeneratedToolSummaries,
   sanitizeCommitSubject,
   sanitizePrTitle,
   sanitizeThreadTitle,
@@ -52,7 +54,8 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateToolSummaries";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -247,10 +250,29 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
       } satisfies TextGeneration.ThreadTitleGenerationResult;
     });
 
+  const generateToolSummaries: TextGeneration.TextGeneration["Service"]["generateToolSummaries"] =
+    Effect.fn("GrokTextGeneration.generateToolSummaries")(function* (input) {
+      const { prompt, outputSchema } = buildToolSummariesPrompt({ tools: input.tools });
+      const generated = yield* runGrokJson({
+        operation: "generateToolSummaries",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+      return {
+        summaries: normalizeGeneratedToolSummaries(
+          new Set(input.tools.map((tool) => tool.activityId)),
+          generated.summaries,
+        ),
+      };
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateToolSummaries,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

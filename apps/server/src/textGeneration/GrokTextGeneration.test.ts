@@ -145,6 +145,47 @@ it.layer(GrokTextGenerationTestLayer)("GrokTextGeneration", (it) => {
     ),
   );
 
+  it.effect("generates normalized tool summaries through the selected Grok model", () => {
+    const requestLogDir = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3code-grok-summary-log-"),
+    );
+    const requestLogPath = NodePath.join(requestLogDir, "requests.ndjson");
+    return withFakeAcpGrok(
+      {
+        T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+        T3_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({
+          summaries: [
+            { activityId: "activity-1", summary: "  Found   title settings. " },
+            { activityId: "activity-2", summary: "x".repeat(100) },
+          ],
+        }),
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const generated = yield* textGeneration.generateToolSummaries({
+            cwd: process.cwd(),
+            tools: [
+              { activityId: "activity-1", itemType: "web_search", currentSummary: "Tool call" },
+              {
+                activityId: "activity-2",
+                itemType: "command_execution",
+                currentSummary: "Ran command",
+              },
+            ],
+            modelSelection: createModelSelection(ProviderInstanceId.make("grok"), "grok-mock-alt"),
+          });
+          expect(generated.summaries).toEqual([
+            { activityId: "activity-1", summary: "Found title settings" },
+            { activityId: "activity-2", summary: "x".repeat(80) },
+          ]);
+          const requests = NodeFS.readFileSync(requestLogPath, "utf8");
+          expect(requests).toContain("grok-mock-alt");
+          expect(requests).toContain("activity-1");
+          expect(requests).toContain("summaries");
+        }),
+    );
+  });
+
   it.effect("surfaces ACP request failures as text generation errors", () =>
     withFakeAcpGrok(
       {

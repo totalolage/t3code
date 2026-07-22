@@ -16,8 +16,10 @@ import {
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  buildToolSummariesPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
+  normalizeGeneratedToolSummaries,
   sanitizeCommitSubject,
   sanitizePrTitle,
   sanitizeThreadTitle,
@@ -54,7 +56,8 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateToolSummaries";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -255,10 +258,29 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       } satisfies TextGeneration.ThreadTitleGenerationResult;
     });
 
+  const generateToolSummaries: TextGeneration.TextGeneration["Service"]["generateToolSummaries"] =
+    Effect.fn("CursorTextGeneration.generateToolSummaries")(function* (input) {
+      const { prompt, outputSchema } = buildToolSummariesPrompt({ tools: input.tools });
+      const generated = yield* runCursorJson({
+        operation: "generateToolSummaries",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+      return {
+        summaries: normalizeGeneratedToolSummaries(
+          new Set(input.tools.map((tool) => tool.activityId)),
+          generated.summaries,
+        ),
+      };
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateToolSummaries,
   } satisfies TextGeneration.TextGeneration["Service"];
 });
