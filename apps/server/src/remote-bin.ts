@@ -13,26 +13,35 @@ export const cli = Command.make("t3").pipe(
   Command.withSubcommands([remoteCommand]),
 );
 
+export const reportRemoteCliFailure = (
+  error: unknown,
+  setExitCode: (exitCode: number) => void = (exitCode) => {
+    process.exitCode = exitCode;
+  },
+) => {
+  const safeExitCode =
+    typeof error === "object" &&
+    error !== null &&
+    Runtime.errorExitCode in error &&
+    typeof error[Runtime.errorExitCode] === "number"
+      ? error[Runtime.errorExitCode]
+      : 1;
+  const shouldReport =
+    typeof error !== "object" ||
+    error === null ||
+    !(Runtime.errorReported in error) ||
+    error[Runtime.errorReported] !== false;
+
+  return (shouldReport ? Console.error(formatRemoteCliDiagnostic(error)) : Effect.void).pipe(
+    Effect.andThen(Effect.sync(() => setExitCode(safeExitCode))),
+  );
+};
+
 if (import.meta.main) {
   Command.run(cli, { version: packageJson.version }).pipe(
     Effect.scoped,
     Effect.provide(NodeServices.layer),
-    Effect.catch((error) =>
-      Console.error(formatRemoteCliDiagnostic(error)).pipe(
-        Effect.andThen(
-          Effect.sync(() => {
-            const safeExitCode =
-              typeof error === "object" &&
-              error !== null &&
-              Runtime.errorExitCode in error &&
-              typeof error[Runtime.errorExitCode] === "number"
-                ? error[Runtime.errorExitCode]
-                : 1;
-            process.exitCode = safeExitCode;
-          }),
-        ),
-      ),
-    ),
+    Effect.catch(reportRemoteCliFailure),
     NodeRuntime.runMain,
   );
 }

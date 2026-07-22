@@ -5,6 +5,7 @@ import {
   pendingInteractionFromActivity,
   sanitizeRemoteInteractionText,
 } from "./pendingInteractionSanitizer.ts";
+import { toRemotePendingInteraction } from "./PendingInteractionService.ts";
 
 it("redacts credentials, paths, URLs, terminal escapes, commands, and opaque tokens", () => {
   const unsafe = [
@@ -73,7 +74,6 @@ it("bounds and sanitizes user-input questions without retaining provider envelop
             { label: "https://secret.test", description: "password=hunter2" },
             { label: "No", description: "$ printenv" },
             { label: "Later", description: "Safe" },
-            { label: "Extra", description: "Dropped" },
           ],
           multiSelect: false,
         },
@@ -86,7 +86,9 @@ it("bounds and sanitizes user-input questions without retaining provider envelop
   assert.isNotNull(interaction);
   assert.strictEqual(interaction?.questions.length, 1);
   assert.strictEqual(interaction?.questions[0]?.options.length, 3);
-  const serialized = JSON.stringify(interaction);
+  assert.strictEqual(interaction?.questions[0]?.options[0]?.providerValue, "https://secret.test");
+  assert.strictEqual(interaction?.questions[0]?.options[0]?.label, "Option 1");
+  const serialized = JSON.stringify(toRemotePendingInteraction(interaction!));
   for (const forbidden of [
     "header-secret",
     "/root/private",
@@ -99,4 +101,49 @@ it("bounds and sanitizes user-input questions without retaining provider envelop
   ]) {
     assert.notInclude(serialized, forbidden);
   }
+});
+
+it("uses a safe public surrogate for provider-required prose question identifiers", () => {
+  const providerQuestionId = "Which deployment path should the agent use?";
+  const interaction = pendingInteractionFromActivity({
+    threadId: ThreadId.make("thread-prose-id"),
+    kind: "user-input.requested",
+    payload: {
+      requestId: "request-prose-id",
+      questions: [
+        {
+          id: providerQuestionId,
+          header: "Choose",
+          question: "Choose a deployment path.",
+          options: [{ label: "Continue", description: "Continue" }],
+          multiSelect: false,
+        },
+      ],
+    },
+    createdAt: "2026-07-22T00:00:00.000Z",
+  });
+
+  assert.strictEqual(interaction?.questions[0]?.id, "question-1");
+  assert.strictEqual(interaction?.questions[0]?.providerQuestionId, providerQuestionId);
+  assert.notInclude(JSON.stringify(toRemotePendingInteraction(interaction!)), providerQuestionId);
+});
+
+it("fails closed instead of exposing a partial oversized question set", () => {
+  const interaction = pendingInteractionFromActivity({
+    threadId: ThreadId.make("thread-oversized"),
+    kind: "user-input.requested",
+    payload: {
+      requestId: "request-oversized",
+      questions: Array.from({ length: 4 }, (_, index) => ({
+        id: `question-${index + 1}`,
+        header: "Choose",
+        question: "Continue?",
+        options: [{ label: "Continue", description: "Continue" }],
+        multiSelect: false,
+      })),
+    },
+    createdAt: "2026-07-22T00:00:00.000Z",
+  });
+
+  assert.isNull(interaction);
 });

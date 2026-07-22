@@ -1432,6 +1432,152 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect(
+    "authorizes question answers and approvals before lookup and hides missing or stale ids",
+    () =>
+      Effect.gen(function* () {
+        const questionRow = {
+          threadId: ThreadId.make("thread-question-http"),
+          requestId: ApprovalRequestId.make("request-question-http"),
+          kind: "user-input" as const,
+          status: "pending" as const,
+          summary: "User input requested",
+          canApprove: false,
+          questions: [
+            {
+              id: "question-choice",
+              header: "Choose",
+              prompt: "Continue?",
+              options: [{ label: "Continue", description: "Continue the turn" }],
+              multiSelect: false,
+              allowsCustomAnswer: false,
+            },
+          ],
+          responseAction: null,
+          responseCommandId: null,
+          createdAt: "2026-07-22T00:00:00.000Z",
+          updatedAt: "2026-07-22T00:00:00.000Z",
+          resolvedAt: null,
+        };
+        const approvalRow = {
+          ...questionRow,
+          requestId: ApprovalRequestId.make("request-approval-http"),
+          kind: "approval" as const,
+          summary: "Command approval requested",
+          questions: [],
+        };
+        const staleRow = {
+          ...questionRow,
+          requestId: ApprovalRequestId.make("request-stale-http"),
+          status: "stale" as const,
+          resolvedAt: "2026-07-22T00:00:01.000Z",
+        };
+        const rows = [questionRow, approvalRow, staleRow];
+        yield* buildAppUnderTest({
+          layers: {
+            pendingInteractionRepository: {
+              get: ({ threadId, requestId }) =>
+                Effect.succeed(
+                  Option.fromNullishOr(
+                    rows.find((row) => row.threadId === threadId && row.requestId === requestId),
+                  ),
+                ),
+              claimResponse: (input) =>
+                Effect.succeed(
+                  rows.some(
+                    (row) =>
+                      row.threadId === input.threadId &&
+                      row.requestId === input.requestId &&
+                      row.status === "pending",
+                  )
+                    ? {
+                        _tag: "claimed" as const,
+                        commandId: input.commandId,
+                        commandCreatedAt: input.commandCreatedAt,
+                        dispatchAccepted: false as const,
+                      }
+                    : { _tag: "unavailable" as const },
+                ),
+            },
+            orchestrationEngine: {
+              dispatch: () => Effect.succeed({ sequence: 43 }),
+            },
+          },
+        });
+
+        const readExchange = yield* exchangeAccessToken(defaultDesktopBootstrapToken, {
+          scope: "orchestration:read",
+        });
+        const operateExchange = yield* exchangeAccessToken(defaultDesktopBootstrapToken, {
+          scope: "orchestration:operate",
+        });
+        const readToken = readExchange.body.access_token ?? "";
+        const operateToken = operateExchange.body.access_token ?? "";
+        const post = (path: "answer" | "approve", token: string, payload: unknown) =>
+          HttpClient.post(`/api/orchestration/pending-interactions/${path}`, {
+            headers: { authorization: `Bearer ${token}` },
+            body: HttpBody.text(jsonRequestBody(payload), "application/json"),
+          });
+        const answerPayload = (requestId: string) => ({
+          threadId: questionRow.threadId,
+          requestId,
+          idempotencyKey: `answer-${requestId}`,
+          answers: [{ questionId: "question-choice", values: ["Continue"] }],
+        });
+        const approvePayload = (requestId: string) => ({
+          threadId: approvalRow.threadId,
+          requestId,
+          idempotencyKey: `approve-${requestId}`,
+        });
+
+        const readOnlyAnswer = yield* post(
+          "answer",
+          readToken,
+          answerPayload(questionRow.requestId),
+        );
+        const readOnlyApprove = yield* post(
+          "approve",
+          readToken,
+          approvePayload(approvalRow.requestId),
+        );
+        const missingAnswer = yield* post(
+          "answer",
+          operateToken,
+          answerPayload("request-missing-http"),
+        );
+        const staleAnswer = yield* post("answer", operateToken, answerPayload(staleRow.requestId));
+        const unsafeApprove = yield* post(
+          "approve",
+          operateToken,
+          approvePayload(approvalRow.requestId),
+        );
+        const acceptedAnswer = yield* post(
+          "answer",
+          operateToken,
+          answerPayload(questionRow.requestId),
+        );
+        const missingBody = yield* missingAnswer.text;
+        const staleBody = yield* staleAnswer.text;
+        const unsafeApproveBody = yield* unsafeApprove.text;
+
+        assert.equal(readOnlyAnswer.status, 403);
+        assert.equal(readOnlyApprove.status, 403);
+        assert.equal(missingAnswer.status, 404, missingBody);
+        assert.equal(staleAnswer.status, 404, staleBody);
+        assert.equal(unsafeApprove.status, 400, unsafeApproveBody);
+        assert.equal(acceptedAnswer.status, 200);
+
+        for (const body of [missingBody, staleBody, unsafeApproveBody]) {
+          assert.notInclude(body, questionRow.threadId);
+          assert.notInclude(body, "question-choice");
+          assert.notInclude(body, "Continue");
+        }
+        assert.notInclude(missingBody, "request-missing-http");
+        assert.notInclude(staleBody, staleRow.requestId);
+        assert.notInclude(unsafeApproveBody, approvalRow.requestId);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("includes CORS headers on public environment descriptor responses", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();

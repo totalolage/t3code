@@ -4,12 +4,14 @@ import {
   REMOTE_INTERACTION_QUESTION_MAX_COUNT,
   RemoteInteractionRequestId,
   RemoteInteractionThreadId,
-  type RemotePendingInteractionQuestion,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
-import type { PendingInteractionRow } from "../persistence/Services/PendingInteractions.ts";
+import type {
+  PendingInteractionQuestion,
+  PendingInteractionRow,
+} from "../persistence/Services/PendingInteractions.ts";
 
 const CONTROL_OR_ANSI_PATTERN =
   // eslint-disable-next-line no-control-regex -- these bytes must be stripped from public text
@@ -89,33 +91,74 @@ function safeApprovalSummary(payload: Record<string, unknown>): {
   }
 }
 
-function sanitizeQuestions(value: unknown): ReadonlyArray<RemotePendingInteractionQuestion> {
-  if (!Array.isArray(value)) {
+function sanitizeQuestions(value: unknown): ReadonlyArray<PendingInteractionQuestion> {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > REMOTE_INTERACTION_QUESTION_MAX_COUNT
+  ) {
     return [];
   }
-  const questions: RemotePendingInteractionQuestion[] = [];
-  for (const candidate of value.slice(0, REMOTE_INTERACTION_QUESTION_MAX_COUNT)) {
+  const questions: PendingInteractionQuestion[] = [];
+  const usedQuestionIds = new Set<string>();
+  for (const [questionIndex, candidate] of value
+    .slice(0, REMOTE_INTERACTION_QUESTION_MAX_COUNT)
+    .entries()) {
     const question = readRecord(candidate);
-    if (!question || !isRemoteRequestId(question.id)) {
-      continue;
+    if (!question || typeof question.id !== "string" || question.id.length === 0) {
+      return [];
     }
+    const providerQuestionId = question.id;
+    const baseQuestionId = isRemoteRequestId(providerQuestionId)
+      ? providerQuestionId
+      : `question-${questionIndex + 1}`;
+    let questionId = baseQuestionId;
+    let questionSuffix = 2;
+    while (usedQuestionIds.has(questionId)) {
+      questionId = `${baseQuestionId.slice(0, 120)}-${questionSuffix}`;
+      questionSuffix += 1;
+    }
+    usedQuestionIds.add(questionId);
     const rawOptions = Array.isArray(question.options) ? question.options : [];
+    if (
+      rawOptions.length > REMOTE_INTERACTION_OPTION_MAX_COUNT ||
+      rawOptions.some((candidate) => {
+        const option = readRecord(candidate);
+        return !option || typeof option.label !== "string" || option.label.length === 0;
+      })
+    ) {
+      return [];
+    }
+    const usedLabels = new Set<string>();
     const options = rawOptions
       .slice(0, REMOTE_INTERACTION_OPTION_MAX_COUNT)
-      .flatMap((candidate) => {
+      .flatMap((candidate, index) => {
         const option = readRecord(candidate);
         if (!option) {
           return [];
         }
+        const providerValue =
+          typeof option.label === "string" && option.label.length > 0 ? option.label : "Option";
+        const sanitizedLabel = boundedText(providerValue, "Option", 160);
+        const baseLabel = sanitizedLabel === providerValue ? sanitizedLabel : `Option ${index + 1}`;
+        let label = baseLabel;
+        let suffix = 2;
+        while (usedLabels.has(label)) {
+          label = `${baseLabel.slice(0, 150)} (${suffix})`;
+          suffix += 1;
+        }
+        usedLabels.add(label);
         return [
           {
-            label: boundedText(option.label, "Option", 160),
+            label,
             description: boundedText(option.description, "Available choice", 160),
+            providerValue,
           },
         ];
       });
     questions.push({
-      id: question.id,
+      id: questionId,
+      providerQuestionId,
       header: boundedText(question.header, "Input needed", 64),
       prompt: boundedText(question.question, "The agent needs input.", 512),
       options,

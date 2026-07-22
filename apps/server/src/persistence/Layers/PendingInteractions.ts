@@ -5,7 +5,6 @@ import {
   IsoDateTime,
   RemoteInteractionIdempotencyKey,
   RemotePendingInteractionAction,
-  RemotePendingInteractionQuestion,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -18,6 +17,7 @@ import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 import {
   PendingInteractionRepository,
+  PendingInteractionQuestion,
   PendingInteractionRow,
   type PendingInteractionClaimInput,
   type PendingInteractionRepositoryShape,
@@ -30,7 +30,7 @@ const PendingInteractionDbRow = Schema.Struct({
   status: Schema.Literals(["pending", "responding", "resolved", "stale"]),
   summary: Schema.String,
   canApprove: Schema.Number,
-  questions: Schema.fromJsonString(Schema.Array(RemotePendingInteractionQuestion)),
+  questions: Schema.fromJsonString(Schema.Array(PendingInteractionQuestion)),
   responseAction: Schema.NullOr(RemotePendingInteractionAction),
   responseCommandId: Schema.NullOr(CommandId),
   createdAt: IsoDateTime,

@@ -3,9 +3,10 @@ import {
   AuthSessionId,
   CommandId,
   IsoDateTime,
+  REMOTE_INTERACTION_OPTION_MAX_COUNT,
+  REMOTE_INTERACTION_QUESTION_MAX_COUNT,
   RemoteInteractionIdempotencyKey,
   RemotePendingInteractionAction,
-  RemotePendingInteractionQuestion,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -26,6 +27,23 @@ export const PendingInteractionStatus = Schema.Literals([
 ]);
 export type PendingInteractionStatus = typeof PendingInteractionStatus.Type;
 
+export const PendingInteractionQuestion = Schema.Struct({
+  id: Schema.String,
+  providerQuestionId: Schema.optionalKey(Schema.String),
+  header: Schema.String,
+  prompt: Schema.String,
+  options: Schema.Array(
+    Schema.Struct({
+      label: Schema.String,
+      description: Schema.String,
+      providerValue: Schema.optionalKey(Schema.String),
+    }),
+  ).check(Schema.isMaxLength(REMOTE_INTERACTION_OPTION_MAX_COUNT)),
+  multiSelect: Schema.Boolean,
+  allowsCustomAnswer: Schema.Boolean,
+});
+export type PendingInteractionQuestion = typeof PendingInteractionQuestion.Type;
+
 export const PendingInteractionRow = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
@@ -33,7 +51,9 @@ export const PendingInteractionRow = Schema.Struct({
   status: PendingInteractionStatus,
   summary: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512)),
   canApprove: Schema.Boolean,
-  questions: Schema.Array(RemotePendingInteractionQuestion),
+  questions: Schema.Array(PendingInteractionQuestion).check(
+    Schema.isMaxLength(REMOTE_INTERACTION_QUESTION_MAX_COUNT),
+  ),
   responseAction: Schema.NullOr(RemotePendingInteractionAction),
   responseCommandId: Schema.NullOr(CommandId),
   createdAt: IsoDateTime,
