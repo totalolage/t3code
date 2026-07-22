@@ -90,6 +90,23 @@ it("cancels an in-progress f8y release when a newer one is queued", () => {
   assert.match(workflow, /concurrency:\n\s+group: f8y-release\n\s+cancel-in-progress: true/u);
 });
 
+it("evaluates the f8y Expo config before starting release builds", () => {
+  const metadataChecks = workflow.slice(
+    workflow.indexOf("  metadata_and_checks:"),
+    workflow.indexOf("  build_macos_arm64:"),
+  );
+
+  assert.include(metadataChecks, "name: Validate f8y Expo config");
+  assert.include(metadataChecks, "working-directory: apps/mobile");
+  assert.include(metadataChecks, "APP_VARIANT: f8y");
+  assert.include(metadataChecks, "T3CODE_RELEASE_VERSION: ${{ steps.metadata.outputs.version }}");
+  assert.include(
+    metadataChecks,
+    "T3CODE_ANDROID_VERSION_CODE: ${{ steps.metadata.outputs.android_version_code }}",
+  );
+  assert.include(metadataChecks, "./node_modules/.bin/expo config --json >/dev/null");
+});
+
 it("uses a stable f8y keystore and validates Android package metadata", () => {
   assert.include(workflow, "F8Y_ANDROID_KEYSTORE_BASE64");
   assert.include(workflow, "F8Y_ANDROID_STORE_PASSWORD");

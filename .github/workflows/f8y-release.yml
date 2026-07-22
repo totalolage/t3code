@@ -68,6 +68,14 @@ jobs:
             apps/mobile/f8yBuildConfig.test.ts \
             apps/mobile/plugins/withAndroidF8yReleaseSigning.test.ts
 
+      - name: Validate f8y Expo config
+        working-directory: apps/mobile
+        env:
+          APP_VARIANT: f8y
+          T3CODE_RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          T3CODE_ANDROID_VERSION_CODE: ${{ steps.metadata.outputs.android_version_code }}
+        run: ./node_modules/.bin/expo config --json >/dev/null
+
       - name: Typecheck release packages
         run: |
           vp run --filter @t3tools/scripts typecheck

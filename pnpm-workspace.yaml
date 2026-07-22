@@ -58,7 +58,6 @@ minimumReleaseAgeExclude:
   - "@clerk/shared@4.25.1"
 
 overrides:
-  typescript: 7.0.2
   "@clerk/backend": "catalog:"
   "@clerk/clerk-js": "catalog:"
   "@clerk/clerk-js>@base-org/account": "-"
