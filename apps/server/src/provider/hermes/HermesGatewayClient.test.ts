@@ -116,5 +116,10 @@ describe("HermesGatewayClient", () => {
         ),
       ).toThrow(HermesGatewayClientError);
     }
+    expect(() =>
+      normalizeHermesGatewayUrl(
+        "https://hermes.example.test/p/work?profile=engineering;access_token=fixture-value",
+      ),
+    ).toThrow(HermesGatewayClientError);
   });
 });
