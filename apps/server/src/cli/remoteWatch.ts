@@ -446,6 +446,9 @@ export const observeRemoteWatchStream = Effect.fn("remoteWatch.observeStream")(f
           ? Option.none()
           : Option.some({ status, lastSequence, observedRunning });
       }
+      if (item.kind === "synchronized") {
+        return Option.none();
+      }
       if (item.event.sequence <= lastSequence) {
         return Option.none();
       }

@@ -770,6 +770,7 @@ describe("remote thread watch", () => {
       Effect.gen(function* () {
         const result = yield* observeRemoteWatchStream({
           stream: Stream.fromIterable([
+            { kind: "synchronized" as const },
             sessionEvent(10, "running"),
             sessionEvent(10, "ready"),
             sessionEvent(11, "ready"),
