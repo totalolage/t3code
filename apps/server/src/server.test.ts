@@ -1316,7 +1316,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           requestId: ApprovalRequestId.make("request-pending-http"),
           kind: "approval" as const,
           status: "pending" as const,
-          summary: "Command approval requested",
+          summary: "Authorization: Bearer standard-read-secret and Bearer standalone-read-secret",
           canApprove: false,
           questions: [],
           responseAction: null,
@@ -1363,13 +1363,16 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           readonly interactions: ReadonlyArray<Record<string, unknown>>;
         };
         assert.equal(listResponse.status, 200);
+        const publicSummary = String(listBody.interactions[0]?.summary);
+        assert.notInclude(publicSummary, "standard-read-secret");
+        assert.notInclude(publicSummary, "standalone-read-secret");
         assert.deepStrictEqual(listBody.interactions, [
           {
             threadId: "thread-pending-http",
             requestId: "request-pending-http",
             kind: "approval",
             status: "pending",
-            summary: "Command approval requested",
+            summary: "[redacted] and [redacted]",
             canApprove: false,
             allowedActions: ["decline", "cancel"],
             questions: [],
