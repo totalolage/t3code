@@ -203,6 +203,55 @@ Typical uses:
 
 Use `t3 auth --help` and the nested subcommand help pages for the full reference.
 
+## Headless Pending Interactions
+
+The standalone remote CLI can read and respond to provider interactions without exposing provider
+activity envelopes. A compatible server advertises
+`capabilities.orchestration.pendingInteractions: true` in its environment descriptor.
+
+```bash
+t3 remote pending --host https://backend.example.com
+t3 remote pending --host https://backend.example.com --thread-id thread-123
+```
+
+`pending` is read-only and requires `orchestration:read`. It writes exactly one JSON document to
+stdout. The document always has an `interactions` array; every interaction also has
+`allowedActions` and `questions` arrays. IDs, display text, question counts, option counts, and
+answer values are bounded. Provider envelopes, commands, arguments, environment values,
+credentials, raw errors, terminal output, and local paths are not part of this API.
+
+Writes require `orchestration:operate`, an opaque retry key, and explicit `--yes` confirmation:
+
+```bash
+t3 remote answer thread-123 request-456 \
+  --host https://backend.example.com \
+  --idempotency-key answer-456-1 \
+  --answers-json '[{"questionId":"choice","values":["Continue"]}]' \
+  --yes
+
+t3 remote approve thread-123 request-456 \
+  --host https://backend.example.com \
+  --idempotency-key approve-456-1 \
+  --yes
+
+t3 remote reject thread-123 request-456 \
+  --host https://backend.example.com \
+  --idempotency-key reject-456-1 \
+  --decision decline \
+  --yes
+```
+
+Use `--decision cancel` when cancellation is preferable to decline. Approval is fail-closed:
+`approve` is available only when the server produced an allowlisted safe summary and reports
+`canApprove: true`. The current provider-derived projection has no trusted positive allowlist, so
+it reports `canApprove: false` and exposes only `decline` and `cancel`.
+
+An accepted response remains `responding` until the provider emits the matching acknowledgement.
+Retries in the same authenticated session reuse the original command identity and do not forward
+an already accepted response again. A retry key cannot be reused for different semantics. Stopped,
+interrupted, deleted, or provider-rejected stale requests disappear from the open list. CLI
+diagnostics go to stderr and never include raw remote error bodies.
+
 ## Security Notes
 
 - Treat pairing URLs and pairing tokens like passwords.

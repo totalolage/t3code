@@ -3,6 +3,7 @@ import {
   type ChatAttachment,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
+  RemoteInteractionRequestId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -10,12 +11,14 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { toPersistenceSqlError, type ProjectionRepositoryError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
+import { PendingInteractionRepository } from "../../persistence/Services/PendingInteractions.ts";
 import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectionStateRepository } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
@@ -35,6 +38,7 @@ import {
 } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
+import { PendingInteractionRepositoryLive } from "../../persistence/Layers/PendingInteractions.ts";
 import { ProjectionProjectRepositoryLive } from "../../persistence/Layers/ProjectionProjects.ts";
 import { ProjectionStateRepositoryLive } from "../../persistence/Layers/ProjectionState.ts";
 import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
@@ -54,6 +58,7 @@ import {
   parseThreadSegmentFromAttachmentId,
   toSafeThreadAttachmentSegment,
 } from "../../attachmentStore.ts";
+import { pendingInteractionFromActivity } from "../pendingInteractionSanitizer.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -65,7 +70,10 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
   threadTurns: "projection.thread-turns",
   checkpoints: "projection.checkpoints",
   pendingApprovals: "projection.pending-approvals",
+  pendingInteractions: "projection.pending-interactions",
 } as const;
+
+const isRemoteInteractionRequestId = Schema.is(RemoteInteractionRequestId);
 
 type ProjectorName =
   (typeof ORCHESTRATION_PROJECTOR_NAMES)[keyof typeof ORCHESTRATION_PROJECTOR_NAMES];
@@ -116,7 +124,7 @@ function extractActivityRequestId(payload: unknown): ApprovalRequestId | null {
     return null;
   }
   const requestId = (payload as Record<string, unknown>).requestId;
-  return typeof requestId === "string" ? ApprovalRequestId.make(requestId) : null;
+  return isRemoteInteractionRequestId(requestId) ? ApprovalRequestId.make(requestId) : null;
 }
 
 function isStalePendingApprovalFailureDetail(detail: string | null): boolean {
@@ -480,6 +488,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const projectionThreadSessionRepository = yield* ProjectionThreadSessionRepository;
     const projectionTurnRepository = yield* ProjectionTurnRepository;
     const projectionPendingApprovalRepository = yield* ProjectionPendingApprovalRepository;
+    const pendingInteractionRepository = yield* PendingInteractionRepository;
 
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -1502,6 +1511,114 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
     });
 
+    const applyPendingInteractionsProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyPendingInteractionsProjection",
+    )(function* (event, _attachmentSideEffects) {
+      switch (event.type) {
+        case "thread.activity-appended": {
+          const activity = event.payload.activity;
+          const opened = pendingInteractionFromActivity({
+            threadId: event.payload.threadId,
+            kind: activity.kind,
+            payload: activity.payload,
+            createdAt: activity.createdAt,
+          });
+          if (opened !== null) {
+            yield* pendingInteractionRepository.upsertOpened(opened);
+            return;
+          }
+
+          const requestId =
+            extractActivityRequestId(activity.payload) ??
+            (isRemoteInteractionRequestId(event.metadata.requestId)
+              ? ApprovalRequestId.make(event.metadata.requestId)
+              : null);
+          if (requestId === null) {
+            return;
+          }
+          if (activity.kind === "approval.resolved" || activity.kind === "user-input.resolved") {
+            yield* pendingInteractionRepository.resolve({
+              threadId: event.payload.threadId,
+              requestId,
+              updatedAt: activity.createdAt,
+            });
+            return;
+          }
+          if (
+            activity.kind === "provider.approval.respond.failed" ||
+            activity.kind === "provider.user-input.respond.failed"
+          ) {
+            const payload =
+              typeof activity.payload === "object" && activity.payload !== null
+                ? (activity.payload as Record<string, unknown>)
+                : null;
+            const detail = typeof payload?.detail === "string" ? payload.detail.toLowerCase() : "";
+            if (detail.includes("stale pending") || detail.includes("unknown pending")) {
+              yield* pendingInteractionRepository.markStale({
+                threadId: event.payload.threadId,
+                requestId,
+                updatedAt: activity.createdAt,
+              });
+            }
+          }
+          return;
+        }
+
+        case "thread.approval-response-requested":
+          if (event.commandId === null) {
+            return;
+          }
+          yield* pendingInteractionRepository.markResponding({
+            threadId: event.payload.threadId,
+            requestId: event.payload.requestId,
+            action:
+              event.payload.decision === "accept" || event.payload.decision === "acceptForSession"
+                ? "approve"
+                : event.payload.decision,
+            commandId: event.commandId,
+            updatedAt: event.payload.createdAt,
+          });
+          return;
+
+        case "thread.user-input-response-requested":
+          if (event.commandId === null) {
+            return;
+          }
+          yield* pendingInteractionRepository.markResponding({
+            threadId: event.payload.threadId,
+            requestId: event.payload.requestId,
+            action: "answer",
+            commandId: event.commandId,
+            updatedAt: event.payload.createdAt,
+          });
+          return;
+
+        case "thread.session-set":
+          if (
+            event.payload.session.status === "ready" ||
+            event.payload.session.status === "interrupted" ||
+            event.payload.session.status === "stopped" ||
+            event.payload.session.status === "error"
+          ) {
+            yield* pendingInteractionRepository.markThreadStale({
+              threadId: event.payload.threadId,
+              updatedAt: event.payload.session.updatedAt,
+            });
+          }
+          return;
+
+        case "thread.deleted":
+          yield* pendingInteractionRepository.markThreadStale({
+            threadId: event.payload.threadId,
+            updatedAt: event.payload.deletedAt,
+          });
+          return;
+
+        default:
+          return;
+      }
+    });
+
     const projectors: ReadonlyArray<ProjectorDefinition> = [
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.projects,
@@ -1534,6 +1651,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.pendingApprovals,
         apply: applyPendingApprovalsProjection,
+      },
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.pendingInteractions,
+        apply: applyPendingInteractionsProjection,
       },
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.threads,
@@ -1641,5 +1762,6 @@ export const OrchestrationProjectionPipelineLive = Layer.effect(
   Layer.provideMerge(ProjectionThreadSessionRepositoryLive),
   Layer.provideMerge(ProjectionTurnRepositoryLive),
   Layer.provideMerge(ProjectionPendingApprovalRepositoryLive),
+  Layer.provideMerge(PendingInteractionRepositoryLive),
   Layer.provideMerge(ProjectionStateRepositoryLive),
 );

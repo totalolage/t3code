@@ -48,6 +48,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       servers that must be relaunched manually (dev checkouts, Windows
       foreground runs, pre-update servers). */
   serverSelfUpdate: Schema.optionalKey(ServerSelfUpdateCapability),
+  orchestration: Schema.optionalKey(
+    Schema.Struct({
+      pendingInteractions: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+    }),
+  ),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 

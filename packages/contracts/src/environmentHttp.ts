@@ -34,6 +34,14 @@ import {
   OrchestrationThreadDetailSnapshot,
 } from "./orchestration.ts";
 import {
+  RemoteInteractionAnswerRequest,
+  RemoteInteractionApproveRequest,
+  RemoteInteractionRejectRequest,
+  RemoteInteractionResponseResult,
+  RemotePendingInteractionsQuery,
+  RemotePendingInteractionsResult,
+} from "./pendingInteractions.ts";
+import {
   RelayCloudEnvironmentHealthRequest,
   RelayCloudMintCredentialRequest,
   RelayEnvironmentConfigRequest,
@@ -56,6 +64,7 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "invalid_scope",
   "scope_not_granted",
   "invalid_command",
+  "invalid_interaction",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -84,6 +93,8 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "orchestration_snapshot_failed",
   "orchestration_thread_snapshot_failed",
   "orchestration_dispatch_failed",
+  "pending_interactions_read_failed",
+  "pending_interaction_response_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -158,7 +169,10 @@ export class EnvironmentInternalError extends Schema.TaggedErrorClass<Environmen
   }
 }
 
-export const EnvironmentResourceNotFoundReason = Schema.Literals(["thread_not_found"]);
+export const EnvironmentResourceNotFoundReason = Schema.Literals([
+  "thread_not_found",
+  "pending_interaction_not_found",
+]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
 export class EnvironmentResourceNotFoundError extends Schema.TaggedErrorClass<EnvironmentResourceNotFoundError>()(
@@ -298,6 +312,16 @@ const EnvironmentOrchestrationThreadSnapshotErrors = [
 const EnvironmentOrchestrationDispatchErrors = [
   EnvironmentRequestInvalidError,
   EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentPendingInteractionsReadErrors = [
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentPendingInteractionResponseErrors = [
+  EnvironmentRequestInvalidError,
+  EnvironmentScopeRequiredError,
+  EnvironmentResourceNotFoundError,
   EnvironmentInternalError,
 ] as const;
 
@@ -487,6 +511,50 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
       success: DispatchResult,
       error: EnvironmentOrchestrationDispatchErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("pendingInteractions", "/api/orchestration/pending-interactions", {
+      headers: OptionalBearerHeaders,
+      query: RemotePendingInteractionsQuery,
+      success: RemotePendingInteractionsResult,
+      error: EnvironmentPendingInteractionsReadErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post(
+      "answerPendingInteraction",
+      "/api/orchestration/pending-interactions/answer",
+      {
+        headers: OptionalBearerHeaders,
+        payload: RemoteInteractionAnswerRequest,
+        success: RemoteInteractionResponseResult,
+        error: EnvironmentPendingInteractionResponseErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post(
+      "approvePendingInteraction",
+      "/api/orchestration/pending-interactions/approve",
+      {
+        headers: OptionalBearerHeaders,
+        payload: RemoteInteractionApproveRequest,
+        success: RemoteInteractionResponseResult,
+        error: EnvironmentPendingInteractionResponseErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post(
+      "rejectPendingInteraction",
+      "/api/orchestration/pending-interactions/reject",
+      {
+        headers: OptionalBearerHeaders,
+        payload: RemoteInteractionRejectRequest,
+        success: RemoteInteractionResponseResult,
+        error: EnvironmentPendingInteractionResponseErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
 export class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")

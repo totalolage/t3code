@@ -142,6 +142,9 @@ export const make = Effect.gen(function* () {
       connectionProbe: true,
       threadSettlement: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
+      orchestration: {
+        pendingInteractions: true,
+      },
     },
   };
 
