@@ -29,11 +29,10 @@ describe("HermesGatewayClient", () => {
     expect(requests[0]?.url).not.toContain("shared-secret-sentinel");
   });
 
-  it("preserves arbitrary gateway query parameters after the endpoint path", async () => {
+  it("preserves non-credential gateway query parameters after the endpoint path", async () => {
     const requests: Request[] = [];
     const client = makeHermesGatewayClient({
-      gatewayUrl:
-        "https://hermes.example.test/p/work/?profile=engineering&access_token=gateway-token",
+      gatewayUrl: "https://hermes.example.test/p/work/?profile=engineering",
       secret: "header-only-secret",
       fetch: async (input, init) => {
         requests.push(
@@ -50,10 +49,7 @@ describe("HermesGatewayClient", () => {
 
     const requestUrl = new URL(requests[0]!.url);
     expect(requestUrl.pathname).toBe("/p/work/v1/models");
-    expect([...requestUrl.searchParams]).toEqual([
-      ["profile", "engineering"],
-      ["access_token", "gateway-token"],
-    ]);
+    expect([...requestUrl.searchParams]).toEqual([["profile", "engineering"]]);
     expect(requestUrl.href).not.toContain("header-only-secret");
     expect(requests[0]?.headers.get("authorization")).toBe("Bearer header-only-secret");
   });
@@ -102,5 +98,28 @@ describe("HermesGatewayClient", () => {
     expect(() => normalizeHermesGatewayUrl("https://user:pass@example.test")).toThrow();
     expect(() => normalizeHermesGatewayUrl("https://example.test#access_token=value")).toThrow();
     expect(() => normalizeHermesGatewayUrl("file:///tmp/hermes.sock")).toThrow();
+  });
+
+  it("rejects credential-shaped gateway query parameters before dispatch", () => {
+    for (const key of [
+      "access_token",
+      "api-key",
+      "authorization",
+      "client_secret",
+      "password",
+      "X-Amz-Credential",
+      "X-Amz-Signature",
+    ]) {
+      expect(() =>
+        normalizeHermesGatewayUrl(
+          `https://hermes.example.test/p/work?profile=engineering&${key}=credential-value`,
+        ),
+      ).toThrow(HermesGatewayClientError);
+    }
+    expect(() =>
+      normalizeHermesGatewayUrl(
+        "https://hermes.example.test/p/work?profile=engineering;access_token=fixture-value",
+      ),
+    ).toThrow(HermesGatewayClientError);
   });
 });

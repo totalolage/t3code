@@ -1,20 +1,37 @@
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Console from "effect/Console";
+import * as Runtime from "effect/Runtime";
 import { Command } from "effect/unstable/cli";
 
 import packageJson from "../package.json" with { type: "json" };
-import { remoteCommand } from "./cli/remote.ts";
+import { formatRemoteCliDiagnostic, remoteCommand } from "./cli/remote.ts";
 
 export const cli = Command.make("t3").pipe(
   Command.withDescription("Interact with remote T3 Code agents."),
   Command.withSubcommands([remoteCommand]),
 );
 
+export const handleRemoteCliFailure = Effect.fn("remoteBin.handleRemoteCliFailure")(function* (
+  error: unknown,
+  setExitCode: (exitCode: number) => void,
+) {
+  if (Runtime.getErrorReported(error)) {
+    yield* Console.error(formatRemoteCliDiagnostic(error));
+  }
+  yield* Effect.sync(() => setExitCode(Runtime.getErrorExitCode(error)));
+});
+
 if (import.meta.main) {
   Command.run(cli, { version: packageJson.version }).pipe(
     Effect.scoped,
     Effect.provide(NodeServices.layer),
+    Effect.catch((error) =>
+      handleRemoteCliFailure(error, (exitCode) => {
+        process.exitCode = exitCode;
+      }),
+    ),
     NodeRuntime.runMain,
   );
 }

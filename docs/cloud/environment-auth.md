@@ -9,16 +9,16 @@ checks and token exchange behavior can be audited against established concepts.
 Environment authorization is capability-based. A session carries zero or more
 OAuth-style scope strings:
 
-| Scope                   | Permission                                                               |
-| ----------------------- | ------------------------------------------------------------------------ |
-| `orchestration:read`    | Read snapshots, status, events, configuration, and filesystem/VCS state. |
-| `orchestration:operate` | Dispatch user operations and mutate environment-side workspace state.    |
-| `terminal:operate`      | Create, attach, input, resize, clear, restart, and terminate terminals.  |
-| `review:write`          | Read review diff previews used to compose review feedback.               |
-| `access:read`           | Inspect pairing links and client sessions.                               |
-| `access:write`          | Create or revoke pairing links and client sessions.                      |
-| `relay:read`            | Inspect managed relay connectivity.                                      |
-| `relay:write`           | Link, configure, or unlink managed relay connectivity.                   |
+| Scope                   | Permission                                                                                              |
+| ----------------------- | ------------------------------------------------------------------------------------------------------- |
+| `orchestration:read`    | Read snapshots, status, sanitized pending interactions, configuration, and filesystem/VCS state.        |
+| `orchestration:operate` | Dispatch user operations, respond to pending interactions, and mutate environment-side workspace state. |
+| `terminal:operate`      | Create, attach, input, resize, clear, restart, and terminate terminals.                                 |
+| `review:write`          | Read review diff previews used to compose review feedback.                                              |
+| `access:read`           | Inspect pairing links and client sessions.                                                              |
+| `access:write`          | Create or revoke pairing links and client sessions.                                                     |
+| `relay:read`            | Inspect managed relay connectivity.                                                                     |
+| `relay:write`           | Link, configure, or unlink managed relay connectivity.                                                  |
 
 Ordinary pairing links grant the four client-operation scopes and read access to
 managed relay connectivity:
@@ -81,6 +81,13 @@ enforces `orchestration:read`, `orchestration:operate`, `terminal:operate`,
 currently dispatches an orchestration operation, so clients performing it also
 need `orchestration:operate`. Creating a ticket is not
 authorization to call every RPC method.
+
+Pending interaction HTTP endpoints enforce the same split: listing requires
+`orchestration:read`; answer, approve, decline, and cancel require
+`orchestration:operate`. Authentication and scope checks run before keyed lookup, so callers without
+operate authority cannot use response IDs as an existence oracle. Authorized missing or stale keys
+receive the same generic not-found shape, and invalid response documents receive a generic invalid
+interaction error.
 
 ## Standards Alignment
 

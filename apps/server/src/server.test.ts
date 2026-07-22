@@ -5,6 +5,7 @@ import * as NodeCrypto from "node:crypto";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import {
+  ApprovalRequestId,
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
   AuthTokenExchangeGrantType,
@@ -72,6 +73,7 @@ const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 
 import * as ServerConfig from "./config.ts";
 import { makeRoutesLayer } from "./server.ts";
+import { PendingInteractionRepository } from "./persistence/Services/PendingInteractions.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
@@ -334,6 +336,7 @@ const buildAppUnderTest = (options?: {
     terminalManager?: Partial<TerminalManager.TerminalManager["Service"]>;
     orchestrationEngine?: Partial<OrchestrationEngine.OrchestrationEngineService["Service"]>;
     projectionSnapshotQuery?: Partial<ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"]>;
+    pendingInteractionRepository?: Partial<PendingInteractionRepository["Service"]>;
     checkpointDiffQuery?: Partial<CheckpointDiffQuery.CheckpointDiffQuery["Service"]>;
     browserTraceCollector?: Partial<BrowserTraceCollector.BrowserTraceCollector["Service"]>;
     serverLifecycleEvents?: Partial<ServerLifecycleEvents.ServerLifecycleEvents["Service"]>;
@@ -673,14 +676,28 @@ const buildAppUnderTest = (options?: {
         ),
       ),
       Layer.provide(
-        Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
-          readEvents: () => Stream.empty,
-          dispatch: () => Effect.succeed({ sequence: 0 }),
-          getCommandReceipt: () => Effect.succeed(Option.none()),
-          withBootstrapDispatchLock: (effect) => effect,
-          streamDomainEvents: Stream.empty,
-          ...options?.layers?.orchestrationEngine,
-        }),
+        Layer.mergeAll(
+          Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
+            readEvents: () => Stream.empty,
+            dispatch: () => Effect.succeed({ sequence: 0 }),
+            getCommandReceipt: () => Effect.succeed(Option.none()),
+            withBootstrapDispatchLock: (effect) => effect,
+            streamDomainEvents: Stream.empty,
+            ...options?.layers?.orchestrationEngine,
+          }),
+          Layer.mock(PendingInteractionRepository)({
+            upsertOpened: () => Effect.void,
+            listOpen: () => Effect.succeed([]),
+            get: () => Effect.succeed(Option.none()),
+            markResponding: () => Effect.void,
+            resolve: () => Effect.void,
+            markThreadStale: () => Effect.void,
+            markStale: () => Effect.void,
+            claimResponse: () => Effect.succeed({ _tag: "unavailable" as const }),
+            markDispatchAccepted: () => Effect.void,
+            ...options?.layers?.pendingInteractionRepository,
+          }),
+        ),
       ),
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
@@ -1288,6 +1305,125 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.status, 200);
       assert.deepEqual(body, testEnvironmentDescriptor);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "separates pending interaction read and operate authorization without an id oracle",
+    () =>
+      Effect.gen(function* () {
+        const pendingRow = {
+          threadId: ThreadId.make("thread-pending-http"),
+          requestId: ApprovalRequestId.make("request-pending-http"),
+          kind: "approval" as const,
+          status: "pending" as const,
+          summary: "Authorization: Bearer standard-read-secret and Bearer standalone-read-secret",
+          canApprove: false,
+          questions: [],
+          responseAction: null,
+          responseCommandId: null,
+          createdAt: "2026-07-22T00:00:00.000Z",
+          updatedAt: "2026-07-22T00:00:00.000Z",
+          resolvedAt: null,
+        };
+        yield* buildAppUnderTest({
+          layers: {
+            pendingInteractionRepository: {
+              listOpen: () => Effect.succeed([pendingRow]),
+              get: ({ requestId }) =>
+                Effect.succeed(
+                  requestId === pendingRow.requestId ? Option.some(pendingRow) : Option.none(),
+                ),
+              claimResponse: (input) =>
+                Effect.succeed({
+                  _tag: "claimed" as const,
+                  commandId: input.commandId,
+                  commandCreatedAt: input.commandCreatedAt,
+                  dispatchAccepted: false as const,
+                }),
+            },
+            orchestrationEngine: {
+              dispatch: () => Effect.succeed({ sequence: 42 }),
+            },
+          },
+        });
+
+        const readExchange = yield* exchangeAccessToken(defaultDesktopBootstrapToken, {
+          scope: "orchestration:read",
+        });
+        const operateExchange = yield* exchangeAccessToken(defaultDesktopBootstrapToken, {
+          scope: "orchestration:operate",
+        });
+        const readToken = readExchange.body.access_token ?? "";
+        const operateToken = operateExchange.body.access_token ?? "";
+
+        const listResponse = yield* HttpClient.get("/api/orchestration/pending-interactions", {
+          headers: { authorization: `Bearer ${readToken}` },
+        });
+        const listBody = (yield* listResponse.json) as {
+          readonly interactions: ReadonlyArray<Record<string, unknown>>;
+        };
+        assert.equal(listResponse.status, 200);
+        const publicSummary = String(listBody.interactions[0]?.summary);
+        assert.notInclude(publicSummary, "standard-read-secret");
+        assert.notInclude(publicSummary, "standalone-read-secret");
+        assert.deepStrictEqual(listBody.interactions, [
+          {
+            threadId: "thread-pending-http",
+            requestId: "request-pending-http",
+            kind: "approval",
+            status: "pending",
+            summary: "[redacted] and [redacted]",
+            canApprove: false,
+            allowedActions: ["decline", "cancel"],
+            questions: [],
+            createdAt: "2026-07-22T00:00:00.000Z",
+            updatedAt: "2026-07-22T00:00:00.000Z",
+          },
+        ]);
+
+        const reject = (token: string, requestId: string) =>
+          HttpClient.post("/api/orchestration/pending-interactions/reject", {
+            headers: { authorization: `Bearer ${token}` },
+            body: HttpBody.text(
+              jsonRequestBody({
+                threadId: pendingRow.threadId,
+                requestId,
+                idempotencyKey: `retry-${requestId}`,
+                decision: "decline",
+              }),
+              "application/json",
+            ),
+          });
+        const readOnlyResponse = yield* reject(readToken, pendingRow.requestId);
+        const missingResponse = yield* reject(operateToken, "request-missing-http");
+        const excessPayloadResponse = yield* HttpClient.post(
+          "/api/orchestration/pending-interactions/reject",
+          {
+            headers: { authorization: `Bearer ${operateToken}` },
+            body: HttpBody.text(
+              jsonRequestBody({
+                threadId: pendingRow.threadId,
+                requestId: pendingRow.requestId,
+                idempotencyKey: "retry-excess-payload",
+                decision: "decline",
+                providerEnvelope: { token: "must-not-be-accepted" },
+              }),
+              "application/json",
+            ),
+          },
+        );
+        const acceptedResponse = yield* reject(operateToken, pendingRow.requestId);
+        const readOnlyBody = yield* readOnlyResponse.text;
+        const missingBody = yield* missingResponse.text;
+
+        assert.equal(readOnlyResponse.status, 403);
+        assert.equal(missingResponse.status, 404);
+        assert.equal(excessPayloadResponse.status, 400);
+        assert.equal(acceptedResponse.status, 200);
+        assert.notInclude(readOnlyBody, pendingRow.requestId);
+        assert.notInclude(missingBody, "request-missing-http");
+        assert.notInclude(missingBody, pendingRow.threadId);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("includes CORS headers on public environment descriptor responses", () =>

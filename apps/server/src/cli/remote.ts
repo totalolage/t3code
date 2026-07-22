@@ -7,6 +7,10 @@ import {
   type AuthEnvironmentScope,
   ProjectId,
   ProviderInteractionMode,
+  RemoteInteractionAnswer,
+  RemoteInteractionIdempotencyKey,
+  RemoteInteractionRequestId,
+  RemoteInteractionThreadId,
   RuntimeMode,
   ThreadId,
   TurnId,
@@ -24,9 +28,13 @@ import {
 import { fetchRemoteEnvironmentDescriptor } from "@t3tools/client-runtime/environment";
 import {
   dispatchRemoteOrchestrationCommand,
+  answerRemotePendingInteraction,
+  approveRemotePendingInteraction,
   fetchRemoteOrchestrationShell,
   fetchRemoteOrchestrationSnapshot,
   fetchRemoteOrchestrationThread,
+  fetchRemotePendingInteractions,
+  rejectRemotePendingInteraction,
 } from "@t3tools/client-runtime/operations";
 import { RpcSessionFactory, rpcSessionLayer } from "@t3tools/client-runtime/rpc";
 import { oauthScopeSetEquals } from "@t3tools/shared/oauthScope";
@@ -82,6 +90,7 @@ export class RemoteCliError extends Schema.TaggedErrorClass<RemoteCliError>()("R
     "project-not-found",
     "project-model-missing",
     "invalid-input",
+    "capability-required",
     "request-failed",
   ]),
   detail: Schema.optional(Schema.String),
@@ -104,10 +113,32 @@ export class RemoteCliError extends Schema.TaggedErrorClass<RemoteCliError>()("R
         return "The target project has no default model selection.";
       case "invalid-input":
         return this.detail ?? "Remote command input is invalid.";
+      case "capability-required":
+        return "The remote environment does not advertise pending interaction support.";
       case "request-failed":
         return "The remote environment request failed.";
     }
   }
+}
+
+const isRemoteCliError = Schema.is(RemoteCliError);
+
+export function formatRemoteCliDiagnostic(error: unknown): string {
+  if (isRemoteCliError(error)) {
+    return `Remote request failed: ${error.message}`;
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "_tag" in error &&
+    (error._tag === "RemoteWatchFailure" ||
+      error._tag === "RemoteWatchNoTurnError" ||
+      error._tag === "RemoteWatchTerminalWithoutMessageError" ||
+      error._tag === "RemoteWatchTimeoutError")
+  ) {
+    return error instanceof Error ? error.message : "Remote watch failed.";
+  }
+  return "Remote request failed.";
 }
 
 const hostFlag = Flag.string("host").pipe(Flag.withDescription("Remote T3 Code HTTP base URL."));
@@ -148,6 +179,20 @@ const watchTurnFlag = Flag.string("turn").pipe(
   Flag.withDescription("Specific turn id to watch."),
   Flag.optional,
 );
+const pendingThreadIdFlag = Flag.string("thread-id").pipe(
+  Flag.withDescription("Only return interactions for this thread id."),
+  Flag.optional,
+);
+const idempotencyKeyFlag = Flag.string("idempotency-key").pipe(
+  Flag.withDescription("Opaque retry key scoped to the authenticated remote session."),
+);
+const answersJsonFlag = Flag.string("answers-json").pipe(
+  Flag.withDescription('JSON array of {"questionId":"...","values":["..."]} answers.'),
+);
+const rejectionDecisionFlag = Flag.choice("decision", ["decline", "cancel"] as const).pipe(
+  Flag.withDescription("Legacy provider rejection decision."),
+  Flag.withDefault("decline"),
+);
 const watchInteractionsFlag = Flag.boolean("interactions").pipe(
   Flag.withDescription(
     "Exit with code 26 and safe JSON when user input or command approval is pending.",
@@ -183,6 +228,35 @@ function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+const decodeCliValue = <S extends Schema.Decoder<unknown>>(
+  schema: S,
+  value: unknown,
+  label: string,
+) =>
+  Option.match(Schema.decodeUnknownOption(schema)(value), {
+    onNone: () =>
+      Effect.fail(
+        new RemoteCliError({
+          reason: "invalid-input",
+          detail: `${label} is invalid.`,
+        }),
+      ),
+    onSome: Effect.succeed,
+  });
+
+const decodeRemoteAnswersJson = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Array(RemoteInteractionAnswer)),
+);
+
+const decodeAnswersJson = (value: string) =>
+  Option.match(decodeRemoteAnswersJson(value, { onExcessProperty: "error" }), {
+    onNone: () =>
+      Effect.fail(
+        new RemoteCliError({ reason: "invalid-input", detail: "Answers JSON is invalid." }),
+      ),
+    onSome: Effect.succeed,
+  });
+
 const loadRemoteAuthorization = Effect.fn("remoteCli.loadAuthorization")(function* (input: {
   readonly stateDirectory: string;
   readonly httpBaseUrl: string;
@@ -202,6 +276,17 @@ const loadRemoteAuthorization = Effect.fn("remoteCli.loadAuthorization")(functio
     }
   }
   return { accessToken: token.accessToken, session };
+});
+
+const requirePendingInteractionCapability = Effect.fn(
+  "remoteCli.requirePendingInteractionCapability",
+)(function* (target: { readonly httpBaseUrl: string }) {
+  const descriptor = yield* fetchRemoteEnvironmentDescriptor(target).pipe(
+    Effect.mapError(() => new RemoteCliError({ reason: "request-failed" })),
+  );
+  if (descriptor.capabilities.orchestration?.pendingInteractions !== true) {
+    return yield* new RemoteCliError({ reason: "capability-required" });
+  }
 });
 
 const readThreadOption = (input: {
@@ -647,6 +732,163 @@ const remoteWatchCommand = Command.make("watch", {
   ),
 );
 
+const remotePendingCommand = Command.make("pending", {
+  ...projectLocationFlags,
+  host: hostFlag,
+  threadId: pendingThreadIdFlag,
+}).pipe(
+  Command.withDescription("Read sanitized pending remote interactions."),
+  Command.withHandler((flags) =>
+    runRemote(
+      Effect.gen(function* () {
+        const target = yield* resolveRemoteTarget(flags);
+        yield* requirePendingInteractionCapability(target);
+        const threadId = Option.isSome(flags.threadId)
+          ? yield* decodeCliValue(RemoteInteractionThreadId, flags.threadId.value, "Thread id")
+          : undefined;
+        const authorization = yield* loadRemoteAuthorization({
+          ...target,
+          requiredScopes: [AuthOrchestrationReadScope],
+        });
+        const result = yield* fetchRemotePendingInteractions({
+          httpBaseUrl: target.httpBaseUrl,
+          authorization,
+          ...(threadId === undefined ? {} : { threadId }),
+        }).pipe(Effect.mapError(() => new RemoteCliError({ reason: "request-failed" })));
+        yield* Console.log(formatJson(result));
+      }),
+    ),
+  ),
+);
+
+const remoteAnswerCommand = Command.make("answer", {
+  ...projectLocationFlags,
+  host: hostFlag,
+  yes: yesFlag,
+  idempotencyKey: idempotencyKeyFlag,
+  answersJson: answersJsonFlag,
+  threadId: Argument.string("thread-id"),
+  requestId: Argument.string("request-id"),
+}).pipe(
+  Command.withDescription("Answer a pending remote user-input interaction."),
+  Command.withHandler((flags) =>
+    runRemote(
+      Effect.gen(function* () {
+        if (!flags.yes) {
+          return yield* new RemoteCliError({
+            reason: "confirmation-required",
+            detail: "Remote answer requires --yes.",
+          });
+        }
+        const [threadId, requestId, idempotencyKey, answers] = yield* Effect.all([
+          decodeCliValue(RemoteInteractionThreadId, flags.threadId, "Thread id"),
+          decodeCliValue(RemoteInteractionRequestId, flags.requestId, "Request id"),
+          decodeCliValue(RemoteInteractionIdempotencyKey, flags.idempotencyKey, "Idempotency key"),
+          decodeAnswersJson(flags.answersJson),
+        ]);
+        const target = yield* resolveRemoteTarget(flags);
+        yield* requirePendingInteractionCapability(target);
+        const authorization = yield* loadRemoteAuthorization({
+          ...target,
+          requiredScopes: [AuthOrchestrationOperateScope],
+        });
+        const result = yield* answerRemotePendingInteraction({
+          httpBaseUrl: target.httpBaseUrl,
+          authorization,
+          payload: { threadId, requestId, idempotencyKey, answers },
+        }).pipe(Effect.mapError(() => new RemoteCliError({ reason: "request-failed" })));
+        yield* Console.log(formatJson(result));
+      }),
+    ),
+  ),
+);
+
+const remoteApproveCommand = Command.make("approve", {
+  ...projectLocationFlags,
+  host: hostFlag,
+  yes: yesFlag,
+  idempotencyKey: idempotencyKeyFlag,
+  threadId: Argument.string("thread-id"),
+  requestId: Argument.string("request-id"),
+}).pipe(
+  Command.withDescription("Approve a safely summarized pending remote interaction."),
+  Command.withHandler((flags) =>
+    runRemote(
+      Effect.gen(function* () {
+        if (!flags.yes) {
+          return yield* new RemoteCliError({
+            reason: "confirmation-required",
+            detail: "Remote approve requires --yes.",
+          });
+        }
+        const [threadId, requestId, idempotencyKey] = yield* Effect.all([
+          decodeCliValue(RemoteInteractionThreadId, flags.threadId, "Thread id"),
+          decodeCliValue(RemoteInteractionRequestId, flags.requestId, "Request id"),
+          decodeCliValue(RemoteInteractionIdempotencyKey, flags.idempotencyKey, "Idempotency key"),
+        ]);
+        const target = yield* resolveRemoteTarget(flags);
+        yield* requirePendingInteractionCapability(target);
+        const authorization = yield* loadRemoteAuthorization({
+          ...target,
+          requiredScopes: [AuthOrchestrationOperateScope],
+        });
+        const result = yield* approveRemotePendingInteraction({
+          httpBaseUrl: target.httpBaseUrl,
+          authorization,
+          payload: { threadId, requestId, idempotencyKey },
+        }).pipe(Effect.mapError(() => new RemoteCliError({ reason: "request-failed" })));
+        yield* Console.log(formatJson(result));
+      }),
+    ),
+  ),
+);
+
+const remoteRejectCommand = Command.make("reject", {
+  ...projectLocationFlags,
+  host: hostFlag,
+  yes: yesFlag,
+  idempotencyKey: idempotencyKeyFlag,
+  decision: rejectionDecisionFlag,
+  threadId: Argument.string("thread-id"),
+  requestId: Argument.string("request-id"),
+}).pipe(
+  Command.withDescription("Decline or cancel a pending remote approval interaction."),
+  Command.withHandler((flags) =>
+    runRemote(
+      Effect.gen(function* () {
+        if (!flags.yes) {
+          return yield* new RemoteCliError({
+            reason: "confirmation-required",
+            detail: "Remote reject requires --yes.",
+          });
+        }
+        const [threadId, requestId, idempotencyKey] = yield* Effect.all([
+          decodeCliValue(RemoteInteractionThreadId, flags.threadId, "Thread id"),
+          decodeCliValue(RemoteInteractionRequestId, flags.requestId, "Request id"),
+          decodeCliValue(RemoteInteractionIdempotencyKey, flags.idempotencyKey, "Idempotency key"),
+        ]);
+        const target = yield* resolveRemoteTarget(flags);
+        yield* requirePendingInteractionCapability(target);
+        const authorization = yield* loadRemoteAuthorization({
+          ...target,
+          requiredScopes: [AuthOrchestrationOperateScope],
+        });
+        const result = yield* rejectRemotePendingInteraction({
+          httpBaseUrl: target.httpBaseUrl,
+          authorization,
+          payload: {
+            threadId,
+            requestId,
+            idempotencyKey,
+            decision: flags.decision,
+          },
+        }).pipe(Effect.mapError(() => new RemoteCliError({ reason: "request-failed" })));
+        yield* Console.log(formatJson(result));
+      }),
+    ),
+  ),
+);
+
 export const remoteCommand = Command.make("remote").pipe(
   Command.withDescription("Use the supported remote orchestration API."),
   Command.withSubcommands([
@@ -659,5 +901,9 @@ export const remoteCommand = Command.make("remote").pipe(
     remoteSendCommand,
     remoteCreateCommand,
     remoteWatchCommand,
+    remotePendingCommand,
+    remoteAnswerCommand,
+    remoteApproveCommand,
+    remoteRejectCommand,
   ]),
 );

@@ -135,6 +135,9 @@ export const make = Effect.gen(function* () {
     serverVersion: packageJson.version,
     capabilities: {
       repositoryIdentity: true,
+      orchestration: {
+        pendingInteractions: true,
+      },
     },
   };
 
