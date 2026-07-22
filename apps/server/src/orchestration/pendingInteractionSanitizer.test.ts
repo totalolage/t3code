@@ -9,6 +9,8 @@ import {
 it("redacts credentials, paths, URLs, terminal escapes, commands, and opaque tokens", () => {
   const unsafe = [
     "token=super-secret-value",
+    "Authorization: Bearer standard-bearer-secret",
+    "Bearer standalone-bearer-secret",
     "/home/alice/private.txt",
     "/workspace/project/private.txt",
     "../relative/private.txt",
@@ -24,6 +26,8 @@ it("redacts credentials, paths, URLs, terminal escapes, commands, and opaque tok
     .join(" ");
 
   assert.notInclude(sanitized, "super-secret-value");
+  assert.notInclude(sanitized, "standard-bearer-secret");
+  assert.notInclude(sanitized, "standalone-bearer-secret");
   assert.notInclude(sanitized, "/home/alice");
   assert.notInclude(sanitized, "/workspace");
   assert.notInclude(sanitized, "../relative");

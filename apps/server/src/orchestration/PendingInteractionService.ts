@@ -23,6 +23,7 @@ import {
   type PendingInteractionRow,
 } from "../persistence/Services/PendingInteractions.ts";
 import type { OrchestrationCommandDispatcherShape } from "./Services/OrchestrationCommandDispatcher.ts";
+import { sanitizeRemoteInteractionText } from "./pendingInteractionSanitizer.ts";
 
 export class PendingInteractionUnavailableError extends Schema.TaggedErrorClass<PendingInteractionUnavailableError>()(
   "PendingInteractionUnavailableError",
@@ -52,15 +53,30 @@ function allowedActions(row: PendingInteractionRow): ReadonlyArray<RemotePending
 }
 
 export function toRemotePendingInteraction(row: PendingInteractionRow): RemotePendingInteraction {
+  const questions =
+    row.kind === "user-input"
+      ? row.questions.map((question) => ({
+          ...question,
+          header: sanitizeRemoteInteractionText(question.header, "Input needed").slice(0, 64),
+          prompt: sanitizeRemoteInteractionText(question.prompt, "The agent needs input."),
+          options: question.options.map((option) => ({
+            label: sanitizeRemoteInteractionText(option.label, "Option").slice(0, 160),
+            description: sanitizeRemoteInteractionText(
+              option.description,
+              "Available choice",
+            ).slice(0, 160),
+          })),
+        }))
+      : [];
   return {
     threadId: row.threadId,
     requestId: row.requestId,
     kind: row.kind,
     status: row.status === "responding" ? "responding" : "pending",
-    summary: row.summary,
+    summary: sanitizeRemoteInteractionText(row.summary, "Interaction requested"),
     canApprove: row.kind === "approval" && row.canApprove,
     allowedActions: [...allowedActions(row)],
-    questions: row.kind === "user-input" ? [...row.questions] : [],
+    questions,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };

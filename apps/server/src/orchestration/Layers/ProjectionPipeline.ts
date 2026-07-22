@@ -124,7 +124,12 @@ function extractActivityRequestId(payload: unknown): ApprovalRequestId | null {
     return null;
   }
   const requestId = (payload as Record<string, unknown>).requestId;
-  return isRemoteInteractionRequestId(requestId) ? ApprovalRequestId.make(requestId) : null;
+  return typeof requestId === "string" ? ApprovalRequestId.make(requestId) : null;
+}
+
+function extractRemoteActivityRequestId(payload: unknown): ApprovalRequestId | null {
+  const requestId = extractActivityRequestId(payload);
+  return isRemoteInteractionRequestId(requestId) ? requestId : null;
 }
 
 function isStalePendingApprovalFailureDetail(detail: string | null): boolean {
@@ -1486,7 +1491,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
 
           const requestId =
-            extractActivityRequestId(activity.payload) ??
+            extractRemoteActivityRequestId(activity.payload) ??
             (isRemoteInteractionRequestId(event.metadata.requestId)
               ? ApprovalRequestId.make(event.metadata.requestId)
               : null);
