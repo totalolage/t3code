@@ -37,6 +37,10 @@ export default defineConfig({
   },
   pack: [
     {
+      // Electron entrypoints are application bundles, not a published library API.
+      // Keep declaration generation disabled: TypeScript 7 intentionally does not
+      // expose the programmatic API used by rolldown-plugin-dts.
+      dts: false,
       format: "cjs",
       outDir: "dist-electron",
       sourcemap: true,
@@ -50,6 +54,7 @@ export default defineConfig({
       ...(shouldLaunchElectronAfterPack ? { onSuccess: "node scripts/dev-electron.mjs" } : {}),
     },
     {
+      dts: false,
       format: "cjs",
       outDir: "dist-electron",
       sourcemap: true,
@@ -64,6 +69,7 @@ export default defineConfig({
       },
     },
     {
+      dts: false,
       format: "cjs",
       outDir: "dist-electron",
       sourcemap: true,
