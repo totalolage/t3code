@@ -275,7 +275,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
       yield* fileSystem.writeFileString(
         serverConfig.settingsPath,
-        '{"addProjectBaseDirectory":"/workspace/retained","providerInstances":{"codex_loaded":{"driver":"codex","displayName":"Retained Codex","config":{}},"hermes_loaded":{"driver":"hermes","config":{"gatewayUrl":"https://hermes.example.test/p/work?access_token=legacy-secret"}}}}',
+        '{"addProjectBaseDirectory":"/workspace/retained","providerInstances":{"codex_loaded":{"driver":"codex","displayName":"Retained Codex","config":{}},"hermes_loaded":{"driver":"hermes","config":{"gatewayUrl":"https://hermes.example.test/p/work?profile=engineering;access_token=fixture-value"}}}}',
       );
 
       const loaded = yield* serverSettings.getSettings;
@@ -286,7 +286,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.equal(loaded.providerInstances[codexId]?.displayName, "Retained Codex");
       assert.equal(hermesConfig?.gatewayUrl, "");
       const rewritten = yield* fileSystem.readFileString(serverConfig.settingsPath);
-      assert.notInclude(rewritten, "legacy-secret");
+      assert.notInclude(rewritten, "fixture-value");
       assert.notInclude(rewritten, "access_token");
       assert.include(rewritten, "Retained Codex");
       assert.include(rewritten, "/workspace/retained");
@@ -631,8 +631,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         const serverConfig = yield* ServerConfig.ServerConfig;
         const fileSystem = yield* FileSystem.FileSystem;
         const instanceId = ProviderInstanceId.make("hermes_unsafe_query");
-        const credential = "gateway-query-credential";
-        const gatewayUrl = `https://hermes.example.test/p/work?profile=engineering&access_token=${credential}`;
+        const credential = "fixture-value";
+        const gatewayUrl = `https://hermes.example.test/p/work?profile=engineering;access_token=${credential}`;
         const unsafeSettings = yield* decodeServerSettings({
           providerInstances: {
             [instanceId]: {
