@@ -4,6 +4,7 @@ import { ProviderDriverKind } from "@t3tools/contracts";
 import { DRIVER_OPTION_BY_VALUE } from "./providerDriverMeta";
 import {
   deriveProviderSettingsFields,
+  getProviderSecretFieldPresentation,
   nextProviderConfigWithFieldValue,
   nextProviderSecretEnvironment,
   readProviderConfigBoolean,
@@ -160,5 +161,28 @@ describe("ProviderSettingsForm helpers", () => {
         },
       ],
     );
+  });
+
+  it("explains that a redacted Hermes secret remains stored", () => {
+    const hermes = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("hermes")];
+    expect(hermes?.secretEnvironmentVariable).toBeDefined();
+
+    expect(
+      getProviderSecretFieldPresentation({
+        secretField: hermes!.secretEnvironmentVariable!,
+        secretVariable: {
+          name: "HERMES_GATEWAY_SECRET",
+          value: "",
+          sensitive: true,
+          valueRedacted: true,
+        },
+      }),
+    ).toEqual({
+      value: "",
+      placeholder: "Stored secret - enter a new value to replace",
+      description:
+        "Secret stored. This field stays blank because the value is never returned to the browser. Enter a new value to replace it.",
+      isStored: true,
+    });
   });
 });

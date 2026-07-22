@@ -167,6 +167,36 @@ interface ProviderSettingsFormProps {
 
 const EMPTY_PROVIDER_ENVIRONMENT: ReadonlyArray<ProviderInstanceEnvironmentVariable> = [];
 
+export interface ProviderSecretFieldPresentation {
+  readonly value: string;
+  readonly placeholder?: string | undefined;
+  readonly description: string;
+  readonly isStored: boolean;
+}
+
+export function getProviderSecretFieldPresentation(input: {
+  readonly secretField: NonNullable<ProviderClientDefinition["secretEnvironmentVariable"]>;
+  readonly secretVariable: ProviderInstanceEnvironmentVariable | undefined;
+}): ProviderSecretFieldPresentation {
+  const isStored = input.secretVariable?.valueRedacted === true;
+  if (isStored) {
+    return {
+      value: "",
+      placeholder: "Stored secret - enter a new value to replace",
+      description:
+        "Secret stored. This field stays blank because the value is never returned to the browser. Enter a new value to replace it.",
+      isStored,
+    };
+  }
+
+  return {
+    value: input.secretVariable?.value ?? "",
+    placeholder: input.secretField.placeholder,
+    description: input.secretField.description,
+    isStored,
+  };
+}
+
 export function nextProviderSecretEnvironment(
   environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>,
   name: string,
@@ -313,6 +343,9 @@ export function ProviderSettingsForm({
   const secretVariable = secretField
     ? environment.find((variable) => variable.name === secretField.name)
     : undefined;
+  const secretPresentation = secretField
+    ? getProviderSecretFieldPresentation({ secretField, secretVariable })
+    : undefined;
 
   if (fields.length === 0 && !secretField) {
     return null;
@@ -343,17 +376,13 @@ export function ProviderSettingsForm({
                 className="mt-1.5"
                 type="password"
                 autoComplete="off"
-                value={secretVariable?.valueRedacted ? "" : (secretVariable?.value ?? "")}
+                value={secretPresentation!.value}
                 onCommit={(next) =>
                   onEnvironmentChange(
                     nextProviderSecretEnvironment(environment, secretField.name, next),
                   )
                 }
-                placeholder={
-                  secretVariable?.valueRedacted
-                    ? "Stored secret - enter a new value to replace"
-                    : secretField.placeholder
-                }
+                placeholder={secretPresentation!.placeholder}
                 spellCheck={false}
               />
             ) : (
@@ -362,7 +391,7 @@ export function ProviderSettingsForm({
                 className="bg-background"
                 type="password"
                 autoComplete="off"
-                value={secretVariable?.value ?? ""}
+                value={secretPresentation!.value}
                 onChange={(event) =>
                   onEnvironmentChange(
                     nextProviderSecretEnvironment(
@@ -372,18 +401,19 @@ export function ProviderSettingsForm({
                     ),
                   )
                 }
-                placeholder={secretField.placeholder}
+                placeholder={secretPresentation!.placeholder}
                 spellCheck={false}
               />
             )}
             <span
+              {...(secretPresentation!.isStored ? { role: "status", "aria-live": "polite" } : {})}
               className={
                 variant === "card"
                   ? "mt-1 block text-xs text-muted-foreground"
                   : "text-[11px] text-muted-foreground"
               }
             >
-              {secretField.description}
+              {secretPresentation!.description}
             </span>
           </label>
         </FieldFrame>
