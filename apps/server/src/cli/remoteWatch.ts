@@ -244,6 +244,18 @@ function isStaleInteractionFailure(activity: OrchestrationThreadActivity): boole
   );
 }
 
+function staleInteractionFailureKind(
+  activity: OrchestrationThreadActivity,
+): RemoteWatchInteraction["kind"] | null {
+  if (!isStaleInteractionFailure(activity)) {
+    return null;
+  }
+  if (activity.kind === "provider.user-input.respond.failed") {
+    return "user-input";
+  }
+  return activity.kind === "provider.approval.respond.failed" ? "approval" : null;
+}
+
 function safeUserInputInteraction(
   requestId: string,
   payload: Record<string, unknown> | null,
@@ -274,9 +286,19 @@ export function selectPendingRemoteWatchInteraction(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   targetTurnId: TurnId,
 ): RemoteWatchInteraction | null {
-  const pending = new Map<string, RemoteWatchInteraction>();
+  const pending = new Map<
+    string,
+    {
+      readonly interaction: RemoteWatchInteraction;
+      readonly requestedAt: string;
+      readonly requestedSequence: number | undefined;
+    }
+  >();
   const ordered = activities
-    .filter((activity) => activity.turnId === targetTurnId)
+    .filter(
+      (activity) =>
+        activity.turnId === targetTurnId && staleInteractionFailureKind(activity) === null,
+    )
     .toSorted(activityOrder);
 
   for (const activity of ordered) {
@@ -286,14 +308,22 @@ export function selectPendingRemoteWatchInteraction(
       continue;
     }
     if (activity.kind === "user-input.requested") {
-      pending.set(requestId, safeUserInputInteraction(requestId, payload));
+      pending.set(requestId, {
+        interaction: safeUserInputInteraction(requestId, payload),
+        requestedAt: activity.createdAt,
+        requestedSequence: activity.sequence,
+      });
       continue;
     }
     if (activity.kind === "approval.requested" && isCommandApproval(payload)) {
       pending.set(requestId, {
-        kind: "approval",
-        requestId,
-        prompt: { requestKind: "command" },
+        interaction: {
+          kind: "approval",
+          requestId,
+          prompt: { requestKind: "command" },
+        },
+        requestedAt: activity.createdAt,
+        requestedSequence: activity.sequence,
       });
       continue;
     }
@@ -301,16 +331,39 @@ export function selectPendingRemoteWatchInteraction(
       pending.delete(requestId);
       continue;
     }
+  }
+
+  const staleFailures = activities
+    .filter(
+      (activity) =>
+        (activity.turnId === targetTurnId || activity.turnId === null) &&
+        staleInteractionFailureKind(activity) !== null,
+    )
+    .toSorted(
+      (left, right) =>
+        left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+    );
+  for (const failure of staleFailures) {
+    const requestId = safeInteractionRequestId(activityPayload(failure));
+    const staleKind = staleInteractionFailureKind(failure);
+    const open = requestId === null ? undefined : pending.get(requestId);
+    const failureFollowsRequest =
+      failure.sequence !== undefined &&
+      open?.requestedSequence !== undefined &&
+      failure.sequence !== open.requestedSequence
+        ? failure.sequence > open.requestedSequence
+        : open !== undefined && failure.createdAt.localeCompare(open.requestedAt) >= 0;
     if (
-      (activity.kind === "provider.user-input.respond.failed" ||
-        activity.kind === "provider.approval.respond.failed") &&
-      isStaleInteractionFailure(activity)
+      requestId !== null &&
+      staleKind !== null &&
+      open?.interaction.kind === staleKind &&
+      failureFollowsRequest
     ) {
       pending.delete(requestId);
     }
   }
 
-  return pending.values().next().value ?? null;
+  return pending.values().next().value?.interaction ?? null;
 }
 
 function terminalStatusFromSnapshot(
