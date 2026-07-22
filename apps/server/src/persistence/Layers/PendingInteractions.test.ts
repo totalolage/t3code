@@ -6,7 +6,10 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
-import { respondToRemotePendingInteraction } from "../../orchestration/PendingInteractionService.ts";
+import {
+  listRemotePendingInteractions,
+  respondToRemotePendingInteraction,
+} from "../../orchestration/PendingInteractionService.ts";
 import { PendingInteractionRepository } from "../Services/PendingInteractions.ts";
 import { PendingInteractionRepositoryLive } from "./PendingInteractions.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
@@ -31,6 +34,30 @@ const opened = (threadId: string, requestId: string) => ({
   createdAt: "2026-07-22T00:00:00.000Z",
   updatedAt: "2026-07-22T00:00:00.000Z",
   resolvedAt: null,
+});
+
+const questionOpened = (threadId: string, requestId: string) => ({
+  ...opened(threadId, requestId),
+  kind: "user-input" as const,
+  summary: "User input requested",
+  questions: [
+    {
+      id: "question-choice",
+      providerQuestionId: "Which private choice should be used?",
+      header: "Choose",
+      prompt: "Continue?",
+      options: [
+        {
+          label: "Continue",
+          description: "Continue the turn",
+          providerValue: "/home/alice/private-choice",
+        },
+        { label: "Stop", description: "Stop the turn" },
+      ],
+      multiSelect: false,
+      allowsCustomAnswer: false,
+    },
+  ],
 });
 
 layer("PendingInteractionRepository", (it) => {
@@ -210,6 +237,180 @@ layer("PendingInteractionRepository", (it) => {
       assert.isTrue(replayed.replayed);
       assert.strictEqual(yield* Ref.get(dispatchCount), 1);
     }),
+  );
+
+  it.effect("runs question and command-approval lifecycles through provider acknowledgement", () =>
+    Effect.gen(function* () {
+      const repository = yield* PendingInteractionRepository;
+      const question = questionOpened("thread-lifecycle", "request-question");
+      const approval = {
+        ...opened("thread-lifecycle", "request-approval"),
+        createdAt: "2026-07-22T00:00:01.000Z",
+        updatedAt: "2026-07-22T00:00:01.000Z",
+      };
+      yield* repository.upsertOpened(question);
+      yield* repository.upsertOpened(approval);
+
+      const dispatched: Array<Record<string, unknown>> = [];
+      const dispatcher = {
+        dispatch: (command: Record<string, unknown>) =>
+          Effect.sync(() => {
+            dispatched.push(command);
+            return { sequence: dispatched.length };
+          }),
+      };
+
+      const initial = yield* listRemotePendingInteractions({ threadId: question.threadId });
+      assert.notInclude(JSON.stringify(initial), "/home/alice/private-choice");
+      assert.notInclude(JSON.stringify(initial), "Which private choice should be used?");
+      assert.deepStrictEqual(
+        initial.interactions.map(({ requestId, kind, status, allowedActions }) => ({
+          requestId,
+          kind,
+          status,
+          allowedActions,
+        })),
+        [
+          {
+            requestId: question.requestId,
+            kind: "user-input",
+            status: "pending",
+            allowedActions: ["answer"],
+          },
+          {
+            requestId: approval.requestId,
+            kind: "approval",
+            status: "pending",
+            allowedActions: ["decline", "cancel"],
+          },
+        ],
+      );
+
+      const answered = yield* respondToRemotePendingInteraction({
+        authSessionId: AuthSessionId.make("session-lifecycle"),
+        idempotencyKey: "answer-question",
+        threadId: question.threadId,
+        requestId: question.requestId,
+        action: "answer",
+        answers: [{ questionId: "question-choice", values: ["Continue"] }],
+        dispatcher,
+      });
+      assert.deepInclude(answered, { status: "responding", action: "answer", replayed: false });
+      assert.deepInclude(dispatched[0], {
+        type: "thread.user-input.respond",
+        threadId: question.threadId,
+        requestId: question.requestId,
+        answers: { "Which private choice should be used?": ["/home/alice/private-choice"] },
+      });
+      assert.strictEqual(
+        (yield* repository.get(question)).pipe(Option.getOrThrow).status,
+        "responding",
+      );
+
+      yield* repository.resolve({
+        threadId: question.threadId,
+        requestId: question.requestId,
+        updatedAt: "2026-07-22T00:00:02.000Z",
+      });
+      const replayedAnswer = yield* respondToRemotePendingInteraction({
+        authSessionId: AuthSessionId.make("session-lifecycle"),
+        idempotencyKey: "answer-question",
+        threadId: question.threadId,
+        requestId: question.requestId,
+        action: "answer",
+        answers: [{ questionId: "question-choice", values: ["Continue"] }],
+        dispatcher,
+      });
+      assert.deepInclude(replayedAnswer, {
+        status: "responding",
+        action: "answer",
+        replayed: true,
+      });
+      assert.lengthOf(dispatched, 1);
+      assert.deepStrictEqual(
+        (yield* listRemotePendingInteractions({ threadId: question.threadId })).interactions.map(
+          ({ requestId, status }) => ({ requestId, status }),
+        ),
+        [{ requestId: approval.requestId, status: "pending" }],
+      );
+
+      const declined = yield* respondToRemotePendingInteraction({
+        authSessionId: AuthSessionId.make("session-lifecycle"),
+        idempotencyKey: "decline-approval",
+        threadId: approval.threadId,
+        requestId: approval.requestId,
+        action: "decline",
+        dispatcher,
+      });
+      assert.deepInclude(declined, { status: "responding", action: "decline", replayed: false });
+      assert.deepInclude(dispatched[1], {
+        type: "thread.approval.respond",
+        threadId: approval.threadId,
+        requestId: approval.requestId,
+        decision: "decline",
+      });
+
+      yield* repository.resolve({
+        threadId: approval.threadId,
+        requestId: approval.requestId,
+        updatedAt: "2026-07-22T00:00:03.000Z",
+      });
+      assert.deepStrictEqual(
+        (yield* listRemotePendingInteractions({ threadId: question.threadId })).interactions,
+        [],
+      );
+    }),
+  );
+
+  it.effect(
+    "returns the same unavailable error for missing, resolved, and stale interaction keys",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* PendingInteractionRepository;
+        const resolved = opened("thread-safe-ids", "request-resolved");
+        const staleQuestion = questionOpened("thread-safe-ids", "request-stale-question");
+        yield* repository.upsertOpened(resolved);
+        yield* repository.upsertOpened(staleQuestion);
+        yield* repository.resolve({
+          threadId: resolved.threadId,
+          requestId: resolved.requestId,
+          updatedAt: "2026-07-22T00:00:01.000Z",
+        });
+        yield* repository.markStale({
+          threadId: staleQuestion.threadId,
+          requestId: staleQuestion.requestId,
+          updatedAt: "2026-07-22T00:00:01.000Z",
+        });
+
+        let dispatchCount = 0;
+        const dispatcher = {
+          dispatch: () =>
+            Effect.sync(() => {
+              dispatchCount += 1;
+              return { sequence: 1 };
+            }),
+        };
+        const attempts = [
+          {
+            requestId: ApprovalRequestId.make("request-missing"),
+            action: "decline" as const,
+          },
+          { requestId: resolved.requestId, action: "answer" as const, answers: [] },
+          { requestId: staleQuestion.requestId, action: "decline" as const },
+        ];
+
+        for (const [index, attempt] of attempts.entries()) {
+          const error = yield* respondToRemotePendingInteraction({
+            authSessionId: AuthSessionId.make("session-safe-ids"),
+            idempotencyKey: `safe-id-${index}`,
+            threadId: resolved.threadId,
+            ...attempt,
+            dispatcher,
+          }).pipe(Effect.flip);
+          assert.strictEqual(error._tag, "PendingInteractionUnavailableError");
+        }
+        assert.strictEqual(dispatchCount, 0);
+      }),
   );
 
   it.effect("removes acknowledged and stale interactions from open reads", () =>

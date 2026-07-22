@@ -196,18 +196,63 @@ The standalone remote CLI can read and respond to provider interactions without 
 activity envelopes. A compatible server advertises
 `capabilities.orchestration.pendingInteractions: true` in its environment descriptor.
 
+Use the read-only inspection commands before making a write:
+
+```bash
+t3 remote environment --host https://backend.example.com
+t3 remote session --host https://backend.example.com
+t3 remote shell --host https://backend.example.com
+t3 remote snapshot --host https://backend.example.com
+t3 remote thread thread-123 --host https://backend.example.com
+t3 remote pending --host https://backend.example.com --thread-id thread-123
+```
+
+`environment` inspects public capabilities. The other inspection commands require an authenticated
+session with `orchestration:read`; `shell`, `snapshot`, and `thread` expose progressively more
+orchestration state, while `pending` is the narrow interaction-only view.
+
+### Watch and response lifecycle
+
+Opt into actionable watch results explicitly:
+
+```bash
+t3 remote watch thread-123 \
+  --host https://backend.example.com \
+  --interactions \
+  --format json
+```
+
+When a user-input question or command approval is open, `watch --interactions` exits promptly with
+code `26` and writes exactly one compact JSON object to stdout. Its fields are `threadId`, `turnId`,
+and `interaction`. The interaction contains `kind`, `requestId`, and bounded structural `prompt`
+metadata: question/option counts for user input or `requestKind: "command"` for an approval. It
+never includes prompt text, option text, command text, arguments, provider logs, credentials, or
+paths. Interaction output is JSON regardless of `--format`; the format flag controls the final
+assistant result.
+
+Use `pending` to inspect the sanitized response choices:
+
 ```bash
 t3 remote pending --host https://backend.example.com
 t3 remote pending --host https://backend.example.com --thread-id thread-123
 ```
 
 `pending` is read-only and requires `orchestration:read`. It writes exactly one JSON document to
-stdout. The document always has an `interactions` array; every interaction also has
-`allowedActions` and `questions` arrays. IDs, display text, question counts, option counts, and
-answer values are bounded. Provider envelopes, commands, arguments, environment values,
-credentials, raw errors, terminal output, and local paths are not part of this API.
+stdout. The document always has an `interactions` array. Each item has `threadId`, `requestId`,
+`kind`, `status`, `summary`, `canApprove`, `allowedActions`, `questions`, `createdAt`, and
+`updatedAt`. Question objects contain bounded `id`, `header`, `prompt`, `options`, `multiSelect`,
+and `allowsCustomAnswer` fields. Display text is sanitized and bounded. Provider envelopes,
+commands, arguments, environment values, credentials, raw errors, terminal output, and local paths
+are not part of this API. Submit an option's displayed `label` in `values`; when a provider option
+contains redacted text, the server exposes a unique safe label and maps it back to the exact
+provider value internally without returning that value to the client. Provider-required question
+keys that are not safe opaque IDs are handled the same way through the displayed question `id`.
+Requests that exceed the documented question or option bounds are not exposed as partially
+answerable interactions.
 
-Writes require `orchestration:operate`, an opaque retry key, and explicit `--yes` confirmation:
+Response writes require all three of the following: an authenticated session authorized for
+`orchestration:operate`, a new opaque `--idempotency-key`, and `--yes` as explicit acknowledgement
+of the remote write. The positional syntax is always `<thread-id> <request-id>`:
 
 ```bash
 t3 remote answer thread-123 request-456 \
@@ -233,11 +278,21 @@ Use `--decision cancel` when cancellation is preferable to decline. Approval is 
 `canApprove: true`. The current provider-derived projection has no trusted positive allowlist, so
 it reports `canApprove: false` and exposes only `decline` and `cancel`.
 
-An accepted response remains `responding` until the provider emits the matching acknowledgement.
+Every accepted response prints one JSON object with `threadId`, `requestId`, `status`, `action`,
+`idempotencyKey`, and `replayed`. `status` is `responding`: dispatch acceptance is not provider
+acknowledgement. The interaction remains visible as `responding` with no allowed actions until the
+provider emits the matching acknowledgement. Re-run `watch --interactions` after acknowledgement;
+it returns the next actionable question/approval with exit code `26`, or the final assistant result
+with exit code `0`. Final JSON fields are `threadId`, `turnId`, `status`, and `message`; `message`
+contains `id`, `text`, and `createdAt`.
+
 Retries in the same authenticated session reuse the original command identity and do not forward
-an already accepted response again. A retry key cannot be reused for different semantics. Stopped,
-interrupted, deleted, or provider-rejected stale requests disappear from the open list. CLI
-diagnostics go to stderr and never include raw remote error bodies.
+an already accepted response again. A matching retry remains replayable after provider resolution,
+which makes a lost HTTP acknowledgement safe to recover. A retry key cannot be reused for different
+semantics. New or mismatched responses to invalid, missing, resolved, and stale identifiers never
+dispatch; missing and stale keys return the same generic not-found shape. Stopped, interrupted,
+deleted, or provider-rejected stale requests disappear from the open list. CLI diagnostics go to
+stderr and never include raw remote error bodies, credentials, provider payloads, or local paths.
 
 ## Security Notes
 

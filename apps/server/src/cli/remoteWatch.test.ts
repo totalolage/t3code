@@ -242,6 +242,20 @@ describe("remote thread watch", () => {
     ).toBeNull();
   });
 
+  it("detects actionable requests without a provider turn id", () => {
+    const pending = activity({
+      kind: "user-input.requested",
+      requestId: "user-input-null-turn",
+      payload: { questions: [{ options: [] }] },
+      turnId: null,
+    });
+
+    expect(selectPendingRemoteWatchInteraction([pending], turnId)).toMatchObject({
+      kind: "user-input",
+      requestId: "user-input-null-turn",
+    });
+  });
+
   it("clears only the exact pending request for a production-shaped null-turn stale failure", () => {
     const requested = activity({
       kind: "user-input.requested",
@@ -458,6 +472,118 @@ describe("remote thread watch", () => {
       });
       expect(result.message.text).toBe("continued after answer");
     }),
+  );
+
+  it.effect(
+    "subsequent watches advance from a question to approval and then the final result",
+    () =>
+      Effect.gen(function* () {
+        const questionRequested = activity({
+          kind: "user-input.requested",
+          requestId: "request-lifecycle-question",
+          payload: {
+            questions: [
+              {
+                question: "secret question body",
+                options: [{ label: "secret option", description: "secret description" }],
+              },
+            ],
+          },
+          sequence: 1,
+        });
+        const questionResolved = activity({
+          kind: "user-input.resolved",
+          requestId: "request-lifecycle-question",
+          sequence: 2,
+          createdAt: "2026-07-21T00:00:11.000Z",
+        });
+        const approvalRequested = activity({
+          kind: "approval.requested",
+          requestId: "request-lifecycle-approval",
+          payload: {
+            requestKind: "command",
+            command: "secret-command --token=secret",
+          },
+          sequence: 3,
+          createdAt: "2026-07-21T00:00:12.000Z",
+        });
+        const approvalResolved = activity({
+          kind: "approval.resolved",
+          requestId: "request-lifecycle-approval",
+          sequence: 4,
+          createdAt: "2026-07-21T00:00:13.000Z",
+        });
+        let lifecycle = "question" as "question" | "approval" | "final";
+        const transport: RemoteWatchTransport = {
+          readThread: () =>
+            Effect.sync(() => {
+              switch (lifecycle) {
+                case "question":
+                  return snapshot({
+                    sequence: 1,
+                    status: "running",
+                    activities: [questionRequested],
+                  });
+                case "approval":
+                  return snapshot({
+                    sequence: 3,
+                    status: "running",
+                    activities: [questionRequested, questionResolved, approvalRequested],
+                  });
+                case "final":
+                  return snapshot({
+                    sequence: 5,
+                    status: "ready",
+                    activities: [
+                      questionRequested,
+                      questionResolved,
+                      approvalRequested,
+                      approvalResolved,
+                    ],
+                    messageTexts: [{ text: "completed after both interactions" }],
+                  });
+              }
+            }),
+          subscribeThread: () => Effect.never,
+        };
+
+        const question = yield* watchRemoteThread({
+          transport,
+          threadId,
+          timeoutMs: 10_000,
+          interactionAware: true,
+        }).pipe(Effect.flip);
+        expect(question).toBeInstanceOf(RemoteWatchInteractionRequiredError);
+        expect(question.message).not.toContain("secret");
+        expect(JSON.parse(question.message).interaction).toMatchObject({
+          kind: "user-input",
+          requestId: "request-lifecycle-question",
+        });
+
+        lifecycle = "approval";
+        const approval = yield* watchRemoteThread({
+          transport,
+          threadId,
+          timeoutMs: 10_000,
+          interactionAware: true,
+        }).pipe(Effect.flip);
+        expect(approval).toBeInstanceOf(RemoteWatchInteractionRequiredError);
+        expect(approval.message).not.toContain("secret-command");
+        expect(JSON.parse(approval.message).interaction).toEqual({
+          kind: "approval",
+          requestId: "request-lifecycle-approval",
+          prompt: { requestKind: "command" },
+        });
+
+        lifecycle = "final";
+        const final = yield* watchRemoteThread({
+          transport,
+          threadId,
+          timeoutMs: 10_000,
+          interactionAware: true,
+        });
+        expect(final.message.text).toBe("completed after both interactions");
+      }),
   );
 
   it.effect("keeps legacy watch behavior unless interactions are explicitly enabled", () =>

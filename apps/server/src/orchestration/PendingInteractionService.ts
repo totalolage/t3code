@@ -56,7 +56,7 @@ export function toRemotePendingInteraction(row: PendingInteractionRow): RemotePe
   const questions =
     row.kind === "user-input"
       ? row.questions.map((question) => ({
-          ...question,
+          id: question.id,
           header: sanitizeRemoteInteractionText(question.header, "Input needed").slice(0, 64),
           prompt: sanitizeRemoteInteractionText(question.prompt, "The agent needs input."),
           options: question.options.map((option) => ({
@@ -66,6 +66,8 @@ export function toRemotePendingInteraction(row: PendingInteractionRow): RemotePe
               "Available choice",
             ).slice(0, 160),
           })),
+          multiSelect: question.multiSelect,
+          allowsCustomAnswer: question.allowsCustomAnswer,
         }))
       : [];
   return {
@@ -99,11 +101,15 @@ function normalizeAnswers(
     if (!values || values.length === 0 || (!question.multiSelect && values.length !== 1)) {
       return null;
     }
-    const optionLabels = new Set(question.options.map((option) => option.label));
-    if (!question.allowsCustomAnswer && values.some((value) => !optionLabels.has(value))) {
+    const providerValues = new Map(
+      question.options.map((option) => [option.label, option.providerValue ?? option.label]),
+    );
+    if (!question.allowsCustomAnswer && values.some((value) => !providerValues.has(value))) {
       return null;
     }
-    normalized[question.id] = [...values];
+    normalized[question.providerQuestionId ?? question.id] = values.map(
+      (value) => providerValues.get(value) ?? value,
+    );
   }
   return normalized;
 }
@@ -164,21 +170,26 @@ export const respondToRemotePendingInteraction = Effect.fn("pendingInteractions.
       return yield* new PendingInteractionUnavailableError();
     }
     const row = rowOption.value;
+    const interactionOpen = row.status === "pending" || row.status === "responding";
 
     let answers: ProviderUserInputAnswers | undefined;
     if (input.action === "answer") {
       answers = normalizeAnswers(row, input.answers ?? []) ?? undefined;
       if (answers === undefined) {
-        return yield* new PendingInteractionInvalidResponseError({ reason: "invalid_answers" });
+        return yield* interactionOpen
+          ? new PendingInteractionInvalidResponseError({ reason: "invalid_answers" })
+          : new PendingInteractionUnavailableError();
       }
     } else {
       if (row.kind !== "approval") {
-        return yield* new PendingInteractionInvalidResponseError({ reason: "wrong_kind" });
+        return yield* interactionOpen
+          ? new PendingInteractionInvalidResponseError({ reason: "wrong_kind" })
+          : new PendingInteractionUnavailableError();
       }
       if (input.action === "approve" && !row.canApprove) {
-        return yield* new PendingInteractionInvalidResponseError({
-          reason: "approval_not_safe",
-        });
+        return yield* interactionOpen
+          ? new PendingInteractionInvalidResponseError({ reason: "approval_not_safe" })
+          : new PendingInteractionUnavailableError();
       }
     }
 
@@ -201,9 +212,9 @@ export const respondToRemotePendingInteraction = Effect.fn("pendingInteractions.
       commandCreatedAt,
     });
     if (claimed._tag === "conflict") {
-      return yield* new PendingInteractionInvalidResponseError({
-        reason: "idempotency_conflict",
-      });
+      return yield* interactionOpen
+        ? new PendingInteractionInvalidResponseError({ reason: "idempotency_conflict" })
+        : new PendingInteractionUnavailableError();
     }
     if (claimed._tag === "unavailable") {
       return yield* new PendingInteractionUnavailableError();

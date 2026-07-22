@@ -558,6 +558,6 @@ const navigationPathConfig = {
   screens: createPathConfigForStaticNavigation(RootStack) ?? {},
 };
 
-declare module "@react-navigation/native" {
+declare module "@react-navigation/core" {
   interface RootNavigator extends RootStackType {}
 }

@@ -297,7 +297,8 @@ export function selectPendingRemoteWatchInteraction(
   const ordered = activities
     .filter(
       (activity) =>
-        activity.turnId === targetTurnId && staleInteractionFailureKind(activity) === null,
+        (activity.turnId === targetTurnId || activity.turnId === null) &&
+        staleInteractionFailureKind(activity) === null,
     )
     .toSorted(activityOrder);
 

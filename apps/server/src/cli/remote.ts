@@ -147,7 +147,7 @@ const credentialFlag = Flag.redacted("credential").pipe(
   Flag.optional,
 );
 const yesFlag = Flag.boolean("yes").pipe(
-  Flag.withDescription("Acknowledge the remote write."),
+  Flag.withDescription("Explicitly acknowledge the authorized remote write."),
   Flag.withDefault(false),
 );
 const confirmCreateFlag = Flag.boolean("confirm-create").pipe(
@@ -167,7 +167,7 @@ const interactionModeFlag = Flag.choice("interaction-mode", ProviderInteractionM
   Flag.optional,
 );
 const watchFormatFlag = Flag.choice("format", ["text", "json"] as const).pipe(
-  Flag.withDescription("Watch output format."),
+  Flag.withDescription("Final-result output: assistant text or structured JSON."),
   Flag.withDefault("text"),
 );
 const watchTimeoutFlag = Flag.string("timeout").pipe(
@@ -181,7 +181,7 @@ const watchTurnFlag = Flag.string("turn").pipe(
 );
 const watchInteractionsFlag = Flag.boolean("interactions").pipe(
   Flag.withDescription(
-    "Exit with code 26 and safe JSON when user input or command approval is pending.",
+    "Exit promptly with code 26 and one-line redacted JSON when input or approval is pending.",
   ),
   Flag.withDefault(false),
 );
@@ -190,7 +190,7 @@ const pendingThreadIdFlag = Flag.string("thread-id").pipe(
   Flag.optional,
 );
 const idempotencyKeyFlag = Flag.string("idempotency-key").pipe(
-  Flag.withDescription("Opaque retry key scoped to the authenticated remote session."),
+  Flag.withDescription("Opaque retry key scoped to the authorized remote session."),
 );
 const answersJsonFlag = Flag.string("answers-json").pipe(
   Flag.withDescription('JSON array of {"questionId":"...","values":["..."]} answers.'),
@@ -700,7 +700,9 @@ const remoteWatchCommand = Command.make("watch", {
   interactions: watchInteractionsFlag,
   threadId: Argument.string("thread-id"),
 }).pipe(
-  Command.withDescription("Wait once for a thread turn's final assistant message."),
+  Command.withDescription(
+    "Wait for the next actionable interaction or a turn's final assistant result.",
+  ),
   Command.withHandler((flags) =>
     runRemote(
       Effect.gen(function* () {
@@ -737,7 +739,9 @@ const remotePendingCommand = Command.make("pending", {
   host: hostFlag,
   threadId: pendingThreadIdFlag,
 }).pipe(
-  Command.withDescription("Read sanitized pending remote interactions."),
+  Command.withDescription(
+    "Inspect sanitized pending/responding interactions as one JSON document.",
+  ),
   Command.withHandler((flags) =>
     runRemote(
       Effect.gen(function* () {
@@ -770,7 +774,9 @@ const remoteAnswerCommand = Command.make("answer", {
   threadId: Argument.string("thread-id"),
   requestId: Argument.string("request-id"),
 }).pipe(
-  Command.withDescription("Answer a pending remote user-input interaction."),
+  Command.withDescription(
+    "Answer a pending user-input interaction with operate authorization and explicit --yes.",
+  ),
   Command.withHandler((flags) =>
     runRemote(
       Effect.gen(function* () {
@@ -811,7 +817,9 @@ const remoteApproveCommand = Command.make("approve", {
   threadId: Argument.string("thread-id"),
   requestId: Argument.string("request-id"),
 }).pipe(
-  Command.withDescription("Approve a safely summarized pending remote interaction."),
+  Command.withDescription(
+    "Approve an allowlisted interaction with operate authorization and explicit --yes.",
+  ),
   Command.withHandler((flags) =>
     runRemote(
       Effect.gen(function* () {
@@ -852,7 +860,9 @@ const remoteRejectCommand = Command.make("reject", {
   threadId: Argument.string("thread-id"),
   requestId: Argument.string("request-id"),
 }).pipe(
-  Command.withDescription("Decline or cancel a pending remote approval interaction."),
+  Command.withDescription(
+    "Decline/cancel an approval with operate authorization and explicit --yes.",
+  ),
   Command.withHandler((flags) =>
     runRemote(
       Effect.gen(function* () {
