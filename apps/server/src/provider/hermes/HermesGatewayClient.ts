@@ -97,44 +97,6 @@ export interface HermesGatewayClient {
 
 export type HermesFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-const SENSITIVE_QUERY_PARAMETER_NAMES = new Set([
-  "accesskey",
-  "accesstoken",
-  "apikey",
-  "auth",
-  "authorization",
-  "bearer",
-  "clientsecret",
-  "code",
-  "credential",
-  "credentials",
-  "idtoken",
-  "key",
-  "passphrase",
-  "passwd",
-  "password",
-  "refreshtoken",
-  "secret",
-  "secretkey",
-  "sessionkey",
-  "sessiontoken",
-  "sig",
-  "signature",
-  "ticket",
-  "token",
-]);
-
-function queryParameterNameLooksSensitive(name: string): boolean {
-  const normalized = name
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]/gu, "");
-  if (!normalized || SENSITIVE_QUERY_PARAMETER_NAMES.has(normalized)) return true;
-  return /(?:accesstoken|apikey|credential|idtoken|passphrase|passwd|password|refreshtoken|secret|sessiontoken|signature|token)$/u.test(
-    normalized,
-  );
-}
-
 export function normalizeHermesGatewayUrl(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -156,8 +118,7 @@ export function normalizeHermesGatewayUrl(raw: string): string {
     (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
     parsed.username ||
     parsed.password ||
-    parsed.hash ||
-    [...parsed.searchParams.keys()].some(queryParameterNameLooksSensitive)
+    parsed.hash
   ) {
     throw new HermesGatewayClientError({
       operation: "health",
