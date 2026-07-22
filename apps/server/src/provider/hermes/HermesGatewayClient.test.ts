@@ -29,6 +29,35 @@ describe("HermesGatewayClient", () => {
     expect(requests[0]?.url).not.toContain("shared-secret-sentinel");
   });
 
+  it("preserves arbitrary gateway query parameters after the endpoint path", async () => {
+    const requests: Request[] = [];
+    const client = makeHermesGatewayClient({
+      gatewayUrl:
+        "https://hermes.example.test/p/work/?profile=engineering&access_token=gateway-token",
+      secret: "header-only-secret",
+      fetch: async (input, init) => {
+        requests.push(
+          input instanceof Request ? new Request(input, init) : new Request(input.toString(), init),
+        );
+        return new Response(JSON.stringify({ object: "list", data: [{ id: "hermes-agent" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+
+    await client.listModels();
+
+    const requestUrl = new URL(requests[0]!.url);
+    expect(requestUrl.pathname).toBe("/p/work/v1/models");
+    expect([...requestUrl.searchParams]).toEqual([
+      ["profile", "engineering"],
+      ["access_token", "gateway-token"],
+    ]);
+    expect(requestUrl.href).not.toContain("header-only-secret");
+    expect(requests[0]?.headers.get("authorization")).toBe("Bearer header-only-secret");
+  });
+
   it("parses Hermes session SSE events in order", async () => {
     const client = makeHermesGatewayClient({
       gatewayUrl: "https://hermes.example.test",
@@ -69,9 +98,9 @@ describe("HermesGatewayClient", () => {
     expect(JSON.stringify(error)).not.toContain(secret);
   });
 
-  it("rejects gateway URLs that could smuggle credentials or request metadata", () => {
+  it("rejects invalid gateway URLs and embedded userinfo", () => {
     expect(() => normalizeHermesGatewayUrl("https://user:pass@example.test")).toThrow();
-    expect(() => normalizeHermesGatewayUrl("https://example.test?token=value")).toThrow();
+    expect(() => normalizeHermesGatewayUrl("https://example.test#access_token=value")).toThrow();
     expect(() => normalizeHermesGatewayUrl("file:///tmp/hermes.sock")).toThrow();
   });
 });

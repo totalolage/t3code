@@ -118,7 +118,6 @@ export function normalizeHermesGatewayUrl(raw: string): string {
     (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
     parsed.username ||
     parsed.password ||
-    parsed.search ||
     parsed.hash
   ) {
     throw new HermesGatewayClientError({
@@ -126,8 +125,10 @@ export function normalizeHermesGatewayUrl(raw: string): string {
       reason: "configuration",
     });
   }
+  const query = parsed.search;
+  parsed.search = "";
   parsed.pathname = parsed.pathname.replace(/\/+$/u, "");
-  return parsed.toString().replace(/\/$/u, "");
+  return `${parsed.toString().replace(/\/$/u, "")}${query}`;
 }
 
 function asRecord(value: unknown): Readonly<Record<string, unknown>> | null {
@@ -241,9 +242,14 @@ export function makeHermesGatewayClient(input: {
   readonly secret: string;
   readonly fetch?: HermesFetch;
 }): HermesGatewayClient {
-  const baseUrl = normalizeHermesGatewayUrl(input.gatewayUrl);
+  const baseUrl = new URL(normalizeHermesGatewayUrl(input.gatewayUrl));
+  const basePathname = baseUrl.pathname.replace(/\/+$/u, "");
   const fetchImpl = input.fetch ?? globalThis.fetch;
-  const urlFor = (path: string) => `${baseUrl}/${path.replace(/^\/+/, "")}`;
+  const urlFor = (path: string) => {
+    const target = new URL(baseUrl);
+    target.pathname = `${basePathname}/${path.replace(/^\/+/, "")}`;
+    return target.toString();
+  };
 
   const request = async (
     operation: HermesGatewayOperation,
