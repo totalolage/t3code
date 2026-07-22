@@ -1,4 +1,5 @@
 import {
+  ApprovalRequestId,
   CheckpointRef,
   CommandId,
   CorrelationId,
@@ -171,6 +172,101 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       for (const row of stateRows) {
         assert.equal(row.lastAppliedSequence, 3);
       }
+    }),
+  );
+
+  it.effect("keeps remote interactions responding until correlated provider acknowledgement", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-remote-lifecycle");
+      const requestId = "request-remote-lifecycle";
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+      const readStatus = Effect.gen(function* () {
+        const rows = yield* sql<{ readonly status: string; readonly canApprove: number }>`
+          SELECT status, can_approve AS "canApprove"
+          FROM pending_interactions
+          WHERE thread_id = ${threadId} AND request_id = ${requestId}
+        `;
+        return rows[0];
+      });
+
+      yield* appendAndProject({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-remote-lifecycle-requested"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-07-22T00:00:00.000Z",
+        commandId: CommandId.make("cmd-remote-lifecycle-requested"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-remote-lifecycle-requested"),
+        metadata: {},
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("activity-remote-lifecycle-requested"),
+            tone: "approval",
+            kind: "approval.requested",
+            summary: "Unsafe provider summary that must not be public",
+            payload: {
+              requestId,
+              requestKind: "command",
+              command: ["sh", "-c", "printenv"],
+            },
+            turnId: null,
+            createdAt: "2026-07-22T00:00:00.000Z",
+          },
+        },
+      });
+      assert.deepStrictEqual(yield* readStatus, { status: "pending", canApprove: 0 });
+
+      yield* appendAndProject({
+        type: "thread.approval-response-requested",
+        eventId: EventId.make("evt-remote-lifecycle-responding"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-07-22T00:00:01.000Z",
+        commandId: CommandId.make("cmd-remote-lifecycle-responding"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-remote-lifecycle-responding"),
+        metadata: {},
+        payload: {
+          threadId,
+          requestId: ApprovalRequestId.make(requestId),
+          decision: "decline",
+          createdAt: "2026-07-22T00:00:01.000Z",
+        },
+      });
+      assert.deepStrictEqual(yield* readStatus, { status: "responding", canApprove: 0 });
+
+      yield* appendAndProject({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-remote-lifecycle-resolved"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-07-22T00:00:02.000Z",
+        commandId: CommandId.make("cmd-remote-lifecycle-resolved"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-remote-lifecycle-resolved"),
+        metadata: { requestId: ApprovalRequestId.make(requestId) },
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("activity-remote-lifecycle-resolved"),
+            tone: "info",
+            kind: "approval.resolved",
+            summary: "Approval response sent",
+            payload: { requestId },
+            turnId: null,
+            createdAt: "2026-07-22T00:00:02.000Z",
+          },
+        },
+      });
+      assert.deepStrictEqual(yield* readStatus, { status: "resolved", canApprove: 0 });
     }),
   );
 });
@@ -1866,6 +1962,13 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         },
       ]);
 
+      const interactionRows = yield* sql<{ readonly status: string }>`
+        SELECT status FROM pending_interactions
+        WHERE thread_id = 'thread-stale-approval'
+          AND request_id = 'approval-request-stale-1'
+      `;
+      assert.deepEqual(interactionRows, [{ status: "stale" }]);
+
       const threadRows = yield* sql<{
         readonly pendingApprovalCount: number;
       }>`
@@ -2010,6 +2113,12 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         WHERE thread_id = 'thread-stale-user-input'
       `;
       assert.deepEqual(threadRows, [{ pendingUserInputCount: 0 }]);
+      const interactionRows = yield* sql<{ readonly status: string }>`
+        SELECT status FROM pending_interactions
+        WHERE thread_id = 'thread-stale-user-input'
+          AND request_id = 'user-input-request-stale-1'
+      `;
+      assert.deepEqual(interactionRows, [{ status: "stale" }]);
     }),
   );
 

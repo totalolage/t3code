@@ -58,6 +58,25 @@ Remote support should preserve that boundary.
 
 The important decision is that remoteness is expressed at the environment connection layer, not by splitting the T3 runtime itself.
 
+### Pending interaction boundary
+
+Remote pending interactions are a separate, additive orchestration capability advertised as
+`capabilities.orchestration.pendingInteractions`. The public HTTP/CLI contract is a bounded,
+sanitized projection keyed by `(threadId, requestId)`; provider activity payloads are never the
+remote API.
+
+The server persists a semantic idempotency ledger scoped to the authenticated session. Dispatch
+uses the existing internal wire commands and decision literals, with a stable command identity for
+crash recovery. The lifecycle is `pending -> responding` only after dispatch acceptance and becomes
+resolved only after the correlated provider acknowledgement. Terminal session states, thread
+deletion, and recognized stale provider responses reconcile unresolved records to a non-public
+stale state.
+
+Remote approval is intentionally asymmetric. Decline and cancel remain available, but approval is
+allowed only for a trusted allowlisted semantic summary that sets `canApprove: true`; untrusted
+provider prose can never grant approval capability. Until a server-authored semantic normalizer
+provides such an allowlist, all provider-derived approvals are reject/cancel-only.
+
 ## Domain model
 
 ### ExecutionEnvironment

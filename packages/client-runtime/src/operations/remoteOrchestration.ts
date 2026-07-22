@@ -6,6 +6,12 @@ import {
   type OrchestrationShellSnapshot,
   type OrchestrationThreadDetailSnapshot,
   type ThreadId,
+  type RemoteInteractionAnswerRequest,
+  type RemoteInteractionApproveRequest,
+  type RemoteInteractionRejectRequest,
+  type RemoteInteractionResponseResult,
+  type RemoteInteractionThreadId,
+  type RemotePendingInteractionsResult,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { HttpClient } from "effect/unstable/http";
@@ -107,6 +113,114 @@ export const dispatchRemoteOrchestrationCommand = Effect.fn(
       headers: bearerHeaders(input.authorization),
       payload: input.command,
     } as Parameters<typeof client.orchestration.dispatch>[0]),
+  );
+});
+
+export const fetchRemotePendingInteractions = Effect.fn(
+  "clientRuntime.operations.fetchRemotePendingInteractions",
+)(function* (input: {
+  readonly httpBaseUrl: string;
+  readonly authorization: RemoteBearerAuthorization;
+  readonly threadId?: RemoteInteractionThreadId;
+  readonly timeoutMs?: number;
+}): Effect.fn.Return<
+  RemotePendingInteractionsResult,
+  RemoteEnvironmentRequestError,
+  HttpClient.HttpClient
+> {
+  const requestUrl = environmentEndpointUrl(
+    input.httpBaseUrl,
+    "/api/orchestration/pending-interactions",
+  );
+  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl);
+  return yield* executeEnvironmentHttpRequest(
+    requestUrl,
+    input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,
+    client.orchestration.pendingInteractions({
+      headers: bearerHeaders(input.authorization),
+      query: input.threadId === undefined ? {} : { threadId: input.threadId },
+    }),
+  );
+});
+
+export const answerRemotePendingInteraction = Effect.fn(
+  "clientRuntime.operations.answerRemotePendingInteraction",
+)(function* (input: {
+  readonly httpBaseUrl: string;
+  readonly authorization: RemoteBearerAuthorization;
+  readonly payload: RemoteInteractionAnswerRequest;
+  readonly timeoutMs?: number;
+}): Effect.fn.Return<
+  RemoteInteractionResponseResult,
+  RemoteEnvironmentRequestError,
+  HttpClient.HttpClient
+> {
+  const requestUrl = environmentEndpointUrl(
+    input.httpBaseUrl,
+    "/api/orchestration/pending-interactions/answer",
+  );
+  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl);
+  return yield* executeEnvironmentHttpRequest(
+    requestUrl,
+    input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,
+    client.orchestration.answerPendingInteraction({
+      headers: bearerHeaders(input.authorization),
+      payload: input.payload,
+    }),
+  );
+});
+
+export const approveRemotePendingInteraction = Effect.fn(
+  "clientRuntime.operations.approveRemotePendingInteraction",
+)(function* (input: {
+  readonly httpBaseUrl: string;
+  readonly authorization: RemoteBearerAuthorization;
+  readonly payload: RemoteInteractionApproveRequest;
+  readonly timeoutMs?: number;
+}): Effect.fn.Return<
+  RemoteInteractionResponseResult,
+  RemoteEnvironmentRequestError,
+  HttpClient.HttpClient
+> {
+  const requestUrl = environmentEndpointUrl(
+    input.httpBaseUrl,
+    "/api/orchestration/pending-interactions/approve",
+  );
+  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl);
+  return yield* executeEnvironmentHttpRequest(
+    requestUrl,
+    input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,
+    client.orchestration.approvePendingInteraction({
+      headers: bearerHeaders(input.authorization),
+      payload: input.payload,
+    }),
+  );
+});
+
+export const rejectRemotePendingInteraction = Effect.fn(
+  "clientRuntime.operations.rejectRemotePendingInteraction",
+)(function* (input: {
+  readonly httpBaseUrl: string;
+  readonly authorization: RemoteBearerAuthorization;
+  readonly payload: RemoteInteractionRejectRequest;
+  readonly timeoutMs?: number;
+}): Effect.fn.Return<
+  RemoteInteractionResponseResult,
+  RemoteEnvironmentRequestError,
+  HttpClient.HttpClient
+> {
+  const requestUrl = environmentEndpointUrl(
+    input.httpBaseUrl,
+    "/api/orchestration/pending-interactions/reject",
+  );
+  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl);
+  return yield* executeEnvironmentHttpRequest(
+    requestUrl,
+    input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,
+    client.orchestration.rejectPendingInteraction({
+      headers: bearerHeaders(input.authorization),
+      payload: input.payload,
+    }),
   );
 });
 
