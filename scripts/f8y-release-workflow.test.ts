@@ -24,30 +24,52 @@ it("publishes the desktop, mobile, and standalone CLI artifacts for every main p
   assert.include(workflow, "release-assets/*.apk");
   assert.include(workflow, "release-assets/t3-*-darwin-arm64");
   assert.include(workflow, "release-assets/t3-*-darwin-arm64.sha256");
+  assert.include(workflow, "release-assets/t3-*-linux-x64");
+  assert.include(workflow, "release-assets/t3-*-linux-x64.sha256");
   assert.notInclude(workflow, "blacksmith-");
   assert.notInclude(workflow, "EXPO_TOKEN");
   assert.notInclude(workflow, "CSC_LINK");
   assert.notInclude(workflow.toLowerCase(), "personal");
 });
 
-it("builds and verifies a versioned self-contained remote CLI", () => {
-  const buildScript = serverPackageJson.scripts["build:remote-binary:darwin-arm64"];
+it("builds and verifies versioned self-contained remote CLIs for macOS and Linux", () => {
+  const macosBuildScript = serverPackageJson.scripts["build:remote-binary:darwin-arm64"];
+  const linuxBuildScript = serverPackageJson.scripts["build:remote-binary:linux-x64"];
 
-  assert.include(buildScript, "bun build src/remote-bin.ts");
-  assert.include(buildScript, "--compile");
-  assert.include(buildScript, "--target=bun-darwin-arm64");
-  assert.include(buildScript, "--outfile dist/t3-darwin-arm64");
+  assert.include(macosBuildScript, "bun build src/remote-bin.ts");
+  assert.include(macosBuildScript, "--compile");
+  assert.include(macosBuildScript, "--target=bun-darwin-arm64");
+  assert.include(macosBuildScript, "--outfile dist/t3-darwin-arm64");
+  assert.include(linuxBuildScript, "bun build src/remote-bin.ts");
+  assert.include(linuxBuildScript, "--compile");
+  assert.include(linuxBuildScript, "--target=bun-linux-x64-baseline");
+  assert.include(linuxBuildScript, "--outfile dist/t3-linux-x64");
   assert.include(workflow, "oven-sh/setup-bun@v2");
   assert.include(workflow, "bun-version: 1.3.14");
   assert.include(workflow, "vp run --filter t3 build:remote-binary:darwin-arm64");
+  assert.include(workflow, "vp run --filter t3 build:remote-binary:linux-x64");
   assert.include(workflow, 'cli="apps/server/dist/t3-darwin-arm64"');
+  assert.include(workflow, 'cli="apps/server/dist/t3-linux-x64"');
   assert.include(workflow, 'cli_version="$("$cli" --version)"');
   assert.include(workflow, '"$cli" remote --help');
   assert.include(workflow, 'codesign --force --sign - "$cli"');
   assert.include(workflow, 'shasum -a 256 "$(basename "$cli_asset")"');
+  assert.include(workflow, 'sha256sum "$(basename "$cli_asset")"');
   assert.include(
     workflow,
     'cli_asset="release-publish/t3-${{ needs.metadata_and_checks.outputs.version }}-darwin-arm64"',
+  );
+  assert.include(
+    workflow,
+    'cli_asset="release-publish/t3-${{ needs.metadata_and_checks.outputs.version }}-linux-x64"',
+  );
+  assert.match(
+    workflow,
+    /build_linux_x64:[\s\S]*?needs: metadata_and_checks[\s\S]*?runs-on: ubuntu-24\.04/u,
+  );
+  assert.include(
+    workflow,
+    "needs: [metadata_and_checks, build_macos_arm64, build_linux_x64, build_android_apk]",
   );
 });
 
