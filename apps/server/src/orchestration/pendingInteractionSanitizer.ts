@@ -15,6 +15,7 @@ const CONTROL_OR_ANSI_PATTERN =
   // eslint-disable-next-line no-control-regex -- these bytes must be stripped from public text
   /\u001b\[[0-?]*[ -/]*[@-~]|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const PEM_BLOCK_PATTERN = /-----BEGIN [^-\r\n]+-----[\s\S]*?-----END [^-\r\n]+-----/gi;
+const BEARER_CREDENTIAL_PATTERN = /\b(?:authorization\s*:\s*)?bearer\s+[^\s,;]+/gi;
 const CREDENTIAL_PATTERN =
   /\b(?:bearer|token|password|passwd|secret|api[_-]?key|credential)\s*[:=]\s*[^\s,;]+/gi;
 const ENV_ASSIGNMENT_PATTERN = /\b[A-Z][A-Z0-9_]{2,}\s*=\s*[^\s,;]+/g;
@@ -46,6 +47,7 @@ function boundedText(value: unknown, fallback: string, maxChars: number): string
   const sanitized = value
     .replace(CONTROL_OR_ANSI_PATTERN, "")
     .replace(PEM_BLOCK_PATTERN, "[redacted]")
+    .replace(BEARER_CREDENTIAL_PATTERN, "[redacted]")
     .replace(CREDENTIAL_PATTERN, "[redacted]")
     .replace(ENV_ASSIGNMENT_PATTERN, "[redacted]")
     .replace(PATH_PATTERN, "[redacted]")

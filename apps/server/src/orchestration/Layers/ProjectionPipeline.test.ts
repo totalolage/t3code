@@ -333,6 +333,55 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       assert.deepStrictEqual(yield* readStatus, { status: "resolved", canApprove: 0 });
     }),
   );
+
+  it.effect("preserves legacy pending approvals with nonconforming request IDs", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-legacy-nonconforming-approval");
+      const requestId = "legacy/request id with spaces?";
+
+      const savedEvent = yield* eventStore.append({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-legacy-nonconforming-approval"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-07-22T00:00:00.000Z",
+        commandId: CommandId.make("cmd-legacy-nonconforming-approval"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-legacy-nonconforming-approval"),
+        metadata: {},
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("activity-legacy-nonconforming-approval"),
+            tone: "approval",
+            kind: "approval.requested",
+            summary: "Approval requested",
+            payload: { requestId },
+            turnId: null,
+            createdAt: "2026-07-22T00:00:00.000Z",
+          },
+        },
+      });
+      yield* projectionPipeline.projectEvent(savedEvent);
+
+      const legacyRows = yield* sql<{ readonly requestId: string; readonly status: string }>`
+        SELECT request_id AS "requestId", status
+        FROM projection_pending_approvals
+        WHERE request_id = ${requestId}
+      `;
+      const remoteRows = yield* sql<{ readonly requestId: string }>`
+        SELECT request_id AS "requestId"
+        FROM pending_interactions
+        WHERE request_id = ${requestId}
+      `;
+
+      assert.deepStrictEqual(legacyRows, [{ requestId, status: "pending" }]);
+      assert.deepStrictEqual(remoteRows, []);
+    }),
+  );
 });
 
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-base-")))(

@@ -266,6 +266,34 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("preserves unrelated loaded settings while clearing an unsafe Hermes URL", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const hermesId = ProviderInstanceId.make("hermes_loaded");
+      const codexId = ProviderInstanceId.make("codex_loaded");
+
+      yield* fileSystem.writeFileString(
+        serverConfig.settingsPath,
+        '{"addProjectBaseDirectory":"/workspace/retained","providerInstances":{"codex_loaded":{"driver":"codex","displayName":"Retained Codex","config":{}},"hermes_loaded":{"driver":"hermes","config":{"gatewayUrl":"https://hermes.example.test/p/work?access_token=legacy-secret"}}}}',
+      );
+
+      const loaded = yield* serverSettings.getSettings;
+      const hermesConfig = loaded.providerInstances[hermesId]?.config as
+        | { gatewayUrl?: string }
+        | undefined;
+      assert.equal(loaded.addProjectBaseDirectory, "/workspace/retained");
+      assert.equal(loaded.providerInstances[codexId]?.displayName, "Retained Codex");
+      assert.equal(hermesConfig?.gatewayUrl, "");
+      const rewritten = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      assert.notInclude(rewritten, "legacy-secret");
+      assert.notInclude(rewritten, "access_token");
+      assert.include(rewritten, "Retained Codex");
+      assert.include(rewritten, "/workspace/retained");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect(
     "uses explicit provider instance enabled state over legacy provider enabled state",
     () =>
@@ -595,5 +623,47 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         "hermes-test-secret",
       );
     }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect(
+    "rejects credential-shaped Hermes query keys before persistence or client exposure",
+    () =>
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const instanceId = ProviderInstanceId.make("hermes_unsafe_query");
+        const credential = "gateway-query-credential";
+        const gatewayUrl = `https://hermes.example.test/p/work?profile=engineering&access_token=${credential}`;
+        const unsafeSettings = yield* decodeServerSettings({
+          providerInstances: {
+            [instanceId]: {
+              driver: "hermes",
+              config: { gatewayUrl },
+            },
+          },
+        });
+
+        const clientSettings = ServerSettingsModule.redactServerSettingsForClient(unsafeSettings);
+        const clientConfig = clientSettings.providerInstances[instanceId]?.config as
+          | { gatewayUrl?: string }
+          | undefined;
+        assert.equal(clientConfig?.gatewayUrl, "");
+
+        const updateExit = yield* Effect.exit(
+          serverSettings.updateSettings({
+            providerInstances: unsafeSettings.providerInstances,
+          }),
+        );
+        assert.strictEqual(updateExit._tag, "Failure");
+
+        const current = yield* serverSettings.getSettings;
+        assert.isUndefined(current.providerInstances[instanceId]);
+        if (yield* fileSystem.exists(serverConfig.settingsPath)) {
+          const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+          assert.notInclude(raw, credential);
+          assert.notInclude(raw, "access_token");
+        }
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 });

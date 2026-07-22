@@ -6,6 +6,7 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   DEFAULT_SERVER_SETTINGS,
+  isHermesGatewayUrlQuerySafe,
   ServerSettings,
   ServerSettingsPatch,
 } from "./settings.ts";
@@ -15,6 +16,24 @@ const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
+
+describe("Hermes gateway query safety", () => {
+  it("allows routing parameters and rejects credential-shaped keys", () => {
+    expect(
+      isHermesGatewayUrlQuerySafe(
+        "https://hermes.example.test/p/work?profile=engineering&region=west",
+      ),
+    ).toBe(true);
+    expect(
+      isHermesGatewayUrlQuerySafe(
+        "https://hermes.example.test/p/work?profile=engineering&access_token=secret",
+      ),
+    ).toBe(false);
+    expect(
+      isHermesGatewayUrlQuerySafe("https://hermes.example.test/p/work?ACCESS%5FTOKEN=secret"),
+    ).toBe(false);
+  });
+});
 
 describe("ClientSettings word wrap", () => {
   it("defaults word wrap on", () => {
