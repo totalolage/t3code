@@ -18,6 +18,7 @@
 - `vp run dist:desktop:linux` — Builds a Linux AppImage into `./release`.
 - `vp run dist:desktop:win` — Builds a Windows NSIS installer into `./release`.
 - `vp run dist:mobile:apk:f8y` — Generates the native Android project and builds the `f8y` release APK using the persistent keystore environment variables.
+- `vp run --filter t3 build:remote-binary:darwin-arm64` — Builds the self-contained Apple Silicon `t3 remote` CLI with Bun into `apps/server/dist/t3-darwin-arm64`.
 
 ## Desktop `.dmg` packaging notes
 
