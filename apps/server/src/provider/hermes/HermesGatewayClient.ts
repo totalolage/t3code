@@ -97,6 +97,44 @@ export interface HermesGatewayClient {
 
 export type HermesFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
+const SENSITIVE_QUERY_PARAMETER_NAMES = new Set([
+  "accesskey",
+  "accesstoken",
+  "apikey",
+  "auth",
+  "authorization",
+  "bearer",
+  "clientsecret",
+  "code",
+  "credential",
+  "credentials",
+  "idtoken",
+  "key",
+  "passphrase",
+  "passwd",
+  "password",
+  "refreshtoken",
+  "secret",
+  "secretkey",
+  "sessionkey",
+  "sessiontoken",
+  "sig",
+  "signature",
+  "ticket",
+  "token",
+]);
+
+function queryParameterNameLooksSensitive(name: string): boolean {
+  const normalized = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/gu, "");
+  if (!normalized || SENSITIVE_QUERY_PARAMETER_NAMES.has(normalized)) return true;
+  return /(?:accesstoken|apikey|credential|idtoken|passphrase|passwd|password|refreshtoken|secret|sessiontoken|signature|token)$/u.test(
+    normalized,
+  );
+}
+
 export function normalizeHermesGatewayUrl(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -118,16 +156,18 @@ export function normalizeHermesGatewayUrl(raw: string): string {
     (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
     parsed.username ||
     parsed.password ||
-    parsed.search ||
-    parsed.hash
+    parsed.hash ||
+    [...parsed.searchParams.keys()].some(queryParameterNameLooksSensitive)
   ) {
     throw new HermesGatewayClientError({
       operation: "health",
       reason: "configuration",
     });
   }
+  const query = parsed.search;
+  parsed.search = "";
   parsed.pathname = parsed.pathname.replace(/\/+$/u, "");
-  return parsed.toString().replace(/\/$/u, "");
+  return `${parsed.toString().replace(/\/$/u, "")}${query}`;
 }
 
 function asRecord(value: unknown): Readonly<Record<string, unknown>> | null {
@@ -241,9 +281,14 @@ export function makeHermesGatewayClient(input: {
   readonly secret: string;
   readonly fetch?: HermesFetch;
 }): HermesGatewayClient {
-  const baseUrl = normalizeHermesGatewayUrl(input.gatewayUrl);
+  const baseUrl = new URL(normalizeHermesGatewayUrl(input.gatewayUrl));
+  const basePathname = baseUrl.pathname.replace(/\/+$/u, "");
   const fetchImpl = input.fetch ?? globalThis.fetch;
-  const urlFor = (path: string) => `${baseUrl}/${path.replace(/^\/+/, "")}`;
+  const urlFor = (path: string) => {
+    const target = new URL(baseUrl);
+    target.pathname = `${basePathname}/${path.replace(/^\/+/, "")}`;
+    return target.toString();
+  };
 
   const request = async (
     operation: HermesGatewayOperation,
