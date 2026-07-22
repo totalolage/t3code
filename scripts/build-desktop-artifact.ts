@@ -321,6 +321,8 @@ const DesktopBuildInputArtifact = Schema.Literals([
   "bundled-server-client",
 ]);
 type DesktopBuildInputArtifact = typeof DesktopBuildInputArtifact.Type;
+export const DESKTOP_BUILD_COMMAND = "vp run --no-cache build:desktop" as const;
+export const DESKTOP_BUILD_ARGS = ["run", "--no-cache", "build:desktop"] as const;
 const desktopBuildInputArtifactNames = {
   "desktop-dist": "desktopDist",
   "desktop-resources": "desktopResources",
@@ -333,7 +335,7 @@ export class MissingDesktopBuildInputError extends Schema.TaggedErrorClass<Missi
   {
     artifact: DesktopBuildInputArtifact,
     artifactPath: Schema.String,
-    buildCommand: Schema.Literal("vp run build:desktop"),
+    buildCommand: Schema.Literal(DESKTOP_BUILD_COMMAND),
   },
 ) {
   override get message(): string {
@@ -1662,13 +1664,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
-    const spawnCommand = yield* resolveSpawnCommand("vp", ["run", "build:desktop"]);
+    const spawnCommand = yield* resolveSpawnCommand("vp", [...DESKTOP_BUILD_ARGS]);
     yield* runCommand(
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
         cwd: repoRoot,
         shell: spawnCommand.shell,
       }),
-      { label: "vp run build:desktop", verbose: options.verbose },
+      { label: DESKTOP_BUILD_COMMAND, verbose: options.verbose },
     );
   }
 
@@ -1681,7 +1683,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     if (!(yield* fs.exists(input.artifactPath))) {
       return yield* new MissingDesktopBuildInputError({
         ...input,
-        buildCommand: "vp run build:desktop",
+        buildCommand: DESKTOP_BUILD_COMMAND,
       });
     }
   }
@@ -1690,7 +1692,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     return yield* new MissingDesktopBuildInputError({
       artifact: "bundled-server-client",
       artifactPath: bundledClientEntry,
-      buildCommand: "vp run build:desktop",
+      buildCommand: DESKTOP_BUILD_COMMAND,
     });
   }
 
@@ -1970,7 +1972,7 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   ),
   skipBuild: Flag.boolean("skip-build").pipe(
     Flag.withDescription(
-      "Skip `vp run build:desktop` and use existing dist artifacts (env: T3CODE_DESKTOP_SKIP_BUILD).",
+      `Skip \`${DESKTOP_BUILD_COMMAND}\` and use existing dist artifacts (env: T3CODE_DESKTOP_SKIP_BUILD).`,
     ),
     Flag.optional,
   ),
