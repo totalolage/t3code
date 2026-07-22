@@ -8,7 +8,7 @@ import { Command } from "effect/unstable/cli";
 import { ThreadId, TurnId } from "@t3tools/contracts";
 
 import { formatRemoteCliDiagnostic, RemoteCliError } from "./cli/remote.ts";
-import { RemoteWatchInteractionRequiredError } from "./cli/remoteWatch.ts";
+import { RemoteWatchInteractionRequiredError, RemoteWatchTimeoutError } from "./cli/remoteWatch.ts";
 import { cli, reportRemoteCliFailure } from "./remote-bin.ts";
 
 it.effect("exposes the remote orchestration commands without the local server commands", () =>
@@ -143,5 +143,30 @@ it.effect("exits cleanly after watch has emitted its machine-readable interactio
 
     assert.equal(exitCode, 26);
     assert.deepEqual(yield* TestConsole.errorLines, []);
+  }).pipe(Effect.provide(TestConsole.layer)),
+);
+
+it.effect("redacts unknown diagnostics while propagating remote watch exit codes", () =>
+  Effect.gen(function* () {
+    const observedExitCodes: Array<number> = [];
+
+    yield* reportRemoteCliFailure(
+      new Error("token=top-secret /home/alice/private stack trace"),
+      (code) => observedExitCodes.push(code),
+    );
+    yield* reportRemoteCliFailure(
+      new RemoteWatchTimeoutError({
+        threadId: ThreadId.make("thread-watch"),
+        timeoutMs: 1_000,
+      }),
+      (code) => observedExitCodes.push(code),
+    );
+
+    assert.deepEqual(observedExitCodes, [1, 23]);
+    const diagnostics = yield* TestConsole.errorLines;
+    assert.equal(diagnostics[0], "Remote request failed.");
+    assert.notInclude(diagnostics.join("\n"), "top-secret");
+    assert.notInclude(diagnostics.join("\n"), "/home/alice");
+    assert.equal(diagnostics[1], "Timed out waiting for thread thread-watch.");
   }).pipe(Effect.provide(TestConsole.layer)),
 );
