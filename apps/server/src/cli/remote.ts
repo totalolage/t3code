@@ -148,6 +148,12 @@ const watchTurnFlag = Flag.string("turn").pipe(
   Flag.withDescription("Specific turn id to watch."),
   Flag.optional,
 );
+const watchInteractionsFlag = Flag.boolean("interactions").pipe(
+  Flag.withDescription(
+    "Exit with code 26 and safe JSON when user input or command approval is pending.",
+  ),
+  Flag.withDefault(false),
+);
 
 interface RemoteCommandFlags extends CliAuthLocationFlags {
   readonly host: string;
@@ -294,6 +300,7 @@ const makeRemoteWatchTransport = Effect.fn("remoteCli.makeWatchTransport")(funct
           initialSequence: watchInput.afterSequence,
           targetTurnId: watchInput.targetTurnId,
           observedRunning: watchInput.observedRunning,
+          interactionAware: watchInput.interactionAware,
         });
       }),
     ).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
@@ -605,6 +612,7 @@ const remoteWatchCommand = Command.make("watch", {
   timeout: watchTimeoutFlag,
   format: watchFormatFlag,
   turn: watchTurnFlag,
+  interactions: watchInteractionsFlag,
   threadId: Argument.string("thread-id"),
 }).pipe(
   Command.withDescription("Wait once for a thread turn's final assistant message."),
@@ -626,8 +634,13 @@ const remoteWatchCommand = Command.make("watch", {
           transport,
           threadId,
           timeoutMs: Duration.toMillis(flags.timeout),
+          interactionAware: flags.interactions,
           ...(Option.isSome(flags.turn) ? { requestedTurnId: TurnId.make(flags.turn.value) } : {}),
-        });
+        }).pipe(
+          Effect.catchTag("RemoteWatchInteractionRequiredError", (error) =>
+            Console.log(error.message).pipe(Effect.andThen(Effect.fail(error))),
+          ),
+        );
         yield* Console.log(formatRemoteWatchResult(result, flags.format));
       }),
     ),
