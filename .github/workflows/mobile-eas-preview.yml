@@ -7,7 +7,10 @@ on:
 jobs:
   preview:
     name: EAS Preview
-    if: contains(github.event.pull_request.labels.*.name, '🚀 Mobile Continuous Deployment')
+    # EAS credentials and deployment ownership live in the upstream repository.
+    if: >-
+      github.repository == 'pingdotgg/t3code' &&
+      contains(github.event.pull_request.labels.*.name, '🚀 Mobile Continuous Deployment')
     runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
       contents: read
