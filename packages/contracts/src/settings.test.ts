@@ -32,6 +32,11 @@ describe("Hermes gateway query safety", () => {
     expect(
       isHermesGatewayUrlQuerySafe("https://hermes.example.test/p/work?ACCESS%5FTOKEN=secret"),
     ).toBe(false);
+    expect(
+      isHermesGatewayUrlQuerySafe(
+        "https://hermes.example.test/p/work?profile=engineering;access_token=fixture-value",
+      ),
+    ).toBe(false);
   });
 });
 

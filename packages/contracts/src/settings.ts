@@ -396,7 +396,7 @@ export function isHermesGatewayUrlQuerySafe(value: string): boolean {
   }
   const fragmentStart = value.indexOf("#", queryStart);
   const query = value.slice(queryStart + 1, fragmentStart === -1 ? undefined : fragmentStart);
-  for (const rawKey of new URLSearchParams(query).keys()) {
+  for (const rawKey of new URLSearchParams(query.replaceAll(";", "&")).keys()) {
     const key = rawKey.toLowerCase().replace(/[^a-z0-9]/gu, "");
     if (
       key === "auth" ||
