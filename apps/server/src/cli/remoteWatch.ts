@@ -1,9 +1,10 @@
 import {
   type OrchestrationSessionStatus,
+  type OrchestrationThreadActivity,
   type OrchestrationThreadDetailSnapshot,
   type OrchestrationThreadStreamItem,
-  type ThreadId,
-  type TurnId,
+  ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -18,6 +19,48 @@ export interface RemoteWatchTerminalObservation {
   readonly status: RemoteWatchTerminalStatus;
   readonly lastSequence: number;
   readonly observedRunning: boolean;
+}
+
+export const RemoteWatchInteraction = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("user-input"),
+    requestId: Schema.String,
+    prompt: Schema.Struct({
+      questionCount: Schema.Number,
+      questions: Schema.Array(
+        Schema.Struct({
+          index: Schema.Number,
+          optionCount: Schema.Number,
+          multiSelect: Schema.Boolean,
+        }),
+      ),
+      questionsTruncated: Schema.Boolean,
+    }),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("approval"),
+    requestId: Schema.String,
+    prompt: Schema.Struct({
+      requestKind: Schema.Literal("command"),
+    }),
+  }),
+]);
+export type RemoteWatchInteraction = typeof RemoteWatchInteraction.Type;
+
+export interface RemoteWatchInteractionObservation {
+  readonly interaction: RemoteWatchInteraction;
+  readonly lastSequence: number;
+  readonly observedRunning: boolean;
+}
+
+export type RemoteWatchObservation =
+  | RemoteWatchTerminalObservation
+  | RemoteWatchInteractionObservation;
+
+export interface RemoteWatchInteractionResult {
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+  readonly interaction: RemoteWatchInteraction;
 }
 
 export interface RemoteWatchResult {
@@ -84,6 +127,25 @@ export class RemoteWatchFailure extends Schema.TaggedErrorClass<RemoteWatchFailu
   }
 }
 
+export class RemoteWatchInteractionRequiredError extends Schema.TaggedErrorClass<RemoteWatchInteractionRequiredError>()(
+  "RemoteWatchInteractionRequiredError",
+  {
+    threadId: ThreadId,
+    turnId: TurnId,
+    interaction: RemoteWatchInteraction,
+  },
+) {
+  override readonly [Runtime.errorExitCode] = 26;
+  override readonly [Runtime.errorReported] = false;
+  override get message(): string {
+    return formatRemoteWatchInteractionResult({
+      threadId: this.threadId,
+      turnId: this.turnId,
+      interaction: this.interaction,
+    });
+  }
+}
+
 export interface RemoteWatchTransport {
   readonly readThread: () => Effect.Effect<OrchestrationThreadDetailSnapshot, RemoteWatchFailure>;
   readonly subscribeThread: (input: {
@@ -91,7 +153,217 @@ export interface RemoteWatchTransport {
     readonly afterSequence: number;
     readonly targetTurnId: TurnId;
     readonly observedRunning: boolean;
-  }) => Effect.Effect<RemoteWatchTerminalObservation, RemoteWatchFailure>;
+    readonly interactionAware: boolean;
+  }) => Effect.Effect<RemoteWatchObservation, RemoteWatchFailure>;
+}
+
+const MAX_SAFE_PROMPT_QUESTIONS = 16;
+const MAX_SAFE_INTERACTION_ID_LENGTH = 256;
+
+function activityOrder(
+  left: OrchestrationThreadActivity,
+  right: OrchestrationThreadActivity,
+): number {
+  if (left.sequence !== undefined && right.sequence !== undefined) {
+    if (left.sequence !== right.sequence) {
+      return left.sequence - right.sequence;
+    }
+  } else if (left.sequence !== undefined) {
+    return 1;
+  } else if (right.sequence !== undefined) {
+    return -1;
+  }
+  const createdAtOrder = left.createdAt.localeCompare(right.createdAt);
+  if (createdAtOrder !== 0) {
+    return createdAtOrder;
+  }
+  const lifecycleOrder = activityLifecycleRank(left.kind) - activityLifecycleRank(right.kind);
+  return lifecycleOrder || left.id.localeCompare(right.id);
+}
+
+function activityLifecycleRank(kind: string): number {
+  if (kind.endsWith(".resolved")) {
+    return 2;
+  }
+  return kind.endsWith(".requested") ? 0 : 1;
+}
+
+function containsControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint <= 31 || (codePoint >= 127 && codePoint <= 159)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function activityPayload(activity: OrchestrationThreadActivity): Record<string, unknown> | null {
+  return typeof activity.payload === "object" && activity.payload !== null
+    ? (activity.payload as Record<string, unknown>)
+    : null;
+}
+
+function safeInteractionRequestId(payload: Record<string, unknown> | null): string | null {
+  const requestId = payload?.requestId;
+  if (
+    typeof requestId !== "string" ||
+    requestId.length === 0 ||
+    requestId.length > MAX_SAFE_INTERACTION_ID_LENGTH ||
+    requestId.trim() !== requestId ||
+    containsControlCharacter(requestId)
+  ) {
+    return null;
+  }
+  return requestId;
+}
+
+function isCommandApproval(payload: Record<string, unknown> | null): boolean {
+  return (
+    payload?.requestKind === "command" ||
+    payload?.requestType === "command_execution_approval" ||
+    payload?.requestType === "exec_command_approval" ||
+    payload?.requestType === "dynamic_tool_call"
+  );
+}
+
+function isStaleInteractionFailure(activity: OrchestrationThreadActivity): boolean {
+  const detail = activityPayload(activity)?.detail;
+  if (typeof detail !== "string") {
+    return false;
+  }
+  const normalized = detail.toLowerCase();
+  return (
+    normalized.includes("stale pending approval request") ||
+    normalized.includes("stale pending user-input request") ||
+    normalized.includes("unknown pending approval request") ||
+    normalized.includes("unknown pending permission request") ||
+    normalized.includes("unknown pending user-input request") ||
+    normalized.includes("unknown pending user input request") ||
+    normalized.includes("unknown pending codex user input request")
+  );
+}
+
+function staleInteractionFailureKind(
+  activity: OrchestrationThreadActivity,
+): RemoteWatchInteraction["kind"] | null {
+  if (!isStaleInteractionFailure(activity)) {
+    return null;
+  }
+  if (activity.kind === "provider.user-input.respond.failed") {
+    return "user-input";
+  }
+  return activity.kind === "provider.approval.respond.failed" ? "approval" : null;
+}
+
+function safeUserInputInteraction(
+  requestId: string,
+  payload: Record<string, unknown> | null,
+): RemoteWatchInteraction {
+  const questions = Array.isArray(payload?.questions) ? payload.questions : [];
+  return {
+    kind: "user-input",
+    requestId,
+    prompt: {
+      questionCount: questions.length,
+      questions: questions.slice(0, MAX_SAFE_PROMPT_QUESTIONS).map((question, index) => {
+        const record =
+          typeof question === "object" && question !== null
+            ? (question as Record<string, unknown>)
+            : null;
+        return {
+          index,
+          optionCount: Array.isArray(record?.options) ? record.options.length : 0,
+          multiSelect: record?.multiSelect === true,
+        };
+      }),
+      questionsTruncated: questions.length > MAX_SAFE_PROMPT_QUESTIONS,
+    },
+  };
+}
+
+export function selectPendingRemoteWatchInteraction(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  targetTurnId: TurnId,
+): RemoteWatchInteraction | null {
+  const pending = new Map<
+    string,
+    {
+      readonly interaction: RemoteWatchInteraction;
+      readonly requestedAt: string;
+      readonly requestedSequence: number | undefined;
+    }
+  >();
+  const ordered = activities
+    .filter(
+      (activity) =>
+        activity.turnId === targetTurnId && staleInteractionFailureKind(activity) === null,
+    )
+    .toSorted(activityOrder);
+
+  for (const activity of ordered) {
+    const payload = activityPayload(activity);
+    const requestId = safeInteractionRequestId(payload);
+    if (requestId === null) {
+      continue;
+    }
+    if (activity.kind === "user-input.requested") {
+      pending.set(requestId, {
+        interaction: safeUserInputInteraction(requestId, payload),
+        requestedAt: activity.createdAt,
+        requestedSequence: activity.sequence,
+      });
+      continue;
+    }
+    if (activity.kind === "approval.requested" && isCommandApproval(payload)) {
+      pending.set(requestId, {
+        interaction: {
+          kind: "approval",
+          requestId,
+          prompt: { requestKind: "command" },
+        },
+        requestedAt: activity.createdAt,
+        requestedSequence: activity.sequence,
+      });
+      continue;
+    }
+    if (activity.kind === "user-input.resolved" || activity.kind === "approval.resolved") {
+      pending.delete(requestId);
+      continue;
+    }
+  }
+
+  const staleFailures = activities
+    .filter(
+      (activity) =>
+        (activity.turnId === targetTurnId || activity.turnId === null) &&
+        staleInteractionFailureKind(activity) !== null,
+    )
+    .toSorted(
+      (left, right) =>
+        left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+    );
+  for (const failure of staleFailures) {
+    const requestId = safeInteractionRequestId(activityPayload(failure));
+    const staleKind = staleInteractionFailureKind(failure);
+    const open = requestId === null ? undefined : pending.get(requestId);
+    const failureFollowsRequest =
+      failure.sequence !== undefined &&
+      open?.requestedSequence !== undefined &&
+      failure.sequence !== open.requestedSequence
+        ? failure.sequence > open.requestedSequence
+        : open !== undefined && failure.createdAt.localeCompare(open.requestedAt) >= 0;
+    if (
+      requestId !== null &&
+      staleKind !== null &&
+      open?.interaction.kind === staleKind &&
+      failureFollowsRequest
+    ) {
+      pending.delete(requestId);
+    }
+  }
+
+  return pending.values().next().value?.interaction ?? null;
 }
 
 function terminalStatusFromSnapshot(
@@ -137,26 +409,38 @@ export const observeRemoteWatchStream = Effect.fn("remoteWatch.observeStream")(f
   readonly initialSequence: number;
   readonly targetTurnId: TurnId;
   readonly observedRunning: boolean;
-}): Effect.fn.Return<RemoteWatchTerminalObservation, E | RemoteWatchFailure, R> {
+  readonly interactionAware?: boolean;
+}): Effect.fn.Return<RemoteWatchObservation, E | RemoteWatchFailure, R> {
   let lastSequence = input.initialSequence;
   let observedRunning = input.observedRunning;
   const terminal = yield* input.stream.pipe(
-    Stream.map((item) => {
+    Stream.map((item): Option.Option<RemoteWatchObservation> => {
       if (item.kind === "snapshot") {
         if (item.snapshot.snapshotSequence <= lastSequence) {
-          return Option.none<RemoteWatchTerminalObservation>();
+          return Option.none();
         }
         lastSequence = item.snapshot.snapshotSequence;
         const session = item.snapshot.thread.session;
         if (session?.status === "running" && session.activeTurnId === input.targetTurnId) {
           observedRunning = true;
-          return Option.none();
         }
         const status = terminalStatusFromSnapshot(
           item.snapshot,
           input.targetTurnId,
           observedRunning,
         );
+        if (input.interactionAware === true && status === null) {
+          const interaction = selectPendingRemoteWatchInteraction(
+            item.snapshot.thread.activities,
+            input.targetTurnId,
+          );
+          if (interaction !== null) {
+            return Option.some({ interaction, lastSequence, observedRunning });
+          }
+        }
+        if (session?.status === "running" && session.activeTurnId === input.targetTurnId) {
+          return Option.none();
+        }
         return status === null
           ? Option.none()
           : Option.some({ status, lastSequence, observedRunning });
@@ -165,6 +449,15 @@ export const observeRemoteWatchStream = Effect.fn("remoteWatch.observeStream")(f
         return Option.none();
       }
       lastSequence = item.event.sequence;
+      if (input.interactionAware === true && item.event.type === "thread.activity-appended") {
+        const interaction = selectPendingRemoteWatchInteraction(
+          [item.event.payload.activity],
+          input.targetTurnId,
+        );
+        if (interaction !== null) {
+          return Option.some({ interaction, lastSequence, observedRunning });
+        }
+      }
       if (item.event.type !== "thread.session-set") {
         return Option.none();
       }
@@ -229,9 +522,13 @@ const watchRemoteThreadProgram = Effect.fn("remoteWatch.runProgram")(function* (
   readonly transport: RemoteWatchTransport;
   readonly threadId: ThreadId;
   readonly requestedTurnId?: TurnId;
+  readonly interactionAware?: boolean;
 }): Effect.fn.Return<
   RemoteWatchResult,
-  RemoteWatchNoTurnError | RemoteWatchTerminalWithoutMessageError | RemoteWatchFailure
+  | RemoteWatchNoTurnError
+  | RemoteWatchTerminalWithoutMessageError
+  | RemoteWatchFailure
+  | RemoteWatchInteractionRequiredError
 > {
   const initial = yield* input.transport.readThread();
   const targetTurnId = selectRemoteWatchTurn(initial, input.requestedTurnId);
@@ -244,6 +541,20 @@ const watchRemoteThreadProgram = Effect.fn("remoteWatch.runProgram")(function* (
     initial.thread.session.activeTurnId === targetTurnId;
   let terminalStatus = terminalStatusFromSnapshot(initial, targetTurnId, observedRunning);
 
+  if (input.interactionAware === true && terminalStatus === null) {
+    const interaction = selectPendingRemoteWatchInteraction(
+      initial.thread.activities,
+      targetTurnId,
+    );
+    if (interaction !== null) {
+      return yield* new RemoteWatchInteractionRequiredError({
+        threadId: input.threadId,
+        turnId: targetTurnId,
+        interaction,
+      });
+    }
+  }
+
   if (terminalStatus === null) {
     let usePolling = false;
     for (let attempt = 0; terminalStatus === null; attempt += 1) {
@@ -253,11 +564,19 @@ const watchRemoteThreadProgram = Effect.fn("remoteWatch.runProgram")(function* (
           afterSequence: lastSequence,
           targetTurnId,
           observedRunning,
+          interactionAware: input.interactionAware === true,
         })
         .pipe(Effect.result);
       if (subscribed._tag === "Success") {
         lastSequence = subscribed.success.lastSequence;
         observedRunning = subscribed.success.observedRunning;
+        if ("interaction" in subscribed.success) {
+          return yield* new RemoteWatchInteractionRequiredError({
+            threadId: input.threadId,
+            turnId: targetTurnId,
+            interaction: subscribed.success.interaction,
+          });
+        }
         terminalStatus = subscribed.success.status;
         break;
       }
@@ -291,6 +610,19 @@ const watchRemoteThreadProgram = Effect.fn("remoteWatch.runProgram")(function* (
           observedRunning = true;
         }
         terminalStatus = terminalStatusFromSnapshot(snapshot, targetTurnId, observedRunning);
+        if (input.interactionAware === true && terminalStatus === null) {
+          const interaction = selectPendingRemoteWatchInteraction(
+            snapshot.thread.activities,
+            targetTurnId,
+          );
+          if (interaction !== null) {
+            return yield* new RemoteWatchInteractionRequiredError({
+              threadId: input.threadId,
+              turnId: targetTurnId,
+              interaction,
+            });
+          }
+        }
         pollAttempt += 1;
       }
     }
@@ -318,6 +650,7 @@ export const watchRemoteThread = Effect.fn("remoteWatch.run")(function* (input: 
   readonly threadId: ThreadId;
   readonly requestedTurnId?: TurnId;
   readonly timeoutMs: number;
+  readonly interactionAware?: boolean;
 }) {
   return yield* watchRemoteThreadProgram(input).pipe(
     Effect.timeout(Duration.millis(input.timeoutMs)),
@@ -337,4 +670,8 @@ export function formatRemoteWatchResult(
   format: "text" | "json",
 ): string {
   return format === "text" ? result.message.text : JSON.stringify(result, null, 2);
+}
+
+export function formatRemoteWatchInteractionResult(result: RemoteWatchInteractionResult): string {
+  return JSON.stringify(result);
 }
