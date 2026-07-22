@@ -132,7 +132,7 @@ const activity = (input: {
   readonly kind: string;
   readonly requestId: string;
   readonly payload?: Record<string, unknown>;
-  readonly turnId?: TurnId;
+  readonly turnId?: TurnId | null;
   readonly sequence?: number;
   readonly createdAt?: string;
 }): OrchestrationThreadActivity => ({
@@ -141,7 +141,7 @@ const activity = (input: {
   kind: input.kind,
   summary: "Interaction state changed",
   payload: { requestId: input.requestId, ...input.payload },
-  turnId: input.turnId ?? turnId,
+  turnId: input.turnId === undefined ? turnId : input.turnId,
   ...(input.sequence === undefined ? {} : { sequence: input.sequence }),
   createdAt: input.createdAt ?? "2026-07-21T00:00:10.000Z",
 });
@@ -240,6 +240,102 @@ describe("remote thread watch", () => {
         turnId,
       ),
     ).toBeNull();
+  });
+
+  it("clears only the exact pending request for a production-shaped null-turn stale failure", () => {
+    const requested = activity({
+      kind: "user-input.requested",
+      requestId: "user-input-stale-null-turn",
+      payload: { questions: [{ options: [] }] },
+      sequence: 31,
+      createdAt: "2026-07-21T00:00:10.000Z",
+    });
+    const unrelatedFailure = activity({
+      kind: "provider.user-input.respond.failed",
+      requestId: "different-user-input-request",
+      payload: {
+        detail:
+          "Stale pending user-input request: different-user-input-request. Provider callback state does not survive app restarts or recovered sessions.",
+      },
+      turnId: null,
+      createdAt: "2026-07-21T00:00:11.000Z",
+    });
+    const wrongKindFailure = activity({
+      kind: "provider.approval.respond.failed",
+      requestId: "user-input-stale-null-turn",
+      payload: {
+        detail:
+          "Stale pending approval request: user-input-stale-null-turn. Provider callback state does not survive app restarts or recovered sessions.",
+      },
+      turnId: null,
+      createdAt: "2026-07-21T00:00:12.000Z",
+    });
+    const exactFailure = activity({
+      kind: "provider.user-input.respond.failed",
+      requestId: "user-input-stale-null-turn",
+      payload: {
+        detail:
+          "Stale pending user-input request: user-input-stale-null-turn. Provider callback state does not survive app restarts or recovered sessions.",
+      },
+      turnId: null,
+      createdAt: "2026-07-21T00:00:13.000Z",
+    });
+
+    expect(
+      selectPendingRemoteWatchInteraction([requested, unrelatedFailure, wrongKindFailure], turnId),
+    ).toMatchObject({ kind: "user-input", requestId: "user-input-stale-null-turn" });
+    expect(
+      selectPendingRemoteWatchInteraction(
+        [requested, unrelatedFailure, wrongKindFailure, exactFailure],
+        turnId,
+      ),
+    ).toBeNull();
+  });
+
+  it("orders a same-turn unsequenced stale failure after its sequenced request", () => {
+    const requested = activity({
+      kind: "approval.requested",
+      requestId: "approval-stale-unsequenced",
+      payload: { requestKind: "command" },
+      sequence: 41,
+      createdAt: "2026-07-21T00:00:10.000Z",
+    });
+    const staleFailure = activity({
+      kind: "provider.approval.respond.failed",
+      requestId: "approval-stale-unsequenced",
+      payload: {
+        detail:
+          "Stale pending approval request: approval-stale-unsequenced. Provider callback state does not survive app restarts or recovered sessions.",
+      },
+      createdAt: "2026-07-21T00:00:11.000Z",
+    });
+
+    expect(selectPendingRemoteWatchInteraction([requested, staleFailure], turnId)).toBeNull();
+    expect(selectPendingRemoteWatchInteraction([staleFailure, requested], turnId)).toBeNull();
+  });
+
+  it("does not let an earlier sequenced stale failure clear a later request with the same ID", () => {
+    const staleFailure = activity({
+      kind: "provider.approval.respond.failed",
+      requestId: "approval-retried",
+      payload: {
+        detail:
+          "Stale pending approval request: approval-retried. Provider callback state does not survive app restarts or recovered sessions.",
+      },
+      sequence: 51,
+      createdAt: "2026-07-21T00:00:12.000Z",
+    });
+    const retriedRequest = activity({
+      kind: "approval.requested",
+      requestId: "approval-retried",
+      payload: { requestKind: "command" },
+      sequence: 52,
+      createdAt: "2026-07-21T00:00:11.000Z",
+    });
+
+    expect(
+      selectPendingRemoteWatchInteraction([retriedRequest, staleFailure], turnId),
+    ).toMatchObject({ kind: "approval", requestId: "approval-retried" });
   });
 
   it.effect("exits promptly for a pending user-input request when opted in", () =>
