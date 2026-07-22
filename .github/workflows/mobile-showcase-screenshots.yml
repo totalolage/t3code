@@ -31,7 +31,10 @@ env:
 jobs:
   ios:
     name: iPhone 6.9, iPhone 6.5, and iPad 13
-    if: inputs.platform == 'all' || inputs.platform == 'ios'
+    # Upstream owns the mobile showcase build environment.
+    if: >-
+      github.repository == 'pingdotgg/t3code' &&
+      (inputs.platform == 'all' || inputs.platform == 'ios')
     runs-on: blacksmith-12vcpu-macos-26
     timeout-minutes: 60
     steps:
@@ -69,7 +72,9 @@ jobs:
 
   android:
     name: Android phone, 7-inch tablet, and 10-inch tablet
-    if: inputs.platform == 'all' || inputs.platform == 'android'
+    if: >-
+      github.repository == 'pingdotgg/t3code' &&
+      (inputs.platform == 'all' || inputs.platform == 'android')
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 60
     env:
