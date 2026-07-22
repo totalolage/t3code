@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   EventId,
   type OrchestrationSessionStatus,
+  type OrchestrationThreadActivity,
   type OrchestrationThreadDetailSnapshot,
   type OrchestrationThreadStreamItem,
   ProjectId,
@@ -18,9 +19,11 @@ import {
   formatRemoteWatchResult,
   observeRemoteWatchStream,
   RemoteWatchFailure,
+  RemoteWatchInteractionRequiredError,
   RemoteWatchTerminalWithoutMessageError,
   RemoteWatchTimeoutError,
   selectFinalAssistantMessage,
+  selectPendingRemoteWatchInteraction,
   type RemoteWatchTransport,
   watchRemoteThread,
 } from "./remoteWatch.ts";
@@ -36,6 +39,7 @@ const snapshot = (input: {
     readonly turnId?: TurnId;
     readonly streaming?: boolean;
   }>;
+  readonly activities?: ReadonlyArray<OrchestrationThreadActivity>;
 }): OrchestrationThreadDetailSnapshot =>
   ({
     snapshotSequence: input.sequence,
@@ -77,7 +81,7 @@ const snapshot = (input: {
         updatedAt: `2026-07-21T00:00:${String(index).padStart(2, "0")}.000Z`,
       })),
       proposedPlans: [],
-      activities: [],
+      activities: input.activities ?? [],
       checkpoints: [],
       session: {
         threadId,
@@ -124,7 +128,429 @@ const sessionEvent = (
     },
   }) as OrchestrationThreadStreamItem;
 
+const activity = (input: {
+  readonly kind: string;
+  readonly requestId: string;
+  readonly payload?: Record<string, unknown>;
+  readonly turnId?: TurnId | null;
+  readonly sequence?: number;
+  readonly createdAt?: string;
+}): OrchestrationThreadActivity => ({
+  id: EventId.make(`activity-${input.kind}-${input.requestId}-${input.sequence ?? 0}`),
+  tone: input.kind.startsWith("approval") ? "approval" : "info",
+  kind: input.kind,
+  summary: "Interaction state changed",
+  payload: { requestId: input.requestId, ...input.payload },
+  turnId: input.turnId === undefined ? turnId : input.turnId,
+  ...(input.sequence === undefined ? {} : { sequence: input.sequence }),
+  createdAt: input.createdAt ?? "2026-07-21T00:00:10.000Z",
+});
+
+const activityEvent = (
+  sequence: number,
+  value: OrchestrationThreadActivity,
+): OrchestrationThreadStreamItem =>
+  ({
+    kind: "event",
+    event: {
+      sequence,
+      eventId: EventId.make(`activity-event-${sequence}`),
+      aggregateKind: "thread",
+      aggregateId: threadId,
+      occurredAt: value.createdAt,
+      commandId: null,
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      type: "thread.activity-appended",
+      payload: { threadId, activity: value },
+    },
+  }) as OrchestrationThreadStreamItem;
+
 describe("remote thread watch", () => {
+  it("detects pending user input with bounded non-secret prompt metadata", () => {
+    const questions = Array.from({ length: 20 }, (_, index) => ({
+      id: `question-${index}`,
+      header: `secret header ${index}`,
+      question: `secret prompt ${index}`,
+      options: Array.from({ length: index + 1 }, (_unused, optionIndex) => ({
+        label: `secret option ${optionIndex}`,
+        description: `secret description ${optionIndex}`,
+      })),
+      multiSelect: index % 2 === 0,
+    }));
+
+    expect(
+      selectPendingRemoteWatchInteraction(
+        [
+          activity({
+            kind: "user-input.requested",
+            requestId: "request-user-input-1",
+            payload: { questions },
+          }),
+        ],
+        turnId,
+      ),
+    ).toEqual({
+      kind: "user-input",
+      requestId: "request-user-input-1",
+      prompt: {
+        questionCount: 20,
+        questions: Array.from({ length: 16 }, (_, index) => ({
+          index,
+          optionCount: index + 1,
+          multiSelect: index % 2 === 0,
+        })),
+        questionsTruncated: true,
+      },
+    });
+  });
+
+  it("detects only pending command approvals", () => {
+    const fileApproval = activity({
+      kind: "approval.requested",
+      requestId: "approval-file-1",
+      payload: { requestKind: "file-change", detail: "unsafe file details" },
+    });
+    const commandApproval = activity({
+      kind: "approval.requested",
+      requestId: "approval-command-1",
+      payload: {
+        requestType: "exec_command_approval",
+        detail: "unsafe command details",
+      },
+      createdAt: "2026-07-21T00:00:11.000Z",
+    });
+
+    expect(selectPendingRemoteWatchInteraction([fileApproval, commandApproval], turnId)).toEqual({
+      kind: "approval",
+      requestId: "approval-command-1",
+      prompt: { requestKind: "command" },
+    });
+    expect(
+      selectPendingRemoteWatchInteraction(
+        [
+          commandApproval,
+          activity({
+            kind: "approval.resolved",
+            requestId: "approval-command-1",
+            createdAt: "2026-07-21T00:00:12.000Z",
+          }),
+        ],
+        turnId,
+      ),
+    ).toBeNull();
+  });
+
+  it("clears only the exact pending request for a production-shaped null-turn stale failure", () => {
+    const requested = activity({
+      kind: "user-input.requested",
+      requestId: "user-input-stale-null-turn",
+      payload: { questions: [{ options: [] }] },
+      sequence: 31,
+      createdAt: "2026-07-21T00:00:10.000Z",
+    });
+    const unrelatedFailure = activity({
+      kind: "provider.user-input.respond.failed",
+      requestId: "different-user-input-request",
+      payload: {
+        detail:
+          "Stale pending user-input request: different-user-input-request. Provider callback state does not survive app restarts or recovered sessions.",
+      },
+      turnId: null,
+      createdAt: "2026-07-21T00:00:11.000Z",
+    });
+    const wrongKindFailure = activity({
+      kind: "provider.approval.respond.failed",
+      requestId: "user-input-stale-null-turn",
+      payload: {
+        detail:
+          "Stale pending approval request: user-input-stale-null-turn. Provider callback state does not survive app restarts or recovered sessions.",
+      },
+      turnId: null,
+      createdAt: "2026-07-21T00:00:12.000Z",
+    });
+    const exactFailure = activity({
+      kind: "provider.user-input.respond.failed",
+      requestId: "user-input-stale-null-turn",
+      payload: {
+        detail:
+          "Stale pending user-input request: user-input-stale-null-turn. Provider callback state does not survive app restarts or recovered sessions.",
+      },
+      turnId: null,
+      createdAt: "2026-07-21T00:00:13.000Z",
+    });
+
+    expect(
+      selectPendingRemoteWatchInteraction([requested, unrelatedFailure, wrongKindFailure], turnId),
+    ).toMatchObject({ kind: "user-input", requestId: "user-input-stale-null-turn" });
+    expect(
+      selectPendingRemoteWatchInteraction(
+        [requested, unrelatedFailure, wrongKindFailure, exactFailure],
+        turnId,
+      ),
+    ).toBeNull();
+  });
+
+  it("orders a same-turn unsequenced stale failure after its sequenced request", () => {
+    const requested = activity({
+      kind: "approval.requested",
+      requestId: "approval-stale-unsequenced",
+      payload: { requestKind: "command" },
+      sequence: 41,
+      createdAt: "2026-07-21T00:00:10.000Z",
+    });
+    const staleFailure = activity({
+      kind: "provider.approval.respond.failed",
+      requestId: "approval-stale-unsequenced",
+      payload: {
+        detail:
+          "Stale pending approval request: approval-stale-unsequenced. Provider callback state does not survive app restarts or recovered sessions.",
+      },
+      createdAt: "2026-07-21T00:00:11.000Z",
+    });
+
+    expect(selectPendingRemoteWatchInteraction([requested, staleFailure], turnId)).toBeNull();
+    expect(selectPendingRemoteWatchInteraction([staleFailure, requested], turnId)).toBeNull();
+  });
+
+  it("does not let an earlier sequenced stale failure clear a later request with the same ID", () => {
+    const staleFailure = activity({
+      kind: "provider.approval.respond.failed",
+      requestId: "approval-retried",
+      payload: {
+        detail:
+          "Stale pending approval request: approval-retried. Provider callback state does not survive app restarts or recovered sessions.",
+      },
+      sequence: 51,
+      createdAt: "2026-07-21T00:00:12.000Z",
+    });
+    const retriedRequest = activity({
+      kind: "approval.requested",
+      requestId: "approval-retried",
+      payload: { requestKind: "command" },
+      sequence: 52,
+      createdAt: "2026-07-21T00:00:11.000Z",
+    });
+
+    expect(
+      selectPendingRemoteWatchInteraction([retriedRequest, staleFailure], turnId),
+    ).toMatchObject({ kind: "approval", requestId: "approval-retried" });
+  });
+
+  it.effect("exits promptly for a pending user-input request when opted in", () =>
+    Effect.gen(function* () {
+      const transport: RemoteWatchTransport = {
+        readThread: () =>
+          Effect.succeed(
+            snapshot({
+              sequence: 10,
+              status: "running",
+              activities: [
+                activity({
+                  kind: "user-input.requested",
+                  requestId: "request-user-input-watch",
+                  payload: {
+                    questions: [{ options: [{ label: "secret", description: "secret" }] }],
+                  },
+                }),
+              ],
+            }),
+          ),
+        subscribeThread: () => Effect.never,
+      };
+
+      const error = yield* watchRemoteThread({
+        transport,
+        threadId,
+        timeoutMs: 10_000,
+        interactionAware: true,
+      }).pipe(Effect.flip);
+      expect(error).toBeInstanceOf(RemoteWatchInteractionRequiredError);
+      expect(error[Runtime.errorExitCode]).toBe(26);
+      expect(error[Runtime.errorReported]).toBe(false);
+      expect(error.message).toBe(
+        '{"threadId":"thread-watch","turnId":"turn-watch","interaction":{"kind":"user-input","requestId":"request-user-input-watch","prompt":{"questionCount":1,"questions":[{"index":0,"optionCount":1,"multiSelect":false}],"questionsTruncated":false}}}',
+      );
+    }),
+  );
+
+  it.effect("exits promptly for a command approval arriving on the live stream", () =>
+    Effect.gen(function* () {
+      const pendingApproval = activity({
+        kind: "approval.requested",
+        requestId: "approval-command-watch",
+        payload: {
+          requestKind: "command",
+          detail: "run secret-command --token=secret",
+          command: "secret-command",
+          argv: ["--token=secret"],
+        },
+      });
+      const transport: RemoteWatchTransport = {
+        readThread: () => Effect.succeed(snapshot({ sequence: 10, status: "running" })),
+        subscribeThread: (input) =>
+          observeRemoteWatchStream({
+            stream: Stream.fromIterable([activityEvent(11, pendingApproval)]),
+            initialSequence: input.afterSequence,
+            targetTurnId: input.targetTurnId,
+            observedRunning: input.observedRunning,
+            interactionAware: input.interactionAware,
+          }),
+      };
+
+      const error = yield* watchRemoteThread({
+        transport,
+        threadId,
+        timeoutMs: 10_000,
+        interactionAware: true,
+      }).pipe(Effect.flip);
+      expect(error).toBeInstanceOf(RemoteWatchInteractionRequiredError);
+      expect(error[Runtime.errorExitCode]).toBe(26);
+      expect(error[Runtime.errorReported]).toBe(false);
+      expect(error.message).toBe(
+        '{"threadId":"thread-watch","turnId":"turn-watch","interaction":{"kind":"approval","requestId":"approval-command-watch","prompt":{"requestKind":"command"}}}',
+      );
+    }),
+  );
+
+  it.effect("a later watch skips a handled interaction and observes the final result", () =>
+    Effect.gen(function* () {
+      const requested = activity({
+        kind: "user-input.requested",
+        requestId: "request-user-input-handled",
+        payload: { questions: [{ options: [] }] },
+        sequence: 1,
+      });
+      const resolved = activity({
+        kind: "user-input.resolved",
+        requestId: "request-user-input-handled",
+        sequence: 2,
+        createdAt: "2026-07-21T00:00:11.000Z",
+      });
+      let reads = 0;
+      const transport: RemoteWatchTransport = {
+        readThread: () =>
+          Effect.sync(() => {
+            reads += 1;
+            return reads === 1
+              ? snapshot({
+                  sequence: 12,
+                  status: "running",
+                  activities: [requested, resolved],
+                })
+              : snapshot({
+                  sequence: 13,
+                  status: "ready",
+                  activities: [requested, resolved],
+                  messageTexts: [{ text: "continued after answer" }],
+                });
+          }),
+        subscribeThread: () =>
+          Effect.succeed({ status: "ready", lastSequence: 13, observedRunning: true }),
+      };
+
+      const result = yield* watchRemoteThread({
+        transport,
+        threadId,
+        timeoutMs: 10_000,
+        interactionAware: true,
+      });
+      expect(result.message.text).toBe("continued after answer");
+    }),
+  );
+
+  it.effect("keeps legacy watch behavior unless interactions are explicitly enabled", () =>
+    Effect.gen(function* () {
+      let reads = 0;
+      const transport: RemoteWatchTransport = {
+        readThread: () =>
+          Effect.sync(() => {
+            reads += 1;
+            return reads === 1
+              ? snapshot({
+                  sequence: 20,
+                  status: "running",
+                  activities: [
+                    activity({
+                      kind: "user-input.requested",
+                      requestId: "request-legacy-watch",
+                      payload: { questions: [{ options: [] }] },
+                    }),
+                  ],
+                })
+              : snapshot({
+                  sequence: 21,
+                  status: "ready",
+                  messageTexts: [{ text: "legacy final" }],
+                });
+          }),
+        subscribeThread: (input) => {
+          expect(input.interactionAware).toBe(false);
+          return Effect.succeed({ status: "ready", lastSequence: 21, observedRunning: true });
+        },
+      };
+
+      const result = yield* watchRemoteThread({ transport, threadId, timeoutMs: 10_000 });
+      expect(result.message.text).toBe("legacy final");
+    }),
+  );
+
+  it("never serializes prompt bodies, secrets, commands, argv, provider logs, or approval detail", () => {
+    const secret = "TOP-SECRET-remote-watch-value";
+    const prompt = selectPendingRemoteWatchInteraction(
+      [
+        activity({
+          kind: "user-input.requested",
+          requestId: "request-redaction-test",
+          payload: {
+            questions: [
+              {
+                id: secret,
+                header: secret,
+                question: secret,
+                options: [{ label: secret, description: secret }],
+              },
+            ],
+            command: secret,
+            argv: [secret],
+            providerLog: secret,
+            detail: secret,
+          },
+        }),
+      ],
+      turnId,
+    );
+    const serializedPrompt = JSON.stringify(prompt);
+    expect(serializedPrompt).not.toContain(secret);
+    expect(serializedPrompt).not.toContain("command");
+    expect(serializedPrompt).not.toContain("argv");
+    expect(serializedPrompt).not.toContain("providerLog");
+    expect(serializedPrompt).not.toContain("detail");
+
+    const approval = selectPendingRemoteWatchInteraction(
+      [
+        activity({
+          kind: "approval.requested",
+          requestId: "approval-redaction-test",
+          payload: {
+            requestKind: "command",
+            detail: secret,
+            command: secret,
+            argv: [secret],
+            providerLog: secret,
+          },
+        }),
+      ],
+      turnId,
+    );
+    const serializedApproval = JSON.stringify(approval);
+    expect(serializedApproval).not.toContain(secret);
+    expect(serializedApproval).not.toContain("argv");
+    expect(serializedApproval).not.toContain("providerLog");
+    expect(serializedApproval).not.toContain("detail");
+  });
+
   it.effect("subscribes after the exact initial HTTP snapshot sequence", () =>
     Effect.gen(function* () {
       const cursors: number[] = [];

@@ -13,25 +13,24 @@ export const cli = Command.make("t3").pipe(
   Command.withSubcommands([remoteCommand]),
 );
 
+export const handleRemoteCliFailure = Effect.fn("remoteBin.handleRemoteCliFailure")(function* (
+  error: unknown,
+  setExitCode: (exitCode: number) => void,
+) {
+  if (Runtime.getErrorReported(error)) {
+    yield* Console.error(formatRemoteCliDiagnostic(error));
+  }
+  yield* Effect.sync(() => setExitCode(Runtime.getErrorExitCode(error)));
+});
+
 if (import.meta.main) {
   Command.run(cli, { version: packageJson.version }).pipe(
     Effect.scoped,
     Effect.provide(NodeServices.layer),
     Effect.catch((error) =>
-      Console.error(formatRemoteCliDiagnostic(error)).pipe(
-        Effect.andThen(
-          Effect.sync(() => {
-            const safeExitCode =
-              typeof error === "object" &&
-              error !== null &&
-              Runtime.errorExitCode in error &&
-              typeof error[Runtime.errorExitCode] === "number"
-                ? error[Runtime.errorExitCode]
-                : 1;
-            process.exitCode = safeExitCode;
-          }),
-        ),
-      ),
+      handleRemoteCliFailure(error, (exitCode) => {
+        process.exitCode = exitCode;
+      }),
     ),
     NodeRuntime.runMain,
   );

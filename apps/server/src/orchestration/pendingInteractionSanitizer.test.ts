@@ -1,4 +1,4 @@
-import { ThreadId } from "@t3tools/contracts";
+import { REMOTE_INTERACTION_QUESTION_MAX_COUNT, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 
 import {
@@ -99,4 +99,24 @@ it("bounds and sanitizes user-input questions without retaining provider envelop
   ]) {
     assert.notInclude(serialized, forbidden);
   }
+});
+
+it("fails oversized multi-question requests closed instead of exposing partial answers", () => {
+  const interaction = pendingInteractionFromActivity({
+    threadId: ThreadId.make("thread-input-oversized"),
+    kind: "user-input.requested",
+    payload: {
+      requestId: "request-input-oversized",
+      questions: Array.from({ length: REMOTE_INTERACTION_QUESTION_MAX_COUNT + 1 }, (_, index) => ({
+        id: `question-${index + 1}`,
+        header: `Question ${index + 1}`,
+        question: `Answer question ${index + 1}`,
+        options: [],
+        multiSelect: false,
+      })),
+    },
+    createdAt: "2026-07-22T00:00:00.000Z",
+  });
+
+  assert.isNull(interaction);
 });

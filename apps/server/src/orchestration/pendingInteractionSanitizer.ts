@@ -90,14 +90,18 @@ function safeApprovalSummary(payload: Record<string, unknown>): {
 }
 
 function sanitizeQuestions(value: unknown): ReadonlyArray<RemotePendingInteractionQuestion> {
-  if (!Array.isArray(value)) {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > REMOTE_INTERACTION_QUESTION_MAX_COUNT
+  ) {
     return [];
   }
   const questions: RemotePendingInteractionQuestion[] = [];
-  for (const candidate of value.slice(0, REMOTE_INTERACTION_QUESTION_MAX_COUNT)) {
+  for (const candidate of value) {
     const question = readRecord(candidate);
     if (!question || !isRemoteRequestId(question.id)) {
-      continue;
+      return [];
     }
     const rawOptions = Array.isArray(question.options) ? question.options : [];
     const options = rawOptions
