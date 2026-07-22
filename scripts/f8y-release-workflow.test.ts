@@ -4,11 +4,13 @@ import * as NodePath from "node:path";
 
 import { assert, it } from "@effect/vitest";
 
+import serverPackageJson from "../apps/server/package.json" with { type: "json" };
+
 const repoRoot = NodePath.resolve(import.meta.dirname, "..");
 const workflowPath = NodePath.join(repoRoot, ".github/workflows/f8y-release.yml");
 const workflow = NodeFS.readFileSync(workflowPath, "utf8");
 
-it("publishes one DMG, its checksum, and one Obtainium-compatible APK for every main push", () => {
+it("publishes the desktop, mobile, and standalone CLI artifacts for every main push", () => {
   assert.match(workflow, /push:\n\s+branches:\n\s+- main/u);
   assert.include(workflow, "workflow_dispatch:");
   assert.include(workflow, "runs-on: macos-15");
@@ -20,10 +22,33 @@ it("publishes one DMG, its checksum, and one Obtainium-compatible APK for every 
   assert.include(workflow, "release-assets/*.dmg");
   assert.include(workflow, "release-assets/*.dmg.sha256");
   assert.include(workflow, "release-assets/*.apk");
+  assert.include(workflow, "release-assets/t3-*-darwin-arm64");
+  assert.include(workflow, "release-assets/t3-*-darwin-arm64.sha256");
   assert.notInclude(workflow, "blacksmith-");
   assert.notInclude(workflow, "EXPO_TOKEN");
   assert.notInclude(workflow, "CSC_LINK");
   assert.notInclude(workflow.toLowerCase(), "personal");
+});
+
+it("builds and verifies a versioned self-contained remote CLI", () => {
+  const buildScript = serverPackageJson.scripts["build:remote-binary:darwin-arm64"];
+
+  assert.include(buildScript, "bun build src/remote-bin.ts");
+  assert.include(buildScript, "--compile");
+  assert.include(buildScript, "--target=bun-darwin-arm64");
+  assert.include(buildScript, "--outfile dist/t3-darwin-arm64");
+  assert.include(workflow, "oven-sh/setup-bun@v2");
+  assert.include(workflow, "bun-version: 1.3.14");
+  assert.include(workflow, "vp run --filter t3 build:remote-binary:darwin-arm64");
+  assert.include(workflow, 'cli="apps/server/dist/t3-darwin-arm64"');
+  assert.include(workflow, 'cli_version="$("$cli" --version)"');
+  assert.include(workflow, '"$cli" remote --help');
+  assert.include(workflow, 'codesign --force --sign - "$cli"');
+  assert.include(workflow, 'shasum -a 256 "$(basename "$cli_asset")"');
+  assert.include(
+    workflow,
+    'cli_asset="release-publish/t3-${{ needs.metadata_and_checks.outputs.version }}-darwin-arm64"',
+  );
 });
 
 it("ad-hoc-signs and integrity-checks the account-free macOS release", () => {

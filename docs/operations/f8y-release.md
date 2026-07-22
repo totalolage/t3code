@@ -4,11 +4,13 @@
 also be started manually. A release is atomic: it is published only after both platform builds
 succeed.
 
-Each release contains exactly three assets:
+Each release contains five assets:
 
 - an ad-hoc-signed Apple Silicon (`arm64`) macOS DMG
 - the DMG's SHA-256 checksum
 - a signed Android APK named `T3-Code-<version>-android.apk`
+- a self-contained, ad-hoc-signed Apple Silicon CLI named `t3-<version>-darwin-arm64`
+- the CLI's SHA-256 checksum
 
 Versions use the next patch after the checked-in desktop version followed by the UTC date and GitHub
 Actions run number, for example `0.0.29-f8y.20260720.42`. Android uses the workflow run number as its
@@ -100,18 +102,42 @@ requires an Apple-issued provisioning profile.
 Automatic macOS updates additionally require publishing the Electron ZIP and channel metadata
 alongside the DMG. The f8y workflow currently publishes only the manually installable DMG.
 
+## Standalone remote CLI
+
+The macOS arm64 CLI embeds its JavaScript runtime and dependencies, so Node.js, Bun, and a package
+manager are not required on the target machine. It intentionally contains only the `t3 remote`
+command tree; local server, provider, and desktop commands remain available from the npm package and
+desktop app.
+
+Download the binary and its adjacent `.sha256` file from the same f8y release, then verify and
+install it:
+
+```sh
+shasum -a 256 -c t3-*-darwin-arm64.sha256
+chmod +x t3-*-darwin-arm64
+mkdir -p "$HOME/.local/bin"
+install -m 755 t3-*-darwin-arm64 "$HOME/.local/bin/t3"
+t3 --version
+t3 remote --help
+```
+
+The binary is ad-hoc signed, not Apple-notarized. If a browser marks it as quarantined, verify the
+checksum first, then allow it using the same **System Settings → Privacy & Security** flow described
+for the desktop app.
+
 ## Verification
 
 For the first release:
 
-1. Confirm the GitHub prerelease targets the expected `main` commit and contains one DMG, its
-   checksum, and one APK.
+1. Confirm the GitHub prerelease targets the expected `main` commit and contains one DMG, one APK,
+   one CLI binary, and both checksums.
 2. Install the APK through Obtainium.
 3. Verify the installed package is `com.f8y.t3code` and its version matches the release.
 4. Download the DMG and checksum in a browser and confirm `shasum -a 256 -c` reports `OK`.
 5. Install the app on a separate Mac and confirm the documented **Open Anyway** flow works.
 6. Publish a later `main` build and confirm Obtainium detects it.
 7. Install the update without uninstalling and confirm settings and application data remain intact.
+8. Install the CLI on Apple Silicon without Node.js or Bun and confirm `t3 remote --help` succeeds.
 
 The workflow verifies the APK signature, package ID, version name, and version code before it uploads
 the asset. Starting with the second release, it also compares the certificate and `versionCode` with

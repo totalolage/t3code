@@ -17,6 +17,7 @@
   "scripts": {
     "dev": "node --watch src/bin.ts",
     "build:bundle": "vp pack",
+    "build:remote-binary:darwin-arm64": "bun build src/remote-bin.ts --compile --target=bun-darwin-arm64 --minify --sourcemap --outfile dist/t3-darwin-arm64",
     "start": "node dist/bin.mjs",
     "typecheck": "tsgo --noEmit",
     "test": "vp test run"
