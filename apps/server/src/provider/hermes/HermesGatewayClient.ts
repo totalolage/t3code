@@ -1,4 +1,3 @@
-import { isHermesGatewayUrlQuerySafe } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 const HermesGatewayOperation = Schema.Literals([
@@ -119,8 +118,7 @@ export function normalizeHermesGatewayUrl(raw: string): string {
     (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
     parsed.username ||
     parsed.password ||
-    parsed.hash ||
-    !isHermesGatewayUrlQuerySafe(trimmed)
+    parsed.hash
   ) {
     throw new HermesGatewayClientError({
       operation: "health",

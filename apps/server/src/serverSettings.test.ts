@@ -266,7 +266,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
-  it.effect("preserves unrelated loaded settings while clearing an unsafe Hermes URL", () =>
+  it.effect("preserves loaded Hermes gateway query parameters", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
       const serverConfig = yield* ServerConfig.ServerConfig;
@@ -285,12 +285,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         | undefined;
       assert.equal(loaded.addProjectBaseDirectory, "/workspace/retained");
       assert.equal(loaded.providerInstances[codexId]?.displayName, "Retained Codex");
-      assert.equal(hermesConfig?.gatewayUrl, "");
-      const rewritten = yield* fileSystem.readFileString(serverConfig.settingsPath);
-      assert.notInclude(rewritten, "fixture-value");
-      assert.notInclude(rewritten, "access_token");
-      assert.include(rewritten, "Retained Codex");
-      assert.include(rewritten, "/workspace/retained");
+      assert.equal(
+        hermesConfig?.gatewayUrl,
+        "https://hermes.example.test/p/work?profile=engineering;access_token=fixture-value",
+      );
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
@@ -625,45 +623,40 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
-  it.effect(
-    "rejects credential-shaped Hermes query keys before persistence or client exposure",
-    () =>
-      Effect.gen(function* () {
-        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
-        const serverConfig = yield* ServerConfig.ServerConfig;
-        const fileSystem = yield* FileSystem.FileSystem;
-        const instanceId = ProviderInstanceId.make("hermes_unsafe_query");
-        const credential = "fixture-value";
-        const gatewayUrl = `https://hermes.example.test/p/work?profile=engineering;access_token=${credential}`;
-        const unsafeSettings = yield* decodeServerSettings({
-          providerInstances: {
-            [instanceId]: {
-              driver: "hermes",
-              config: { gatewayUrl },
-            },
+  it.effect("persists and exposes arbitrary Hermes gateway query parameters", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const instanceId = ProviderInstanceId.make("hermes_query");
+      const gatewayUrl =
+        "https://hermes.example.test/p/work?profile=engineering;access_token=fixture-value";
+      const settings = yield* decodeServerSettings({
+        providerInstances: {
+          [instanceId]: {
+            driver: "hermes",
+            config: { gatewayUrl },
           },
-        });
+        },
+      });
 
-        const clientSettings = ServerSettingsModule.redactServerSettingsForClient(unsafeSettings);
-        const clientConfig = clientSettings.providerInstances[instanceId]?.config as
-          | { gatewayUrl?: string }
-          | undefined;
-        assert.equal(clientConfig?.gatewayUrl, "");
+      const clientSettings = ServerSettingsModule.redactServerSettingsForClient(settings);
+      const clientConfig = clientSettings.providerInstances[instanceId]?.config as
+        | { gatewayUrl?: string }
+        | undefined;
+      assert.equal(clientConfig?.gatewayUrl, gatewayUrl);
 
-        const updateExit = yield* Effect.exit(
-          serverSettings.updateSettings({
-            providerInstances: unsafeSettings.providerInstances,
-          }),
-        );
-        assert.strictEqual(updateExit._tag, "Failure");
+      const updated = yield* serverSettings.updateSettings({
+        providerInstances: settings.providerInstances,
+      });
+      const updatedConfig = updated.providerInstances[instanceId]?.config as
+        | { gatewayUrl?: string }
+        | undefined;
+      assert.equal(updatedConfig?.gatewayUrl, gatewayUrl);
 
-        const current = yield* serverSettings.getSettings;
-        assert.isUndefined(current.providerInstances[instanceId]);
-        if (yield* fileSystem.exists(serverConfig.settingsPath)) {
-          const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
-          assert.notInclude(raw, credential);
-          assert.notInclude(raw, "access_token");
-        }
-      }).pipe(Effect.provide(makeServerSettingsLayer())),
+      const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      assert.include(raw, "access_token");
+      assert.include(raw, "fixture-value");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 });
