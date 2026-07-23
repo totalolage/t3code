@@ -376,42 +376,6 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
 );
 export type OpenCodeSettings = typeof OpenCodeSettings.Type;
 
-const HERMES_CREDENTIAL_QUERY_KEY_FRAGMENTS = [
-  "accesstoken",
-  "apikey",
-  "authorization",
-  "credential",
-  "password",
-  "passwd",
-  "privatekey",
-  "refreshtoken",
-  "secret",
-  "signature",
-] as const;
-
-export function isHermesGatewayUrlQuerySafe(value: string): boolean {
-  const queryStart = value.indexOf("?");
-  if (queryStart === -1) {
-    return true;
-  }
-  const fragmentStart = value.indexOf("#", queryStart);
-  const query = value.slice(queryStart + 1, fragmentStart === -1 ? undefined : fragmentStart);
-  for (const rawKey of new URLSearchParams(query.replaceAll(";", "&")).keys()) {
-    const key = rawKey.toLowerCase().replace(/[^a-z0-9]/gu, "");
-    if (
-      key === "auth" ||
-      key === "key" ||
-      key === "sig" ||
-      key === "token" ||
-      key.endsWith("token") ||
-      HERMES_CREDENTIAL_QUERY_KEY_FRAGMENTS.some((fragment) => key.includes(fragment))
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
 export const HermesSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(

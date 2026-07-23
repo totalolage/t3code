@@ -15,7 +15,6 @@ import {
   DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   DEFAULT_MODEL_BY_PROVIDER,
   DEFAULT_SERVER_SETTINGS,
-  isHermesGatewayUrlQuerySafe,
   isProviderDriverKind,
   type ModelSelection,
   type ProviderInstanceConfig,
@@ -58,76 +57,11 @@ const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-function hermesGatewayUrl(config: unknown): string | null {
-  if (typeof config !== "object" || config === null) {
-    return null;
-  }
-  const value = (config as Record<string, unknown>).gatewayUrl;
-  return typeof value === "string" ? value : null;
-}
-
-function invalidHermesGatewayInstance(settings: ServerSettings): string | null {
-  if (!isHermesGatewayUrlQuerySafe(settings.providers.hermes.gatewayUrl)) {
-    return "hermes";
-  }
-  for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {
-    const gatewayUrl = instance.driver === "hermes" ? hermesGatewayUrl(instance.config) : null;
-    if (gatewayUrl !== null && !isHermesGatewayUrlQuerySafe(gatewayUrl)) {
-      return instanceId;
-    }
-  }
-  return null;
-}
-
-function clearUnsafeHermesGatewayUrls(settings: ServerSettings): ServerSettings {
-  const providerInstances = Object.fromEntries(
-    Object.entries(settings.providerInstances).map(([instanceId, instance]) => {
-      const gatewayUrl = instance.driver === "hermes" ? hermesGatewayUrl(instance.config) : null;
-      return [
-        instanceId,
-        gatewayUrl !== null && !isHermesGatewayUrlQuerySafe(gatewayUrl)
-          ? {
-              ...instance,
-              config: {
-                ...(instance.config as Record<string, unknown>),
-                gatewayUrl: "",
-              },
-            }
-          : instance,
-      ];
-    }),
-  ) as ServerSettings["providerInstances"];
-  const providers = !isHermesGatewayUrlQuerySafe(settings.providers.hermes.gatewayUrl)
-    ? {
-        ...settings.providers,
-        hermes: { ...settings.providers.hermes, gatewayUrl: "" },
-      }
-    : settings.providers;
-  return { ...settings, providers, providerInstances };
-}
-
-const validateHermesGatewayQueries = (
-  settings: ServerSettings,
-): Effect.Effect<ServerSettings, ServerSettingsError> => {
-  const providerInstanceId = invalidHermesGatewayInstance(settings);
-  return providerInstanceId === null
-    ? Effect.succeed(settings)
-    : Effect.fail(
-        new ServerSettingsError({
-          settingsPath: "<memory>",
-          operation: "normalize",
-          providerInstanceId,
-          cause: new Error("Hermes gateway URL contains a credential-shaped query key."),
-        }),
-      );
-};
-
 const normalizeServerSettings = (
   settings: ServerSettings,
 ): Effect.Effect<ServerSettings, ServerSettingsError> =>
   encodeServerSettings(settings).pipe(
     Effect.flatMap(decodeServerSettings),
-    Effect.flatMap(validateHermesGatewayQueries),
     Effect.mapError(
       (cause) =>
         new ServerSettingsError({
@@ -160,9 +94,8 @@ function redactProviderEnvironmentVariable(
 }
 
 export function redactServerSettingsForClient(settings: ServerSettings): ServerSettings {
-  const safeSettings = clearUnsafeHermesGatewayUrls(settings);
   const providerInstances = Object.fromEntries(
-    Object.entries(safeSettings.providerInstances).map(([instanceId, instance]) => [
+    Object.entries(settings.providerInstances).map(([instanceId, instance]) => [
       instanceId,
       instance.environment
         ? {
@@ -172,7 +105,7 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
         : instance,
     ]),
   );
-  return { ...safeSettings, providerInstances };
+  return { ...settings, providerInstances };
 }
 
 export class ServerSettingsService extends Context.Service<
@@ -398,14 +331,6 @@ const make = Effect.gen(function* () {
         cause: decoded.cause,
       });
       return DEFAULT_SERVER_SETTINGS;
-    }
-    if (invalidHermesGatewayInstance(decoded.value) !== null) {
-      yield* Effect.logWarning("cleared unsafe Hermes gateway URL from loaded settings", {
-        path: settingsPath,
-      });
-      const sanitized = clearUnsafeHermesGatewayUrls(decoded.value);
-      yield* writeSettingsAtomically(sanitized);
-      return sanitized;
     }
     return decoded.value;
   });
