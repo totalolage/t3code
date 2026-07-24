@@ -18,13 +18,28 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as EffectAcpSchema from "effect-acp/schema";
 
 import { ServerConfig } from "../../config.ts";
 import { makeHermesAdapter } from "./HermesAdapter.ts";
 
 const decodeSettings = Schema.decodeSync(HermesSettings);
+const AcpRequestLogEntry = Schema.Struct({
+  method: Schema.String,
+  params: Schema.optionalKey(Schema.Unknown),
+});
+type AcpRequestLogEntry = typeof AcpRequestLogEntry.Type;
+const decodeAcpRequestLogLine = Schema.decodeUnknownSync(Schema.fromJsonString(AcpRequestLogEntry));
+const decodeNewSessionRequest = Schema.decodeUnknownOption(EffectAcpSchema.NewSessionRequest);
+const decodeSetSessionModelRequest = Schema.decodeUnknownOption(
+  EffectAcpSchema.SetSessionModelRequest,
+);
+const decodeSetSessionModeRequest = Schema.decodeUnknownOption(
+  EffectAcpSchema.SetSessionModeRequest,
+);
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockAgentPath = NodePath.join(__dirname, "../../../scripts/acp-mock-agent.ts");
 
@@ -49,7 +64,14 @@ async function readJsonLines(filePath: string) {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
+    .map((line) => decodeAcpRequestLogLine(line));
+}
+
+function decodeRequestParams<A>(
+  request: AcpRequestLogEntry | undefined,
+  decode: (input: unknown) => Option.Option<A>,
+): A | undefined {
+  return Option.getOrUndefined(decode(request?.params));
 }
 
 const testLayer = ServerConfig.layerTest(process.cwd(), {
@@ -118,22 +140,21 @@ it.layer(testLayer)("HermesAdapter ACP", (it) => {
       );
 
       const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
-      const newSession = requests.find((request) => request.method === "session/new");
-      assert.equal((newSession?.params as Record<string, unknown>)?.cwd, process.cwd());
-      assert.isTrue(
-        requests.some(
-          (request) =>
-            request.method === "session/set_model" &&
-            (request.params as Record<string, unknown>)?.modelId === "grok-mock-alt",
-        ),
+      const newSession = decodeRequestParams(
+        requests.find((request) => request.method === "session/new"),
+        decodeNewSessionRequest,
       );
-      assert.isTrue(
-        requests.some(
-          (request) =>
-            request.method === "session/set_mode" &&
-            (request.params as Record<string, unknown>)?.modeId === "dont_ask",
-        ),
+      assert.equal(newSession?.cwd, process.cwd());
+      const modelChange = decodeRequestParams(
+        requests.find((request) => request.method === "session/set_model"),
+        decodeSetSessionModelRequest,
       );
+      assert.equal(modelChange?.modelId, "grok-mock-alt");
+      const modeChange = decodeRequestParams(
+        requests.find((request) => request.method === "session/set_mode"),
+        decodeSetSessionModeRequest,
+      );
+      assert.equal(modeChange?.modeId, "dont_ask");
     }),
   );
 
@@ -173,18 +194,44 @@ it.layer(testLayer)("HermesAdapter ACP", (it) => {
       const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
       assert.isTrue(requests.some((request) => request.method === "session/load"));
       assert.isFalse(requests.some((request) => request.method === "session/new"));
-      const switches = requests.filter((request) => request.method === "session/set_model");
+      const switches = requests.flatMap((request) =>
+        request.method === "session/set_model"
+          ? Option.toArray(decodeSetSessionModelRequest(request.params))
+          : [],
+      );
       assert.deepEqual(
-        switches.map((request) => (request.params as Record<string, unknown>).modelId),
+        switches.map((request) => request.modelId),
         ["grok-mock-alt"],
       );
-      assert.isTrue(
-        requests.some(
-          (request) =>
-            request.method === "session/set_mode" &&
-            (request.params as Record<string, unknown>)?.modeId === "default",
-        ),
+      const modeChange = decodeRequestParams(
+        requests.find((request) => request.method === "session/set_mode"),
+        decodeSetSessionModeRequest,
       );
+      assert.equal(modeChange?.modeId, "default");
+    }),
+  );
+
+  it.effect("ignores malformed persisted ACP resume cursors", () =>
+    Effect.gen(function* () {
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "hermes-acp-invalid-resume-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockHermesWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const adapter = yield* makeHermesAdapter(decodeSettings({ binaryPath: wrapperPath }));
+
+      yield* adapter.startSession({
+        threadId: ThreadId.make("hermes-invalid-resume-thread"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+        resumeCursor: { schemaVersion: 1, sessionId: "   " },
+      });
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.isTrue(requests.some((request) => request.method === "session/new"));
+      assert.isFalse(requests.some((request) => request.method === "session/load"));
     }),
   );
 

@@ -802,9 +802,7 @@ export const make = (
             return runLoggedRequest(
               "session/set_mode",
               requestPayload,
-              acp.raw
-                .request("session/set_mode", requestPayload)
-                .pipe(Effect.as({} satisfies EffectAcpSchema.SetSessionModeResponse)),
+              acp.agent.setSessionMode(requestPayload),
             ).pipe(Effect.tap(() => updateCurrentModeId(modeId)));
           }),
         ),

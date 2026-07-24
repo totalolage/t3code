@@ -9,6 +9,7 @@ import {
   type ProviderSession,
   RuntimeRequestId,
   type ThreadId,
+  TrimmedNonEmptyString,
   TurnId,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
@@ -22,6 +23,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -65,6 +67,14 @@ import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogg
 const PROVIDER = ProviderDriverKind.make("hermes");
 const HERMES_RESUME_VERSION = 1 as const;
 
+export const HermesResumeCursor = Schema.Struct({
+  schemaVersion: Schema.Literal(HERMES_RESUME_VERSION),
+  sessionId: TrimmedNonEmptyString,
+});
+export type HermesResumeCursor = typeof HermesResumeCursor.Type;
+
+const decodeHermesResumeCursor = Schema.decodeUnknownOption(HermesResumeCursor);
+
 export interface HermesAdapterOptions {
   readonly environment?: NodeJS.ProcessEnv;
   readonly nativeEventLogPath?: string;
@@ -76,6 +86,11 @@ interface PendingApproval {
   readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
 }
 
+interface HermesTurnItem {
+  readonly prompt: ReadonlyArray<EffectAcpSchema.ContentBlock>;
+  readonly result: EffectAcpSchema.PromptResponse;
+}
+
 interface HermesSessionContext {
   readonly threadId: ThreadId;
   readonly acpSessionId: string;
@@ -84,21 +99,10 @@ interface HermesSessionContext {
   readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
-  turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  turns: Array<{ id: TurnId; items: Array<HermesTurnItem> }>;
   activeTurnId: TurnId | undefined;
   currentModelId: string | undefined;
   stopped: boolean;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parseHermesResume(raw: unknown): { sessionId: string } | undefined {
-  if (!isRecord(raw)) return undefined;
-  if (raw.schemaVersion !== HERMES_RESUME_VERSION) return undefined;
-  if (typeof raw.sessionId !== "string" || !raw.sessionId.trim()) return undefined;
-  return { sessionId: raw.sessionId.trim() };
 }
 
 function selectPermissionOptionId(
@@ -286,7 +290,9 @@ export function makeHermesAdapter(
             sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
           );
 
-          const resumeSessionId = parseHermesResume(input.resumeCursor)?.sessionId;
+          const resumeSessionId = Option.getOrUndefined(
+            Option.map(decodeHermesResumeCursor(input.resumeCursor), (cursor) => cursor.sessionId),
+          );
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
           const acp = yield* makeHermesAcpRuntime({
             hermesSettings,
@@ -427,7 +433,7 @@ export function makeHermesAdapter(
             resumeCursor: {
               schemaVersion: HERMES_RESUME_VERSION,
               sessionId: started.sessionId,
-            },
+            } satisfies HermesResumeCursor,
             createdAt: now,
             updatedAt: now,
           };

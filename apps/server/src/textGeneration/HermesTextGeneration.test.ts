@@ -10,13 +10,23 @@ import { HermesSettings, ProviderInstanceId } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as EffectAcpSchema from "effect-acp/schema";
 import { expect } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
 import { makeHermesTextGeneration } from "./HermesTextGeneration.ts";
 
 const decodeSettings = Schema.decodeSync(HermesSettings);
+const AcpRequestLogEntry = Schema.Struct({
+  method: Schema.String,
+  params: Schema.optionalKey(Schema.Unknown),
+});
+const decodeAcpRequestLogLine = Schema.decodeUnknownSync(Schema.fromJsonString(AcpRequestLogEntry));
+const decodeSetSessionModelRequest = Schema.decodeUnknownOption(
+  EffectAcpSchema.SetSessionModelRequest,
+);
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockAgentPath = NodePath.join(__dirname, "../../scripts/acp-mock-agent.ts");
 
@@ -73,13 +83,13 @@ it.layer(testLayer)("HermesTextGeneration", (it) => {
         const requests = NodeFS.readFileSync(requestLogPath, "utf8")
           .trim()
           .split("\n")
-          .map((line) => JSON.parse(line) as { method?: string; params?: Record<string, unknown> });
-        expect(
-          requests.some(
-            (request) =>
-              request.method === "session/set_model" && request.params?.modelId === "grok-mock-alt",
+          .map((line) => decodeAcpRequestLogLine(line));
+        const setModelRequest = Option.getOrUndefined(
+          decodeSetSessionModelRequest(
+            requests.find((request) => request.method === "session/set_model")?.params,
           ),
-        ).toBe(true);
+        );
+        expect(setModelRequest?.modelId).toBe("grok-mock-alt");
       }),
     ),
   );
