@@ -4,9 +4,7 @@ import { ProviderDriverKind } from "@t3tools/contracts";
 import { DRIVER_OPTION_BY_VALUE } from "./providerDriverMeta";
 import {
   deriveProviderSettingsFields,
-  getProviderSecretFieldPresentation,
   nextProviderConfigWithFieldValue,
-  nextProviderSecretEnvironment,
   readProviderConfigBoolean,
   readProviderConfigString,
 } from "./ProviderSettingsForm";
@@ -132,57 +130,10 @@ describe("ProviderSettingsForm helpers", () => {
     expect(readProviderConfigBoolean({}, "experimental", true)).toBe(true);
   });
 
-  it("exposes Hermes gateway config and a managed server-secret field", () => {
+  it("exposes the Hermes ACP binary setting without a gateway secret", () => {
     const hermes = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("hermes")];
     expect(hermes).toBeDefined();
-    expect(deriveProviderSettingsFields(hermes!).map((field) => field.key)).toEqual(["gatewayUrl"]);
-    expect(hermes?.secretEnvironmentVariable).toMatchObject({
-      name: "HERMES_GATEWAY_SECRET",
-      label: "Shared secret",
-    });
-  });
-
-  it("preserves a redacted Hermes secret until an administrator replaces it", () => {
-    const existing = [
-      {
-        name: "HERMES_GATEWAY_SECRET",
-        value: "",
-        sensitive: true,
-        valueRedacted: true,
-      },
-    ];
-    expect(nextProviderSecretEnvironment(existing, "HERMES_GATEWAY_SECRET", "")).toEqual(existing);
-    expect(nextProviderSecretEnvironment(existing, "HERMES_GATEWAY_SECRET", "replacement")).toEqual(
-      [
-        {
-          name: "HERMES_GATEWAY_SECRET",
-          value: "replacement",
-          sensitive: true,
-        },
-      ],
-    );
-  });
-
-  it("explains that a redacted Hermes secret remains stored", () => {
-    const hermes = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("hermes")];
-    expect(hermes?.secretEnvironmentVariable).toBeDefined();
-
-    expect(
-      getProviderSecretFieldPresentation({
-        secretField: hermes!.secretEnvironmentVariable!,
-        secretVariable: {
-          name: "HERMES_GATEWAY_SECRET",
-          value: "",
-          sensitive: true,
-          valueRedacted: true,
-        },
-      }),
-    ).toEqual({
-      value: "",
-      placeholder: "Stored secret - enter a new value to replace",
-      description:
-        "Secret stored. This field stays blank because the value is never returned to the browser. Enter a new value to replace it.",
-      isStored: true,
-    });
+    expect(deriveProviderSettingsFields(hermes!).map((field) => field.key)).toEqual(["binaryPath"]);
+    expect(hermes?.secretEnvironmentVariable).toBeUndefined();
   });
 });

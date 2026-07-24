@@ -208,6 +208,15 @@ export class AcpSessionRuntime extends Context.Service<
       modeId: string,
     ) => Effect.Effect<EffectAcpSchema.SetSessionModeResponse, EffectAcpErrors.AcpError>;
     /**
+     * Selects the active mode through the standard ACP `session/set_mode` method.
+     * This is distinct from {@link setMode}, which supports agents that model
+     * their mode as a `mode` configuration option.
+     * @see https://agentclientprotocol.com/protocol/schema#session/set_mode
+     */
+    readonly setSessionMode: (
+      modeId: string,
+    ) => Effect.Effect<EffectAcpSchema.SetSessionModeResponse, EffectAcpErrors.AcpError>;
+    /**
      * Updates a session configuration option and the runtime configuration snapshot.
      * @see https://agentclientprotocol.com/protocol/schema#session/set_config_option
      */
@@ -781,6 +790,20 @@ export const make = (
               Effect.tap(() => updateCurrentModeId(modeId)),
               Effect.as({} satisfies EffectAcpSchema.SetSessionModeResponse),
             );
+          }),
+        ),
+      setSessionMode: (modeId) =>
+        getStartedState.pipe(
+          Effect.flatMap((started) => {
+            const requestPayload = {
+              sessionId: started.sessionId,
+              modeId,
+            } satisfies EffectAcpSchema.SetSessionModeRequest;
+            return runLoggedRequest(
+              "session/set_mode",
+              requestPayload,
+              acp.agent.setSessionMode(requestPayload),
+            ).pipe(Effect.tap(() => updateCurrentModeId(modeId)));
           }),
         ),
       setConfigOption,

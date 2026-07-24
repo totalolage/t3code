@@ -396,6 +396,19 @@ const program = Effect.gen(function* () {
     }),
   );
 
+  yield* agent.handleSetSessionMode((request) => {
+    currentModeId = request.modeId;
+    return agent.client
+      .sessionUpdate({
+        sessionId: request.sessionId,
+        update: {
+          sessionUpdate: "current_mode_update",
+          currentModeId,
+        },
+      })
+      .pipe(Effect.as({}));
+  });
+
   yield* agent.handleSetSessionConfigOption((request) =>
     Effect.gen(function* () {
       if (exitOnSetConfigOption) {
@@ -877,51 +890,14 @@ const program = Effect.gen(function* () {
     }),
   );
 
-  yield* agent.handleUnknownExtRequest((method, params) => {
+  yield* agent.handleUnknownExtRequest((method) => {
     if (method === "cursor/list_available_models") {
       return Effect.succeed({
         models: availableModels(),
       });
     }
 
-    if (method !== "session/mode/set") {
-      return Effect.fail(AcpError.AcpRequestError.methodNotFound(method));
-    }
-
-    const nextModeId =
-      typeof params === "object" &&
-      params !== null &&
-      "modeId" in params &&
-      typeof params.modeId === "string"
-        ? params.modeId
-        : typeof params === "object" &&
-            params !== null &&
-            "mode" in params &&
-            typeof params.mode === "string"
-          ? params.mode
-          : undefined;
-    const requestedSessionId =
-      typeof params === "object" &&
-      params !== null &&
-      "sessionId" in params &&
-      typeof params.sessionId === "string"
-        ? params.sessionId
-        : sessionId;
-
-    if (typeof nextModeId === "string" && nextModeId.trim()) {
-      currentModeId = nextModeId.trim();
-      return agent.client
-        .sessionUpdate({
-          sessionId: requestedSessionId,
-          update: {
-            sessionUpdate: "current_mode_update",
-            currentModeId,
-          },
-        })
-        .pipe(Effect.as({}));
-    }
-
-    return Effect.succeed({});
+    return Effect.fail(AcpError.AcpRequestError.methodNotFound(method));
   });
 
   return yield* Effect.never;

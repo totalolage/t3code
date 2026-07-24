@@ -18,7 +18,7 @@
  *
  * Every instance in these tests is configured with `enabled: false` so the
  * provider-status checks short-circuit to pending/disabled snapshots
- * without trying to spawn real provider processes or contact a Hermes gateway.
+ * without trying to spawn real provider processes.
  * That keeps the assertions focused on registry routing
  * behaviour rather than the runtime details of each provider.
  */
@@ -103,7 +103,7 @@ const makeOpenCodeConfig = (overrides: Partial<OpenCodeSettings>): OpenCodeSetti
 
 const makeHermesConfig = (overrides: Partial<HermesSettings>): HermesSettings => ({
   enabled: false,
-  gatewayUrl: "",
+  binaryPath: "hermes",
   customModels: [],
   ...overrides,
 });

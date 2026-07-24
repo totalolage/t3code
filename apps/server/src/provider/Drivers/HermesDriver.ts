@@ -2,18 +2,20 @@ import { HermesSettings, ProviderDriverKind, type ServerProvider } from "@t3tool
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
+import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeHermesTextGeneration } from "../../textGeneration/HermesTextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeHermesAdapter } from "../Layers/HermesAdapter.ts";
+import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { checkHermesProviderStatus, makePendingHermesProvider } from "../Layers/HermesProvider.ts";
-import {
-  makeHermesGatewayClient,
-  type HermesGatewayClient,
-} from "../hermes/HermesGatewayClient.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
+import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
@@ -28,11 +30,17 @@ import {
 } from "../providerUpdateSettings.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("hermes");
-const SECRET_VARIABLE = "HERMES_GATEWAY_SECRET";
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
 const decodeSettings = Schema.decodeSync(HermesSettings);
 
-export type HermesDriverEnv = Crypto.Crypto | ServerSettingsService;
+export type HermesDriverEnv =
+  | ChildProcessSpawner.ChildProcessSpawner
+  | Crypto.Crypto
+  | FileSystem.FileSystem
+  | Path.Path
+  | ProviderEventLoggers
+  | ServerConfig
+  | ServerSettingsService;
 
 const withInstanceIdentity =
   (input: {
@@ -50,21 +58,6 @@ const withInstanceIdentity =
     continuation: { groupKey: input.continuationGroupKey },
   });
 
-function createClient(input: {
-  readonly gatewayUrl: string;
-  readonly secret: string | undefined;
-}): HermesGatewayClient | undefined {
-  if (!input.gatewayUrl.trim() || !input.secret?.trim()) return undefined;
-  try {
-    return makeHermesGatewayClient({
-      gatewayUrl: input.gatewayUrl,
-      secret: input.secret,
-    });
-  } catch {
-    return undefined;
-  }
-}
-
 export const HermesDriver: ProviderDriver<HermesSettings, HermesDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
@@ -75,12 +68,12 @@ export const HermesDriver: ProviderDriver<HermesSettings, HermesDriverEnv> = {
   defaultConfig: () => decodeSettings({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
+      const crypto = yield* Crypto.Crypto;
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const serverSettings = yield* ServerSettingsService;
+      const eventLoggers = yield* ProviderEventLoggers;
+      const processEnv = mergeProviderInstanceEnvironment(environment);
       const effectiveConfig = { ...config, enabled } satisfies HermesSettings;
-      const secret = environment.find(
-        (variable) => variable.name === SECRET_VARIABLE && variable.sensitive,
-      )?.value;
-      const client = createClient({ gatewayUrl: effectiveConfig.gatewayUrl, secret });
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
@@ -91,12 +84,12 @@ export const HermesDriver: ProviderDriver<HermesSettings, HermesDriverEnv> = {
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
       });
-      const adapter = yield* makeHermesAdapter({
+      const adapter = yield* makeHermesAdapter(effectiveConfig, {
         instanceId,
-        enabled,
-        ...(client ? { client } : {}),
+        environment: processEnv,
+        ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
-      const textGeneration = makeHermesTextGeneration(client);
+      const textGeneration = yield* makeHermesTextGeneration(effectiveConfig, processEnv);
       const maintenanceCapabilities = makeManualOnlyProviderMaintenanceCapabilities({
         provider: DRIVER_KIND,
         packageName: null,
@@ -109,8 +102,10 @@ export const HermesDriver: ProviderDriver<HermesSettings, HermesDriverEnv> = {
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
         initialSnapshot: (settings) =>
           makePendingHermesProvider(settings.provider).pipe(Effect.map(stampIdentity)),
-        checkProvider: checkHermesProviderStatus(effectiveConfig, client).pipe(
+        checkProvider: checkHermesProviderStatus(effectiveConfig, processEnv).pipe(
           Effect.map(stampIdentity),
+          Effect.provideService(Crypto.Crypto, crypto),
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
         ),
         refreshInterval: SNAPSHOT_REFRESH_INTERVAL,
       }).pipe(

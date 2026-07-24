@@ -266,32 +266,6 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
-  it.effect("preserves loaded Hermes gateway query parameters", () =>
-    Effect.gen(function* () {
-      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
-      const serverConfig = yield* ServerConfig.ServerConfig;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const hermesId = ProviderInstanceId.make("hermes_loaded");
-      const codexId = ProviderInstanceId.make("codex_loaded");
-
-      yield* fileSystem.writeFileString(
-        serverConfig.settingsPath,
-        '{"addProjectBaseDirectory":"/workspace/retained","providerInstances":{"codex_loaded":{"driver":"codex","displayName":"Retained Codex","config":{}},"hermes_loaded":{"driver":"hermes","config":{"gatewayUrl":"https://hermes.example.test/p/work?profile=engineering;access_token=fixture-value"}}}}',
-      );
-
-      const loaded = yield* serverSettings.getSettings;
-      const hermesConfig = loaded.providerInstances[hermesId]?.config as
-        | { gatewayUrl?: string }
-        | undefined;
-      assert.equal(loaded.addProjectBaseDirectory, "/workspace/retained");
-      assert.equal(loaded.providerInstances[codexId]?.displayName, "Retained Codex");
-      assert.equal(
-        hermesConfig?.gatewayUrl,
-        "https://hermes.example.test/p/work?profile=engineering;access_token=fixture-value",
-      );
-    }).pipe(Effect.provide(makeServerSettingsLayer())),
-  );
-
   it.effect(
     "uses explicit provider instance enabled state over legacy provider enabled state",
     () =>
@@ -554,29 +528,29 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
-  it.effect("stores the Hermes gateway secret outside settings.json", () =>
+  it.effect("stores a Hermes provider API key outside settings.json", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
       const serverConfig = yield* ServerConfig.ServerConfig;
       const fileSystem = yield* FileSystem.FileSystem;
-      const instanceId = ProviderInstanceId.make("hermes_gateway");
+      const instanceId = ProviderInstanceId.make("hermes_acp");
 
       const next = yield* serverSettings.updateSettings({
         providerInstances: {
           [instanceId]: {
             driver: ProviderDriverKind.make("hermes"),
             environment: [
-              { name: "HERMES_GATEWAY_SECRET", value: "hermes-test-secret", sensitive: true },
+              { name: "ANTHROPIC_API_KEY", value: "hermes-test-secret", sensitive: true },
               { name: "HERMES_LOG_LEVEL", value: "debug", sensitive: false },
             ],
-            config: { gatewayUrl: "https://hermes.example.test" },
+            config: { binaryPath: "/opt/hermes/bin/hermes" },
           },
         },
       });
 
       assert.deepEqual(next.providerInstances[instanceId]?.environment, [
         {
-          name: "HERMES_GATEWAY_SECRET",
+          name: "ANTHROPIC_API_KEY",
           value: "hermes-test-secret",
           sensitive: true,
           valueRedacted: true,
@@ -587,9 +561,9 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
       assert.notInclude(raw, "hermes-test-secret");
       // @effect-diagnostics-next-line preferSchemaOverJson:off
-      assert.deepEqual(JSON.parse(raw).providerInstances.hermes_gateway.environment, [
+      assert.deepEqual(JSON.parse(raw).providerInstances.hermes_acp.environment, [
         {
-          name: "HERMES_GATEWAY_SECRET",
+          name: "ANTHROPIC_API_KEY",
           value: "",
           sensitive: true,
           valueRedacted: true,
@@ -601,17 +575,17 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         providerInstances: {
           [instanceId]: {
             driver: ProviderDriverKind.make("hermes"),
-            displayName: "Hermes Gateway",
+            displayName: "Hermes ACP",
             environment: [
               {
-                name: "HERMES_GATEWAY_SECRET",
+                name: "ANTHROPIC_API_KEY",
                 value: "",
                 sensitive: true,
                 valueRedacted: true,
               },
               { name: "HERMES_LOG_LEVEL", value: "debug", sensitive: false },
             ],
-            config: { gatewayUrl: "https://hermes.example.test" },
+            config: { binaryPath: "/opt/hermes/bin/hermes" },
           },
         },
       });
@@ -620,43 +594,6 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         roundTripped.providerInstances[instanceId]?.environment?.[0]?.value,
         "hermes-test-secret",
       );
-    }).pipe(Effect.provide(makeServerSettingsLayer())),
-  );
-
-  it.effect("persists and exposes arbitrary Hermes gateway query parameters", () =>
-    Effect.gen(function* () {
-      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
-      const serverConfig = yield* ServerConfig.ServerConfig;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const instanceId = ProviderInstanceId.make("hermes_query");
-      const gatewayUrl =
-        "https://hermes.example.test/p/work?profile=engineering;access_token=fixture-value";
-      const settings = yield* decodeServerSettings({
-        providerInstances: {
-          [instanceId]: {
-            driver: "hermes",
-            config: { gatewayUrl },
-          },
-        },
-      });
-
-      const clientSettings = ServerSettingsModule.redactServerSettingsForClient(settings);
-      const clientConfig = clientSettings.providerInstances[instanceId]?.config as
-        | { gatewayUrl?: string }
-        | undefined;
-      assert.equal(clientConfig?.gatewayUrl, gatewayUrl);
-
-      const updated = yield* serverSettings.updateSettings({
-        providerInstances: settings.providerInstances,
-      });
-      const updatedConfig = updated.providerInstances[instanceId]?.config as
-        | { gatewayUrl?: string }
-        | undefined;
-      assert.equal(updatedConfig?.gatewayUrl, gatewayUrl);
-
-      const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
-      assert.include(raw, "access_token");
-      assert.include(raw, "fixture-value");
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 });
