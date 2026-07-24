@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly DEFAULT_HERMES_IMAGE="nousresearch/hermes-agent@sha256:24f49688cda7315ad39a9b94ef46347f3747e99863d5e05b5b86ff794baefdb3"
+
+engine="${HERMES_CONTAINER_ENGINE:-docker}"
+image="${HERMES_CONTAINER_IMAGE:-$DEFAULT_HERMES_IMAGE}"
+runtime="${HERMES_CONTAINER_RUNTIME:-}"
+forward_environment="${HERMES_CONTAINER_FORWARD_ENV:-}"
+
+if [[ "$engine" =~ [[:space:]] ]]; then
+  echo "HERMES_CONTAINER_ENGINE must be one executable path, without arguments." >&2
+  exit 64
+fi
+
+if [[ -n "${HERMES_CONTAINER_DATA_DIR:-}" ]]; then
+  data_directory="$HERMES_CONTAINER_DATA_DIR"
+elif [[ -n "${XDG_DATA_HOME:-}" ]]; then
+  data_directory="$XDG_DATA_HOME/t3code/hermes"
+elif [[ -n "${HOME:-}" ]]; then
+  data_directory="$HOME/.local/share/t3code/hermes"
+else
+  echo "Set HERMES_CONTAINER_DATA_DIR when HOME and XDG_DATA_HOME are unavailable." >&2
+  exit 64
+fi
+
+mkdir -p "$data_directory"
+data_directory="$(cd "$data_directory" && pwd -P)"
+working_directory="$(pwd -P)"
+
+docker_args=(
+  run
+  --rm
+  -i
+  --add-host=host.docker.internal:host-gateway
+  --env "HERMES_UID=$(id -u)"
+  --env "HERMES_GID=$(id -g)"
+  --volume "$data_directory:/opt/data"
+  --volume "$working_directory:$working_directory"
+  --workdir "$working_directory"
+)
+
+if [[ -t 0 && -t 1 ]]; then
+  docker_args+=(-t)
+fi
+
+if [[ -n "$runtime" ]]; then
+  docker_args+=(--runtime "$runtime")
+fi
+
+# Linked Git worktrees keep their administrative files outside the checkout.
+# Mount that directory at the identical path so Hermes tools see a functional
+# repository without granting the container access to a broader parent tree.
+if command -v git >/dev/null 2>&1; then
+  git_common_directory="$(
+    git -C "$working_directory" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true
+  )"
+  if [[ -n "$git_common_directory" && -d "$git_common_directory" ]]; then
+    git_common_directory="$(cd "$git_common_directory" && pwd -P)"
+    case "$git_common_directory/" in
+      "$working_directory/"*) ;;
+      *) docker_args+=(--volume "$git_common_directory:$git_common_directory") ;;
+    esac
+  fi
+fi
+
+if [[ -n "$forward_environment" ]]; then
+  normalized_forward_environment="${forward_environment//,/ }"
+  read -r -a environment_names <<<"$normalized_forward_environment"
+  for name in "${environment_names[@]}"; do
+    if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "Invalid variable name in HERMES_CONTAINER_FORWARD_ENV: $name" >&2
+      exit 64
+    fi
+    if [[ -v "$name" ]]; then
+      docker_args+=(--env "$name")
+    fi
+  done
+fi
+
+if [[ "${1:-}" == "acp" ]]; then
+  # The official image's s6 bootstrap currently writes informational messages
+  # to stdout before Hermes starts. ACP reserves stdout for JSON-RPC, so keep
+  # only protocol frames on that stream. Stderr remains untouched for logs.
+  exec > >(
+    while IFS= read -r line; do
+      case "$line" in
+        \{*) printf '%s\n' "$line" ;;
+      esac
+    done
+  )
+fi
+
+exec "$engine" "${docker_args[@]}" "$image" "$@"
