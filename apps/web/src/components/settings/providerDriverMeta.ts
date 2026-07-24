@@ -88,13 +88,6 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     icon: HermesIcon,
     badgeLabel: "Early Access",
     settingsSchema: HermesSettings,
-    secretEnvironmentVariable: {
-      name: "HERMES_GATEWAY_SECRET",
-      label: "Shared secret",
-      description:
-        "Stored in the server secret store and never returned to the browser after saving.",
-      placeholder: "Hermes API server key",
-    },
   },
 ];
 

@@ -1,613 +1,855 @@
 import {
   ApprovalRequestId,
   EventId,
+  type HermesSettings,
+  type ProviderApprovalDecision,
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderRuntimeEvent,
   type ProviderSession,
-  RuntimeItemId,
-  ThreadId,
+  RuntimeRequestId,
+  type ThreadId,
   TurnId,
-  type ProviderSendTurnInput,
-  type ProviderSessionStartInput,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
-import * as Queue from "effect/Queue";
+import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as PubSub from "effect/PubSub";
+import * as Result from "effect/Result";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as SynchronizedRef from "effect/SynchronizedRef";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as EffectAcpErrors from "effect-acp/errors";
+import type * as EffectAcpSchema from "effect-acp/schema";
 
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
+  ProviderAdapterProcessError,
   ProviderAdapterRequestError,
-  ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
+  type ProviderAdapterError,
 } from "../Errors.ts";
-import type { ProviderAdapterShape, ProviderThreadSnapshot } from "../Services/ProviderAdapter.ts";
-import type {
-  HermesGatewayClient,
-  HermesMessageResource,
-  HermesSseEvent,
-} from "../hermes/HermesGatewayClient.ts";
+import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
+import {
+  makeAcpAssistantItemEvent,
+  makeAcpContentDeltaEvent,
+  makeAcpPlanUpdatedEvent,
+  makeAcpRequestOpenedEvent,
+  makeAcpRequestResolvedEvent,
+  makeAcpToolCallEvent,
+} from "../acp/AcpCoreRuntimeEvents.ts";
+import {
+  applyHermesAcpSelection,
+  applyHermesRuntimeMode,
+  currentHermesModelIdFromSessionSetup,
+  HERMES_DEFAULT_MODEL,
+  makeHermesAcpRuntime,
+} from "../acp/HermesAcpSupport.ts";
+import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
+import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
+import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
+import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
 const PROVIDER = ProviderDriverKind.make("hermes");
+const HERMES_RESUME_VERSION = 1 as const;
 
-interface HermesActiveTurn {
-  readonly turnId: TurnId;
-  readonly assistantItemId: RuntimeItemId;
-  readonly emittedText: { value: string };
-  readonly toolItemIds: Map<string, RuntimeItemId[]>;
-  fiber?: Fiber.Fiber<void, never>;
-  completed: boolean;
+export interface HermesAdapterOptions {
+  readonly environment?: NodeJS.ProcessEnv;
+  readonly nativeEventLogPath?: string;
+  readonly nativeEventLogger?: EventNdjsonLogger;
+  readonly instanceId?: ProviderInstanceId;
+}
+
+interface PendingApproval {
+  readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
 }
 
 interface HermesSessionContext {
+  readonly threadId: ThreadId;
+  readonly acpSessionId: string;
   session: ProviderSession;
-  readonly hermesSessionId: string;
-  readonly sessionScope: Scope.Closeable;
-  activeTurn?: HermesActiveTurn;
-  closed: boolean;
+  readonly scope: Scope.Closeable;
+  readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
+  notificationFiber: Fiber.Fiber<void, never> | undefined;
+  readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
+  turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  activeTurnId: TurnId | undefined;
+  currentModelId: string | undefined;
+  stopped: boolean;
 }
 
-export interface HermesAdapterOptions {
-  readonly instanceId: ProviderInstanceId;
-  readonly client?: HermesGatewayClient;
-  readonly enabled: boolean;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function resumeSessionId(cursor: unknown): string | undefined {
-  if (typeof cursor === "string" && cursor.trim()) return cursor.trim();
-  if (cursor && typeof cursor === "object" && "sessionId" in cursor) {
-    const value = (cursor as { readonly sessionId?: unknown }).sessionId;
-    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+function parseHermesResume(raw: unknown): { sessionId: string } | undefined {
+  if (!isRecord(raw)) return undefined;
+  if (raw.schemaVersion !== HERMES_RESUME_VERSION) return undefined;
+  if (typeof raw.sessionId !== "string" || !raw.sessionId.trim()) return undefined;
+  return { sessionId: raw.sessionId.trim() };
+}
+
+function selectPermissionOptionId(
+  request: EffectAcpSchema.RequestPermissionRequest,
+  decision: Exclude<ProviderApprovalDecision, "cancel">,
+): string | undefined {
+  const kind =
+    decision === "acceptForSession"
+      ? "allow_always"
+      : decision === "accept"
+        ? "allow_once"
+        : "reject_once";
+  return request.options.find((option) => option.kind === kind)?.optionId.trim() || undefined;
+}
+
+function selectAutoApprovedPermissionOption(
+  request: EffectAcpSchema.RequestPermissionRequest,
+): string | undefined {
+  return (
+    selectPermissionOptionId(request, "acceptForSession") ??
+    selectPermissionOptionId(request, "accept")
+  );
+}
+
+function appendPromptResultToTurn(
+  context: HermesSessionContext,
+  turnId: TurnId,
+  prompt: ReadonlyArray<EffectAcpSchema.ContentBlock>,
+  result: EffectAcpSchema.PromptResponse,
+): void {
+  const existing = context.turns.find((turn) => turn.id === turnId);
+  if (existing) {
+    existing.items.push({ prompt, result });
+    return;
   }
-  return undefined;
+  context.turns.push({ id: turnId, items: [{ prompt, result }] });
 }
 
-function stringField(record: Readonly<Record<string, unknown>>, key: string): string | undefined {
-  const value = record[key];
-  return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-function eventMessageId(event: HermesSseEvent): string | undefined {
-  const direct = stringField(event.data, "message_id");
-  if (direct) return direct;
-  const message = event.data.message;
-  if (!message || typeof message !== "object" || Array.isArray(message)) return undefined;
-  return stringField(message as Readonly<Record<string, unknown>>, "id");
-}
-
-function toolItemType(name: string) {
-  const normalized = name.toLowerCase();
-  if (
-    normalized.includes("terminal") ||
-    normalized.includes("shell") ||
-    normalized.includes("command")
-  ) {
-    return "command_execution" as const;
-  }
-  if (normalized.includes("write") || normalized.includes("edit") || normalized.includes("patch")) {
-    return "file_change" as const;
-  }
-  if (normalized.includes("web") || normalized.includes("search")) return "web_search" as const;
-  return "dynamic_tool_call" as const;
-}
-
-function messageText(message: HermesMessageResource): string | undefined {
-  if (typeof message.content === "string") return message.content;
-  if (!Array.isArray(message.content)) return undefined;
-  const text = message.content
-    .flatMap((part) => {
-      if (!part || typeof part !== "object" || !("text" in part)) return [];
-      return typeof part.text === "string" ? [part.text] : [];
-    })
-    .join("");
-  return text || undefined;
-}
-
-export const makeHermesAdapter = Effect.fn("makeHermesAdapter")(function* (
-  options: HermesAdapterOptions,
-): Effect.fn.Return<
-  ProviderAdapterShape<
-    | ProviderAdapterRequestError
-    | ProviderAdapterSessionClosedError
-    | ProviderAdapterSessionNotFoundError
-    | ProviderAdapterValidationError
-  >,
+export function makeHermesAdapter(
+  hermesSettings: HermesSettings,
+  options?: HermesAdapterOptions,
+): Effect.Effect<
+  ProviderAdapterShape<ProviderAdapterError>,
   never,
-  Crypto.Crypto | Scope.Scope
+  | ChildProcessSpawner.ChildProcessSpawner
+  | Crypto.Crypto
+  | FileSystem.FileSystem
+  | Path.Path
+  | ServerConfig
+  | Scope.Scope
 > {
-  const crypto = yield* Crypto.Crypto;
-  const adapterScope = yield* Effect.scope;
-  const runtimeContext = yield* Effect.context<never>();
-  const runPromise = Effect.runPromiseWith(runtimeContext);
-  const events = yield* Queue.unbounded<ProviderRuntimeEvent>();
-  const sessions = new Map<ThreadId, HermesSessionContext>();
+  return Effect.gen(function* () {
+    const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("hermes");
+    const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const crypto = yield* Crypto.Crypto;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const serverConfig = yield* ServerConfig;
+    const nativeEventLogger =
+      options?.nativeEventLogger ??
+      (options?.nativeEventLogPath
+        ? yield* makeEventNdjsonLogger(options.nativeEventLogPath, { stream: "native" })
+        : undefined);
+    const managedNativeEventLogger =
+      options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
+    const makeAcpNativeLoggers = yield* makeAcpNativeLoggerFactory();
 
-  const uuid = crypto.randomUUIDv4.pipe(Effect.orDie);
-  const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-  const emit = (event: ProviderRuntimeEvent) =>
-    Queue.offer(events, event).pipe(Effect.orDie, Effect.asVoid);
-  const eventBase = Effect.fn("HermesAdapter.eventBase")(function* (input: {
-    readonly threadId: ThreadId;
-    readonly turnId?: TurnId;
-    readonly itemId?: RuntimeItemId;
-  }) {
-    return {
-      eventId: EventId.make(yield* uuid),
-      provider: PROVIDER,
-      providerInstanceId: options.instanceId,
-      threadId: input.threadId,
-      createdAt: yield* nowIso,
-      ...(input.turnId ? { turnId: input.turnId } : {}),
-      ...(input.itemId ? { itemId: input.itemId } : {}),
-    };
-  });
-
-  const request = <T>(method: string, run: (signal: AbortSignal) => Promise<T>) =>
-    Effect.tryPromise({
-      try: run,
-      catch: (cause) =>
-        new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method,
-          detail: `Hermes gateway request '${method}' failed.`,
-          cause,
-        }),
-    });
-
-  const requireClient = Effect.fn("HermesAdapter.requireClient")(function* () {
-    if (!options.enabled) {
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "connect",
-        issue: "Hermes is disabled for this provider instance.",
-      });
-    }
-    if (!options.client) {
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "connect",
-        issue: "Configure a valid gateway URL and shared secret before starting a session.",
-      });
-    }
-    return options.client;
-  });
-
-  const getContext = Effect.fn("HermesAdapter.getContext")(function* (threadId: ThreadId) {
-    const context = sessions.get(threadId);
-    if (!context) {
-      return yield* new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
-    }
-    if (context.closed) {
-      return yield* new ProviderAdapterSessionClosedError({ provider: PROVIDER, threadId });
-    }
-    return context;
-  });
-
-  const updateReady = Effect.fn("HermesAdapter.updateReady")(function* (
-    context: HermesSessionContext,
-    lastError?: string,
-  ) {
-    const updatedAt = yield* nowIso;
-    const { activeTurnId: _active, lastError: _lastError, ...rest } = context.session;
-    context.session = {
-      ...rest,
-      status: lastError ? "error" : "ready",
-      updatedAt,
-      ...(lastError ? { lastError } : {}),
-    };
-    delete context.activeTurn;
-  });
-
-  const handleSseEvent = Effect.fn("HermesAdapter.handleSseEvent")(function* (
-    context: HermesSessionContext,
-    active: HermesActiveTurn,
-    event: HermesSseEvent,
-  ) {
-    const messageId = eventMessageId(event);
-    const itemId = messageId ? RuntimeItemId.make(messageId) : active.assistantItemId;
-    switch (event.event) {
-      case "message.started":
-        yield* emit({
-          ...(yield* eventBase({
-            threadId: context.session.threadId,
-            turnId: active.turnId,
-            itemId,
-          })),
-          type: "item.started",
-          payload: { itemType: "assistant_message", status: "inProgress" },
-        });
-        return;
-      case "assistant.delta": {
-        const delta = typeof event.data.delta === "string" ? event.data.delta : "";
-        if (!delta) return;
-        active.emittedText.value += delta;
-        yield* emit({
-          ...(yield* eventBase({
-            threadId: context.session.threadId,
-            turnId: active.turnId,
-            itemId,
-          })),
-          type: "content.delta",
-          payload: { streamKind: "assistant_text", delta },
-        });
-        return;
-      }
-      case "assistant.completed": {
-        const content = typeof event.data.content === "string" ? event.data.content : "";
-        if (content && !active.emittedText.value) {
-          active.emittedText.value = content;
-          yield* emit({
-            ...(yield* eventBase({
-              threadId: context.session.threadId,
-              turnId: active.turnId,
-              itemId,
-            })),
-            type: "content.delta",
-            payload: { streamKind: "assistant_text", delta: content },
-          });
-        }
-        yield* emit({
-          ...(yield* eventBase({
-            threadId: context.session.threadId,
-            turnId: active.turnId,
-            itemId,
-          })),
-          type: "item.completed",
-          payload: { itemType: "assistant_message", status: "completed" },
-        });
-        return;
-      }
-      case "tool.progress": {
-        const toolName = stringField(event.data, "tool_name");
-        const summary = stringField(event.data, "delta") ?? stringField(event.data, "preview");
-        yield* emit({
-          ...(yield* eventBase({ threadId: context.session.threadId, turnId: active.turnId })),
-          type: "tool.progress",
-          payload: { ...(toolName ? { toolName } : {}), ...(summary ? { summary } : {}) },
-        });
-        return;
-      }
-      case "tool.started": {
-        const toolName = stringField(event.data, "tool_name") ?? "Hermes tool";
-        const toolId = RuntimeItemId.make(`hermes-tool-${yield* uuid}`);
-        const ids = active.toolItemIds.get(toolName) ?? [];
-        ids.push(toolId);
-        active.toolItemIds.set(toolName, ids);
-        yield* emit({
-          ...(yield* eventBase({
-            threadId: context.session.threadId,
-            turnId: active.turnId,
-            itemId: toolId,
-          })),
-          type: "item.started",
-          payload: {
-            itemType: toolItemType(toolName),
-            status: "inProgress",
-            title: toolName,
-            ...(event.data.preview ? { detail: String(event.data.preview) } : {}),
-          },
-        });
-        return;
-      }
-      case "tool.completed":
-      case "tool.failed": {
-        const toolName = stringField(event.data, "tool_name") ?? "Hermes tool";
-        const ids = active.toolItemIds.get(toolName) ?? [];
-        const toolId = ids.shift();
-        if (!toolId) return;
-        yield* emit({
-          ...(yield* eventBase({
-            threadId: context.session.threadId,
-            turnId: active.turnId,
-            itemId: toolId,
-          })),
-          type: "item.completed",
-          payload: {
-            itemType: toolItemType(toolName),
-            status: event.event === "tool.failed" ? "failed" : "completed",
-            title: toolName,
-          },
-        });
-        return;
-      }
-      case "run.completed":
-        active.completed = true;
-        yield* emit({
-          ...(yield* eventBase({ threadId: context.session.threadId, turnId: active.turnId })),
-          type: "turn.completed",
-          payload: { state: "completed", ...(event.data.usage ? { usage: event.data.usage } : {}) },
-        });
-        return;
-      case "error":
-        throw new Error("Hermes reported a run error.");
-      default:
-        return;
-    }
-  });
-
-  const runTurn = Effect.fn("HermesAdapter.runTurn")(function* (
-    context: HermesSessionContext,
-    active: HermesActiveTurn,
-    input: ProviderSendTurnInput,
-  ) {
-    return yield* requireClient().pipe(
-      Effect.flatMap((client) =>
-        request("session-chat-stream", (signal) =>
-          client.streamSessionChat(
-            context.hermesSessionId,
-            { message: input.input ?? "" },
-            (event) => runPromise(handleSseEvent(context, active, event)),
-            signal,
-          ),
-        ),
+    const sessions = new Map<ThreadId, HermesSessionContext>();
+    const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
+    const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+    const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+    const randomUUIDv4 = crypto.randomUUIDv4.pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "crypto/randomUUIDv4",
+            detail: "Failed to generate Hermes runtime identifier.",
+            cause,
+          }),
       ),
-      Effect.flatMap(() =>
-        active.completed
-          ? updateReady(context)
-          : Effect.fail(
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "session-chat-stream",
-                detail: "Hermes ended the event stream before completing the run.",
+    );
+    const makeEventStamp = () =>
+      Effect.all({
+        eventId: Effect.map(randomUUIDv4, EventId.make),
+        createdAt: nowIso,
+      });
+    const offerRuntimeEvent = (event: ProviderRuntimeEvent) =>
+      PubSub.publish(runtimeEventPubSub, event).pipe(Effect.asVoid);
+    const mapAcpCallbackFailure = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      effect.pipe(
+        Effect.mapError(
+          (cause) =>
+            new EffectAcpErrors.AcpTransportError({
+              detail: "Failed to process Hermes ACP callback.",
+              cause,
+            }),
+        ),
+      );
+
+    const getThreadSemaphore = (threadId: string) =>
+      SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
+        const existing = Option.fromNullishOr(current.get(threadId));
+        return Option.match(existing, {
+          onNone: () =>
+            Semaphore.make(1).pipe(
+              Effect.map((semaphore) => {
+                const next = new Map(current);
+                next.set(threadId, semaphore);
+                return [semaphore, next] as const;
               }),
             ),
-      ),
-      Effect.catch((error) =>
+          onSome: (semaphore) => Effect.succeed([semaphore, current] as const),
+        });
+      });
+    const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
+      Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
+
+    const requireSession = (
+      threadId: ThreadId,
+    ): Effect.Effect<HermesSessionContext, ProviderAdapterSessionNotFoundError> => {
+      const context = sessions.get(threadId);
+      return context && !context.stopped
+        ? Effect.succeed(context)
+        : Effect.fail(new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId }));
+    };
+
+    const settlePendingApprovals = (context: HermesSessionContext) =>
+      Effect.forEach(
+        context.pendingApprovals.values(),
+        (pending) => Deferred.succeed(pending.decision, "cancel").pipe(Effect.ignore),
+        { discard: true },
+      );
+
+    const stopSessionInternal = (context: HermesSessionContext) =>
+      Effect.gen(function* () {
+        if (context.stopped) return;
+        context.stopped = true;
+        yield* settlePendingApprovals(context);
+        if (context.notificationFiber) {
+          yield* Fiber.interrupt(context.notificationFiber);
+        }
+        yield* Scope.close(context.scope, Exit.void).pipe(Effect.ignore);
+        sessions.delete(context.threadId);
+        yield* offerRuntimeEvent({
+          type: "session.exited",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId: context.threadId,
+          payload: { exitKind: "graceful" },
+        });
+      });
+
+    const startSession: ProviderAdapterShape<ProviderAdapterError>["startSession"] = (input) =>
+      withThreadLock(
+        input.threadId,
         Effect.gen(function* () {
-          if (!active.completed) {
-            yield* emit({
-              ...(yield* eventBase({
-                threadId: context.session.threadId,
-                turnId: active.turnId,
-              })),
-              type: "runtime.error",
-              payload: { message: "Hermes turn failed.", class: "provider_error" },
-            });
-            yield* emit({
-              ...(yield* eventBase({
-                threadId: context.session.threadId,
-                turnId: active.turnId,
-              })),
-              type: "turn.completed",
-              payload: { state: "failed", errorMessage: "Hermes turn failed." },
+          if (input.provider !== undefined && input.provider !== PROVIDER) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue: `Expected provider '${PROVIDER}' but received '${input.provider}'.`,
             });
           }
-          yield* updateReady(context, "Hermes turn failed.");
-          yield* Effect.logWarning("Hermes turn failed", { errorTag: error._tag });
-        }),
-      ),
-      Effect.onInterrupt(() =>
-        Effect.gen(function* () {
-          if (!active.completed) {
-            yield* emit({
-              ...(yield* eventBase({
-                threadId: context.session.threadId,
-                turnId: active.turnId,
-              })),
-              type: "turn.aborted",
-              payload: { reason: "Turn interrupted." },
-            });
-            yield* emit({
-              ...(yield* eventBase({
-                threadId: context.session.threadId,
-                turnId: active.turnId,
-              })),
-              type: "turn.completed",
-              payload: { state: "interrupted", stopReason: "interrupted" },
+          if (!input.cwd?.trim()) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue: "cwd is required and must be non-empty.",
             });
           }
-          yield* updateReady(context);
-        }),
-      ),
-    );
-  });
 
-  const startSession = Effect.fn("HermesAdapter.startSession")(function* (
-    input: ProviderSessionStartInput,
-  ) {
-    if (input.runtimeMode !== "full-access") {
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "startSession",
-        issue:
-          "Hermes does not expose T3 runtime-mode enforcement; select Full access or enforce restrictions at the gateway.",
-      });
-    }
-    if (sessions.has(input.threadId)) {
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "startSession",
-        issue: `A Hermes session already exists for thread ${input.threadId}.`,
-      });
-    }
-    const client = yield* requireClient();
-    const resumedId = resumeSessionId(input.resumeCursor);
-    const createInput = input.modelSelection?.model ? { model: input.modelSelection.model } : {};
-    const remoteSession = resumedId
-      ? yield* request("get-session", (signal) => client.getSession(resumedId, signal))
-      : yield* request("create-session", (signal) => client.createSession(createInput, signal));
-    const sessionScope = yield* Scope.make();
-    yield* Scope.addFinalizer(
-      adapterScope,
-      Scope.close(sessionScope, Exit.void).pipe(Effect.ignore),
-    );
-    const timestamp = yield* nowIso;
-    const session: ProviderSession = {
-      provider: PROVIDER,
-      providerInstanceId: options.instanceId,
-      status: "ready",
-      runtimeMode: input.runtimeMode,
-      ...(input.cwd ? { cwd: input.cwd } : {}),
-      ...(remoteSession.model
-        ? { model: remoteSession.model }
-        : input.modelSelection?.model
-          ? { model: input.modelSelection.model }
-          : {}),
-      threadId: input.threadId,
-      resumeCursor: { sessionId: remoteSession.id },
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    const context: HermesSessionContext = {
-      session,
-      hermesSessionId: remoteSession.id,
-      sessionScope,
-      closed: false,
-    };
-    sessions.set(input.threadId, context);
-    yield* emit({
-      ...(yield* eventBase({ threadId: input.threadId })),
-      type: "session.started",
-      payload: { resume: { sessionId: remoteSession.id } },
-    });
-    yield* emit({
-      ...(yield* eventBase({ threadId: input.threadId })),
-      type: "thread.started",
-      payload: { providerThreadId: remoteSession.id },
-    });
-    return session;
-  });
+          const existing = sessions.get(input.threadId);
+          if (existing && !existing.stopped) {
+            yield* stopSessionInternal(existing);
+          }
 
-  const sendTurn = Effect.fn("HermesAdapter.sendTurn")(function* (input: ProviderSendTurnInput) {
-    const context = yield* getContext(input.threadId);
-    if (context.activeTurn) {
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "sendTurn",
-        issue: "A Hermes turn is already running for this thread.",
+          const cwd = path.resolve(input.cwd.trim());
+          const modelSelection =
+            input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
+          const pendingApprovals = new Map<ApprovalRequestId, PendingApproval>();
+          const sessionScope = yield* Scope.make("sequential");
+          let sessionScopeTransferred = false;
+          yield* Effect.addFinalizer(() =>
+            sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
+          );
+
+          const resumeSessionId = parseHermesResume(input.resumeCursor)?.sessionId;
+          const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+          const acp = yield* makeHermesAcpRuntime({
+            hermesSettings,
+            ...(options?.environment ? { environment: options.environment } : {}),
+            childProcessSpawner,
+            cwd,
+            ...(resumeSessionId ? { resumeSessionId } : {}),
+            clientInfo: { name: "t3-code", version: "0.0.0" },
+            ...(mcpSession
+              ? {
+                  mcpServers: [
+                    {
+                      type: "http" as const,
+                      name: "t3-code",
+                      url: mcpSession.endpoint,
+                      headers: [
+                        {
+                          name: "Authorization",
+                          value: mcpSession.authorizationHeader,
+                        },
+                      ],
+                    },
+                  ],
+                }
+              : {}),
+            ...makeAcpNativeLoggers({
+              nativeEventLogger,
+              provider: PROVIDER,
+              threadId: input.threadId,
+            }),
+          }).pipe(
+            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(Scope.Scope, sessionScope),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  detail: cause.message,
+                  cause,
+                }),
+            ),
+          );
+
+          let context: HermesSessionContext | undefined;
+          yield* acp.handleRequestPermission((params) =>
+            mapAcpCallbackFailure(
+              Effect.gen(function* () {
+                if (input.runtimeMode === "full-access") {
+                  const optionId = selectAutoApprovedPermissionOption(params);
+                  if (optionId) {
+                    return {
+                      outcome: {
+                        outcome: "selected" as const,
+                        optionId,
+                      },
+                    };
+                  }
+                }
+
+                const permissionRequest = parsePermissionRequest(params);
+                const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
+                const runtimeRequestId = RuntimeRequestId.make(requestId);
+                const decision = yield* Deferred.make<ProviderApprovalDecision>();
+                pendingApprovals.set(requestId, { decision });
+                yield* offerRuntimeEvent(
+                  makeAcpRequestOpenedEvent({
+                    stamp: yield* makeEventStamp(),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId: context?.activeTurnId,
+                    requestId: runtimeRequestId,
+                    permissionRequest,
+                    detail: permissionRequest.detail ?? "Hermes requests permission.",
+                    args: params,
+                    source: "acp.jsonrpc",
+                    method: "session/request_permission",
+                    rawPayload: params,
+                  }),
+                );
+                const resolved = yield* Deferred.await(decision);
+                pendingApprovals.delete(requestId);
+                yield* offerRuntimeEvent(
+                  makeAcpRequestResolvedEvent({
+                    stamp: yield* makeEventStamp(),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId: context?.activeTurnId,
+                    requestId: runtimeRequestId,
+                    permissionRequest,
+                    decision: resolved,
+                  }),
+                );
+                const optionId =
+                  resolved === "cancel" ? undefined : selectPermissionOptionId(params, resolved);
+                return {
+                  outcome: optionId
+                    ? {
+                        outcome: "selected" as const,
+                        optionId,
+                      }
+                    : ({ outcome: "cancelled" } as const),
+                };
+              }),
+            ),
+          );
+
+          const started = yield* acp
+            .start()
+            .pipe(
+              Effect.mapError((error) =>
+                mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
+              ),
+            );
+          const currentModelId = yield* applyHermesAcpSelection({
+            runtime: acp,
+            currentModelId: currentHermesModelIdFromSessionSetup(started.sessionSetupResult),
+            selection: modelSelection,
+            mapError: ({ cause, method }) =>
+              mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
+          });
+          yield* applyHermesRuntimeMode({
+            runtime: acp,
+            runtimeMode: input.runtimeMode,
+            mapError: (cause) =>
+              mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_mode", cause),
+          });
+
+          const now = yield* nowIso;
+          const session: ProviderSession = {
+            provider: PROVIDER,
+            providerInstanceId: boundInstanceId,
+            status: "ready",
+            runtimeMode: input.runtimeMode,
+            cwd,
+            model: currentModelId ?? HERMES_DEFAULT_MODEL,
+            threadId: input.threadId,
+            resumeCursor: {
+              schemaVersion: HERMES_RESUME_VERSION,
+              sessionId: started.sessionId,
+            },
+            createdAt: now,
+            updatedAt: now,
+          };
+          context = {
+            threadId: input.threadId,
+            acpSessionId: started.sessionId,
+            session,
+            scope: sessionScope,
+            acp,
+            notificationFiber: undefined,
+            pendingApprovals,
+            turns: [],
+            activeTurnId: undefined,
+            currentModelId,
+            stopped: false,
+          };
+
+          const notificationFiber = yield* Stream.runDrain(
+            Stream.mapEffect(acp.getEvents(), (event) =>
+              Effect.gen(function* () {
+                if (event._tag === "EventStreamBarrier") {
+                  yield* Deferred.succeed(event.acknowledge, undefined);
+                  return;
+                }
+                if (event._tag === "ModeChanged") {
+                  return;
+                }
+                const liveContext = context;
+                const turnId = liveContext?.activeTurnId;
+                if (!liveContext || !turnId || liveContext.stopped) {
+                  return;
+                }
+                const stamp = yield* makeEventStamp();
+                switch (event._tag) {
+                  case "AssistantItemStarted":
+                    yield* offerRuntimeEvent(
+                      makeAcpAssistantItemEvent({
+                        stamp,
+                        provider: PROVIDER,
+                        threadId: liveContext.threadId,
+                        turnId,
+                        itemId: event.itemId,
+                        lifecycle: "item.started",
+                      }),
+                    );
+                    return;
+                  case "AssistantItemCompleted":
+                    yield* offerRuntimeEvent(
+                      makeAcpAssistantItemEvent({
+                        stamp,
+                        provider: PROVIDER,
+                        threadId: liveContext.threadId,
+                        turnId,
+                        itemId: event.itemId,
+                        lifecycle: "item.completed",
+                      }),
+                    );
+                    return;
+                  case "ContentDelta":
+                    yield* offerRuntimeEvent(
+                      makeAcpContentDeltaEvent({
+                        stamp,
+                        provider: PROVIDER,
+                        threadId: liveContext.threadId,
+                        turnId,
+                        ...(event.itemId ? { itemId: event.itemId } : {}),
+                        text: event.text,
+                        rawPayload: event.rawPayload,
+                      }),
+                    );
+                    return;
+                  case "PlanUpdated":
+                    yield* offerRuntimeEvent(
+                      makeAcpPlanUpdatedEvent({
+                        stamp,
+                        provider: PROVIDER,
+                        threadId: liveContext.threadId,
+                        turnId,
+                        payload: event.payload,
+                        source: "acp.jsonrpc",
+                        method: "session/update",
+                        rawPayload: event.rawPayload,
+                      }),
+                    );
+                    return;
+                  case "ToolCallUpdated":
+                    yield* offerRuntimeEvent(
+                      makeAcpToolCallEvent({
+                        stamp,
+                        provider: PROVIDER,
+                        threadId: liveContext.threadId,
+                        turnId,
+                        toolCall: event.toolCall,
+                        rawPayload: event.rawPayload,
+                      }),
+                    );
+                    return;
+                }
+              }),
+            ),
+          ).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logError("Failed to process Hermes ACP notification.", { cause }),
+            ),
+            Effect.forkChild,
+          );
+          context.notificationFiber = notificationFiber;
+          sessions.set(input.threadId, context);
+          sessionScopeTransferred = true;
+
+          yield* offerRuntimeEvent({
+            type: "session.started",
+            ...(yield* makeEventStamp()),
+            provider: PROVIDER,
+            threadId: input.threadId,
+            payload: { resume: started.initializeResult },
+          });
+          yield* offerRuntimeEvent({
+            type: "session.state.changed",
+            ...(yield* makeEventStamp()),
+            provider: PROVIDER,
+            threadId: input.threadId,
+            payload: { state: "ready", reason: "Hermes ACP session ready" },
+          });
+          yield* offerRuntimeEvent({
+            type: "thread.started",
+            ...(yield* makeEventStamp()),
+            provider: PROVIDER,
+            threadId: input.threadId,
+            payload: { providerThreadId: started.sessionId },
+          });
+          return session;
+        }).pipe(Effect.scoped),
+      );
+
+    const sendTurn: ProviderAdapterShape<ProviderAdapterError>["sendTurn"] = (input) =>
+      Effect.gen(function* () {
+        const prepared = yield* withThreadLock(
+          input.threadId,
+          Effect.gen(function* () {
+            const context = yield* requireSession(input.threadId);
+            if (context.activeTurnId) {
+              return yield* new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "sendTurn",
+                issue: "A Hermes turn is already running for this thread.",
+              });
+            }
+
+            const modelSelection =
+              input.modelSelection?.instanceId === boundInstanceId
+                ? input.modelSelection
+                : undefined;
+            const currentModelId = yield* applyHermesAcpSelection({
+              runtime: context.acp,
+              currentModelId: context.currentModelId,
+              selection: modelSelection,
+              mapError: ({ cause, method }) =>
+                mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
+            });
+            const text = input.input?.trim();
+            const imageParts = yield* Effect.forEach(input.attachments ?? [], (attachment) =>
+              Effect.gen(function* () {
+                const attachmentPath = resolveAttachmentPath({
+                  attachmentsDir: serverConfig.attachmentsDir,
+                  attachment,
+                });
+                if (!attachmentPath) {
+                  return yield* new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session/prompt",
+                    detail: `Invalid attachment id '${attachment.id}'.`,
+                  });
+                }
+                const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapterRequestError({
+                        provider: PROVIDER,
+                        method: "session/prompt",
+                        detail: cause.message,
+                        cause,
+                      }),
+                  ),
+                );
+                return {
+                  type: "image",
+                  data: Buffer.from(bytes).toString("base64"),
+                  mimeType: attachment.mimeType,
+                } satisfies EffectAcpSchema.ContentBlock;
+              }),
+            );
+            const prompt: Array<EffectAcpSchema.ContentBlock> = [
+              ...(text ? [{ type: "text" as const, text }] : []),
+              ...imageParts,
+            ];
+            if (prompt.length === 0) {
+              return yield* new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "sendTurn",
+                issue: "Turn requires non-empty text or attachments.",
+              });
+            }
+
+            const turnId = TurnId.make(yield* randomUUIDv4);
+            const model = currentModelId ?? context.session.model ?? HERMES_DEFAULT_MODEL;
+            context.activeTurnId = turnId;
+            context.currentModelId = currentModelId;
+            context.session = {
+              ...context.session,
+              status: "running",
+              activeTurnId: turnId,
+              model,
+              updatedAt: yield* nowIso,
+            };
+            yield* offerRuntimeEvent({
+              type: "turn.started",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId: input.threadId,
+              turnId,
+              payload: { model },
+            });
+            return {
+              acp: context.acp,
+              acpSessionId: context.acpSessionId,
+              model,
+              prompt,
+              turnId,
+            };
+          }),
+        );
+
+        const promptResult = yield* prepared.acp.prompt({ prompt: prepared.prompt }).pipe(
+          Effect.mapError((error) =>
+            mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+          ),
+          Effect.result,
+        );
+        yield* prepared.acp.drainEvents;
+
+        return yield* withThreadLock(
+          input.threadId,
+          Effect.gen(function* () {
+            const context = yield* requireSession(input.threadId);
+            if (
+              context.acpSessionId !== prepared.acpSessionId ||
+              context.activeTurnId !== prepared.turnId
+            ) {
+              return {
+                threadId: input.threadId,
+                turnId: prepared.turnId,
+                resumeCursor: context.session.resumeCursor,
+              };
+            }
+
+            const completedAt = yield* nowIso;
+            const { activeTurnId: _activeTurnId, ...readySession } = context.session;
+            context.activeTurnId = undefined;
+            context.session = {
+              ...readySession,
+              status: "ready",
+              model: prepared.model,
+              updatedAt: completedAt,
+            };
+
+            if (Result.isFailure(promptResult)) {
+              yield* offerRuntimeEvent({
+                type: "turn.completed",
+                ...(yield* makeEventStamp()),
+                provider: PROVIDER,
+                threadId: input.threadId,
+                turnId: prepared.turnId,
+                payload: {
+                  state: "failed",
+                  errorMessage: promptResult.failure.message,
+                },
+              });
+              return yield* promptResult.failure;
+            }
+
+            appendPromptResultToTurn(
+              context,
+              prepared.turnId,
+              prepared.prompt,
+              promptResult.success,
+            );
+            yield* offerRuntimeEvent({
+              type: "turn.completed",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId: input.threadId,
+              turnId: prepared.turnId,
+              payload: {
+                state: promptResult.success.stopReason === "cancelled" ? "cancelled" : "completed",
+                stopReason: promptResult.success.stopReason,
+              },
+            });
+            return {
+              threadId: input.threadId,
+              turnId: prepared.turnId,
+              resumeCursor: context.session.resumeCursor,
+            };
+          }),
+        );
       });
-    }
-    if (!input.input?.trim()) {
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "sendTurn",
-        issue: "Hermes currently requires a text message.",
-      });
-    }
-    if (input.attachments && input.attachments.length > 0) {
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "sendTurn",
-        issue: "Hermes attachments are not supported in this release.",
-      });
-    }
-    const turnId = TurnId.make(yield* uuid);
-    const assistantItemId = RuntimeItemId.make(`hermes-message-${yield* uuid}`);
-    const active: HermesActiveTurn = {
+
+    const interruptTurn: ProviderAdapterShape<ProviderAdapterError>["interruptTurn"] = (
+      threadId,
       turnId,
-      assistantItemId,
-      emittedText: { value: "" },
-      toolItemIds: new Map(),
-      completed: false,
-    };
-    context.activeTurn = active;
-    context.session = {
-      ...context.session,
-      status: "running",
-      activeTurnId: turnId,
-      updatedAt: yield* nowIso,
-    };
-    yield* emit({
-      ...(yield* eventBase({ threadId: input.threadId, turnId })),
-      type: "turn.started",
-      payload: input.modelSelection?.model ? { model: input.modelSelection.model } : {},
-    });
-    active.fiber = yield* runTurn(context, active, input).pipe(Effect.forkIn(context.sessionScope));
-    return { threadId: input.threadId, turnId, resumeCursor: context.session.resumeCursor };
-  });
+    ) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(threadId);
+        if (turnId !== undefined && context.activeTurnId !== turnId) {
+          return;
+        }
+        yield* settlePendingApprovals(context);
+        yield* context.acp.cancel.pipe(
+          Effect.mapError((error) =>
+            mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
+          ),
+          Effect.ignore,
+        );
+      });
 
-  const interruptTurn = Effect.fn("HermesAdapter.interruptTurn")(function* (
-    threadId: ThreadId,
-    turnId?: TurnId,
-  ) {
-    const context = yield* getContext(threadId);
-    const active = context.activeTurn;
-    if (!active || (turnId && active.turnId !== turnId)) return;
-    if (active.fiber) yield* Fiber.interrupt(active.fiber).pipe(Effect.asVoid);
-  });
+    const respondToRequest: ProviderAdapterShape<ProviderAdapterError>["respondToRequest"] = (
+      threadId,
+      requestId,
+      decision,
+    ) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(threadId);
+        const pending = context.pendingApprovals.get(requestId);
+        if (!pending) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/request_permission",
+            detail: `Unknown pending approval request: ${requestId}`,
+          });
+        }
+        yield* Deferred.succeed(pending.decision, decision);
+      });
 
-  const stopSession = Effect.fn("HermesAdapter.stopSession")(function* (threadId: ThreadId) {
-    const context = yield* getContext(threadId);
-    if (context.activeTurn?.fiber)
-      yield* Fiber.interrupt(context.activeTurn.fiber).pipe(Effect.asVoid);
-    context.closed = true;
-    sessions.delete(threadId);
-    yield* Scope.close(context.sessionScope, Exit.void).pipe(Effect.ignore);
-    yield* emit({
-      ...(yield* eventBase({ threadId })),
-      type: "session.exited",
-      payload: { reason: "Session stopped.", recoverable: true, exitKind: "graceful" },
-    });
-  });
+    const respondToUserInput: ProviderAdapterShape<ProviderAdapterError>["respondToUserInput"] = (
+      threadId,
+      requestId,
+    ) =>
+      Effect.gen(function* () {
+        yield* requireSession(threadId);
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "session/elicitation",
+          detail: `Hermes ACP has no pending structured input request: ${requestId}`,
+        });
+      });
 
-  const readThread = Effect.fn("HermesAdapter.readThread")(function* (threadId: ThreadId) {
-    const context = yield* getContext(threadId);
-    const client = yield* requireClient();
-    const messages = yield* request("session-messages", (signal) =>
-      client.listMessages(context.hermesSessionId, signal),
+    const readThread: ProviderAdapterShape<ProviderAdapterError>["readThread"] = (threadId) =>
+      Effect.gen(function* () {
+        const context = yield* requireSession(threadId);
+        return { threadId, turns: context.turns };
+      });
+
+    const rollbackThread: ProviderAdapterShape<ProviderAdapterError>["rollbackThread"] = (
+      threadId,
+      numTurns,
+    ) =>
+      Effect.gen(function* () {
+        yield* requireSession(threadId);
+        if (!Number.isInteger(numTurns) || numTurns < 1) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "rollbackThread",
+            issue: "numTurns must be an integer >= 1.",
+          });
+        }
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "thread/rollback",
+          detail: "Hermes ACP sessions do not support provider-side rollback yet.",
+        });
+      });
+
+    const stopSession: ProviderAdapterShape<ProviderAdapterError>["stopSession"] = (threadId) =>
+      withThreadLock(
+        threadId,
+        Effect.gen(function* () {
+          yield* stopSessionInternal(yield* requireSession(threadId));
+        }),
+      );
+    const listSessions = () =>
+      Effect.sync(() => Array.from(sessions.values(), (context) => ({ ...context.session })));
+    const hasSession = (threadId: ThreadId) =>
+      Effect.sync(() => {
+        const context = sessions.get(threadId);
+        return context !== undefined && !context.stopped;
+      });
+    const stopAll = () =>
+      Effect.forEach(Array.from(sessions.values()), stopSessionInternal, { discard: true });
+
+    yield* Effect.addFinalizer(() =>
+      stopAll().pipe(
+        Effect.ignore,
+        Effect.tap(() => PubSub.shutdown(runtimeEventPubSub)),
+        Effect.tap(() => managedNativeEventLogger?.close() ?? Effect.void),
+      ),
     );
-    const turns = messages.flatMap((message, index) => {
-      if (message.role !== "assistant") return [];
-      return [
-        {
-          id: TurnId.make(message.id ?? `hermes-history-${index}`),
-          items: [{ ...message, content: messageText(message) ?? message.content }],
-        },
-      ];
-    });
-    return { threadId, turns } satisfies ProviderThreadSnapshot;
+
+    return {
+      provider: PROVIDER,
+      capabilities: { sessionModelSwitch: "in-session" },
+      startSession,
+      sendTurn,
+      interruptTurn,
+      respondToRequest,
+      respondToUserInput,
+      readThread,
+      rollbackThread,
+      stopSession,
+      listSessions,
+      hasSession,
+      stopAll,
+      streamEvents: Stream.fromPubSub(runtimeEventPubSub),
+    } satisfies ProviderAdapterShape<ProviderAdapterError>;
   });
-
-  const unsupportedResponse = (operation: string) =>
-    Effect.fail(
-      new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation,
-        issue: `Hermes does not support ${operation} through the session API.`,
-      }),
-    );
-
-  yield* Effect.addFinalizer(() =>
-    Effect.gen(function* () {
-      const contexts = [...sessions.values()];
-      sessions.clear();
-      yield* Effect.forEach(contexts, (context) => Scope.close(context.sessionScope, Exit.void), {
-        concurrency: "unbounded",
-        discard: true,
-      }).pipe(Effect.ignore);
-      yield* Queue.shutdown(events).pipe(Effect.orDie);
-    }),
-  );
-
-  return {
-    provider: PROVIDER,
-    capabilities: { sessionModelSwitch: "unsupported" },
-    startSession,
-    sendTurn,
-    interruptTurn,
-    respondToRequest: (_threadId: ThreadId, _requestId: ApprovalRequestId) =>
-      unsupportedResponse("interactive approvals"),
-    respondToUserInput: (_threadId: ThreadId, _requestId: ApprovalRequestId) =>
-      unsupportedResponse("structured user input"),
-    stopSession,
-    listSessions: () => Effect.sync(() => [...sessions.values()].map((context) => context.session)),
-    hasSession: (threadId) => Effect.sync(() => sessions.has(threadId)),
-    readThread,
-    rollbackThread: () => unsupportedResponse("thread rollback"),
-    stopAll: () =>
-      Effect.forEach([...sessions.keys()], stopSession, { discard: true }).pipe(Effect.asVoid),
-    get streamEvents() {
-      return Stream.fromQueue(events);
-    },
-  } satisfies ProviderAdapterShape<
-    | ProviderAdapterRequestError
-    | ProviderAdapterSessionClosedError
-    | ProviderAdapterSessionNotFoundError
-    | ProviderAdapterValidationError
-  >;
-});
+}

@@ -65,7 +65,7 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
     expect(decoded.providers.codex.enabled).toBe(true);
     expect(decoded.providers.hermes).toEqual({
       enabled: false,
-      gatewayUrl: "",
+      binaryPath: "hermes",
       customModels: [],
     });
   });

@@ -382,14 +382,12 @@ export const HermesSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed(false)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
-    gatewayUrl: TrimmedString.pipe(
-      Schema.withDecodingDefault(Effect.succeed("")),
+    binaryPath: makeBinaryPathSetting("hermes").pipe(
       Schema.annotateKey({
-        title: "Gateway URL",
-        description:
-          "Base URL of a Hermes API server. T3 Code connects from the server, not the browser.",
+        title: "Binary path",
+        description: "Path to the Hermes CLI binary. T3 Code launches `hermes acp` locally.",
         providerSettingsForm: {
-          placeholder: "https://hermes.example.test",
+          placeholder: "hermes",
           clearWhenEmpty: "omit",
         },
       }),
@@ -400,7 +398,7 @@ export const HermesSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["gatewayUrl"],
+    order: ["binaryPath"],
   },
 );
 export type HermesSettings = typeof HermesSettings.Type;
@@ -555,7 +553,7 @@ const OpenCodeSettingsPatch = Schema.Struct({
 
 const HermesSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
-  gatewayUrl: Schema.optionalKey(TrimmedString),
+  binaryPath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 

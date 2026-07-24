@@ -153,7 +153,7 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   [CURSOR_DRIVER_KIND]: "auto",
   [GROK_DRIVER_KIND]: "grok-build",
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
-  [HERMES_DRIVER_KIND]: "hermes-agent",
+  [HERMES_DRIVER_KIND]: "hermes-default",
 };
 
 /** Per-provider text generation model defaults. */
@@ -164,7 +164,7 @@ export const DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
   [CLAUDE_DRIVER_KIND]: "claude-haiku-4-5",
   [CURSOR_DRIVER_KIND]: "composer-2",
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
-  [HERMES_DRIVER_KIND]: "hermes-agent",
+  [HERMES_DRIVER_KIND]: "hermes-default",
 };
 
 export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
