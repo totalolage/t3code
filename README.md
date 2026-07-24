@@ -12,7 +12,7 @@ T3 Code is a minimal web GUI for coding agents (currently Codex, Claude, Cursor,
 > - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
 > - Cursor: install [Cursor CLI](https://cursor.com/cli) and run `cursor-agent login`
 > - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
-> - Hermes: install and configure Hermes locally, or use the included official-image Docker launcher
+> - Hermes: install Hermes and run `hermes setup`
 
 ### Run without installing
 
@@ -58,7 +58,7 @@ There's no public docs site yet, checkout the miscellaneous markdown files in [d
 - [Remote access](./docs/user/remote-access.md)
 - [Keeping T3 Code in sync](./docs/user/server-updates.md)
 - [Architecture overview](./docs/architecture/overview.md)
-- [Provider guides](./docs/providers/codex.md), including [Hermes ACP and Docker](./docs/providers/hermes.md)
+- [Provider guides](./docs/providers/codex.md), including [Hermes ACP](./docs/providers/hermes.md)
 - [Operations](./docs/operations/ci.md)
 - [Reference](./docs/reference/encyclopedia.md)
 

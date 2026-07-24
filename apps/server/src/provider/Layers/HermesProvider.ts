@@ -38,11 +38,8 @@ const PRESENTATION = {
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
 });
-// The official Hermes image performs container bootstrap before handing stdio
-// to the CLI. Slow Docker storage drivers can legitimately take longer than a
-// native executable without indicating that the provider is unhealthy.
-const VERSION_PROBE_TIMEOUT_MS = 30_000;
-const ACP_DISCOVERY_TIMEOUT_MS = 45_000;
+const VERSION_PROBE_TIMEOUT_MS = 4_000;
+const ACP_DISCOVERY_TIMEOUT_MS = 15_000;
 
 const FALLBACK_MODELS: ReadonlyArray<ServerProviderModel> = [
   {

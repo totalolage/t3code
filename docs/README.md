@@ -15,5 +15,5 @@
 - [Integrations](./integrations/source-control-providers.md)
 - [Mobile](./mobile/app.md)
 - [Operations](./operations/ci.md)
-- [Providers](./providers/codex.md), including [Hermes ACP and Docker](./providers/hermes.md)
+- [Providers](./providers/codex.md), including [Hermes ACP](./providers/hermes.md)
 - [Reference](./reference/encyclopedia.md)
