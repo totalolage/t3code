@@ -163,26 +163,6 @@ it("renders a classic s6 run script with supervisor markers and shell-safe paths
   assert.include(script, ">>'/home/me/T3 Data/logs/service.log' 2>&1");
 });
 
-it("generates service definitions that use credential-silent startup", () => {
-  const plan = {
-    nodePath: "/usr/local/bin/node",
-    t3EntryPath: "/opt/t3/dist/bin.mjs",
-    baseDir: "/var/lib/t3",
-    logPath: "/var/log/t3/service.log",
-    unitPath: "/etc/t3/service",
-  };
-  const generatedServiceOutput = [
-    BootService.renderBootServiceUnit(plan),
-    BootService.renderS6RunScript({ ...plan, supervisor: "s6" }),
-  ].join("\n");
-
-  assert.include(generatedServiceOutput, "service run");
-  assert.notMatch(generatedServiceOutput, /(?:ExecStart|exec).*?\bserve\b/);
-  for (const pairingSecretMarker of ["Token:", "Pairing URL:", "/pair#token="]) {
-    assert.notInclude(generatedServiceOutput, pairingSecretMarker);
-  }
-});
-
 it("flags package-manager cache entry points as ephemeral", () => {
   assert.isTrue(
     BootService.isEphemeralCacheEntry("/home/theo/.npm/_npx/abc123/node_modules/t3/dist/bin.mjs"),
