@@ -9,7 +9,8 @@ import packageJson from "../../package.json" with { type: "json" };
 import * as BootService from "../cloud/bootService.ts";
 import type * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
-import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
+import { projectLocationFlags, resolveCliAuthConfig, sharedServerCommandFlags } from "./config.ts";
+import { runServerCommand } from "./server.ts";
 
 export const bootServiceLayer = (
   config: ServerConfig.ServerConfig["Service"],
@@ -193,6 +194,17 @@ const serviceStatusCommand = Command.make("status", serviceFlags).pipe(
   ),
 );
 
+const serviceRunCommand = Command.make("run", { ...sharedServerCommandFlags }).pipe(
+  Command.withDescription("Run the server under a background service supervisor."),
+  Command.withHidden,
+  Command.withHandler((flags) =>
+    runServerCommand(flags, {
+      startupPresentation: "service",
+      forceAutoBootstrapProjectFromCwd: false,
+    }),
+  ),
+);
+
 export const offerServiceDuringOnboarding = Effect.gen(function* () {
   const service = yield* BootService.BootService;
   const { supported, installed, current } = yield* service.status;
@@ -246,5 +258,6 @@ export const serviceCommand = Command.make("service").pipe(
     serviceUninstallCommand,
     serviceUpdateCommand,
     serviceStatusCommand,
+    serviceRunCommand,
   ]),
 );

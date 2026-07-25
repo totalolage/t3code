@@ -41,6 +41,23 @@ t3 service status --supervisor s6 --service-dir /run/service/t3code
 The service directory must already be inside a scan directory managed by `s6-svscan`. T3 Code owns
 the `run` file inside that directory and controls it with `s6-svc`.
 
+## Pair a Client Securely
+
+The background service does not write live pairing credentials or pairing URLs to its logs. Create a
+credential explicitly when an operator is ready to transfer it to a client:
+
+```sh
+t3 auth pairing create --base-url https://your-t3-host.example
+```
+
+The credential is shown only when it is created. Treat that output as a secret. To inspect active
+credential ids and revoke one without printing its secret:
+
+```sh
+t3 auth pairing list
+t3 auth pairing revoke <credential-id>
+```
+
 ## Automatic Service Updates
 
 Set **Settings** → **General** → **Service update repository** to an exact GitHub repository URL,

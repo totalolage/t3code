@@ -503,7 +503,7 @@ it.layer(NodeServices.layer)("ServerSelfUpdate.update", (it) => {
       const unit = yield* context.fs.readFileString(
         context.path.join(context.home, ".config", "systemd", "user", "t3code.service"),
       );
-      assert.include(unit, `ExecStart=${NODE_PATH} ${pinnedEntry} serve`);
+      assert.include(unit, `ExecStart=${NODE_PATH} ${pinnedEntry} service run`);
       assert.deepEqual(
         context.commands.map((entry) => entry.command),
         ["npm", NODE_PATH, "systemctl", "systemctl"],

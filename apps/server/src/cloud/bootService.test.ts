@@ -111,7 +111,7 @@ it("renders a systemd unit with absolute paths and append-mode logging", () => {
       "Environment=T3CODE_HOME=/home/theo/.t3",
       "Environment=T3_BOOT_SERVICE_UNIT=t3code.service",
       "Environment=T3_SERVICE_SUPERVISOR=systemd",
-      "ExecStart=/usr/local/bin/node /home/theo/.t3/runtime/versions/0.0.27/node_modules/t3/dist/bin.mjs serve",
+      "ExecStart=/usr/local/bin/node /home/theo/.t3/runtime/versions/0.0.27/node_modules/t3/dist/bin.mjs service run",
       "Restart=always",
       "RestartSec=5",
       "StandardOutput=append:/home/theo/.t3/userdata/logs/boot-service.log",
@@ -136,7 +136,7 @@ it("quotes systemd values containing spaces and escapes percent specifiers", () 
     logPath: "/home/me/100%logs/boot.log",
     unitPath: "/home/me/.config/systemd/user/t3code.service",
   });
-  assert.include(unit, 'ExecStart="/home/me/my tools/node" "/home/me/T3 Data/bin.mjs" serve');
+  assert.include(unit, 'ExecStart="/home/me/my tools/node" "/home/me/T3 Data/bin.mjs" service run');
   assert.include(unit, 'Environment=T3CODE_HOME="/home/me/T3 Data"');
   // append: paths take the rest of the line literally (spaces are fine,
   // quoting is not), but % still goes through specifier expansion.
@@ -159,7 +159,7 @@ it("renders a classic s6 run script with supervisor markers and shell-safe paths
     script,
     "export T3_S6_SERVICE_DIR='/etc/s6-overlay/s6-rc.d/user/contents.d/t3code'",
   );
-  assert.include(script, "exec '/home/me/T3'\\''s bin/t3' 'serve'");
+  assert.include(script, "exec '/home/me/T3'\\''s bin/t3' 'service' 'run'");
   assert.include(script, ">>'/home/me/T3 Data/logs/service.log' 2>&1");
 });
 
@@ -253,7 +253,7 @@ it.layer(NodeServices.layer)("BootService", (it) => {
 
       const unitPath = path.join(dirs.home, ".config", "systemd", "user", "t3code.service");
       const unit = yield* fs.readFileString(unitPath);
-      assert.include(unit, `ExecStart=/usr/local/bin/node ${dirs.stableEntry} serve`);
+      assert.include(unit, `ExecStart=/usr/local/bin/node ${dirs.stableEntry} service run`);
       assert.include(unit, `Environment=T3CODE_HOME=${dirs.baseDir}`);
 
       const status = yield* service.status;
@@ -301,7 +301,7 @@ it.layer(NodeServices.layer)("BootService", (it) => {
         { command: "s6-svc", args: ["-u", serviceDir] },
       ]);
       const script = yield* fs.readFileString(plan.unitPath);
-      assert.include(script, `exec '${dirs.stableEntry}' 'serve'`);
+      assert.include(script, `exec '${dirs.stableEntry}' 'service' 'run'`);
       assert.isTrue((yield* fs.stat(plan.unitPath)).mode % 2 === 1);
       assert.isTrue((yield* service.status).current);
 

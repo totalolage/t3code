@@ -19,7 +19,9 @@ import * as NetService from "@t3tools/shared/Net";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Stream from "effect/Stream";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServer from "effect/unstable/http/HttpServer";
@@ -246,6 +248,77 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       assert.include(output, "update");
       assert.include(output, "status");
     }),
+  );
+
+  it.effect("runs the service startup path without emitting or issuing pairing credentials", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const baseDir = NodeFS.mkdtempSync(
+          NodePath.join(NodeOS.tmpdir(), "t3-cli-service-run-test-"),
+        );
+        const config = yield* makeCliTestServerConfig(baseDir);
+        const capturedLogs: Array<string> = [];
+        const logger = Logger.make(({ message }) => {
+          capturedLogs.push(
+            Array.isArray(message) ? message.map(String).join(" ") : String(message),
+          );
+        });
+        const serverFiber = yield* runCliWithRuntime([
+          "--log-level",
+          "debug",
+          "service",
+          "run",
+          "--base-dir",
+          baseDir,
+          "--host",
+          "127.0.0.1",
+        ]).pipe(Effect.withLogger(logger), Effect.forkScoped);
+
+        let startupCompleted = false;
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          startupCompleted =
+            NodeFS.existsSync(config.serverTracePath) &&
+            NodeFS.readFileSync(config.serverTracePath, "utf8").includes(
+              '"name":"server.startup.heartbeat.record"',
+            );
+          if (startupCompleted) break;
+          yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 25)));
+        }
+        assert.isTrue(startupCompleted, "service startup did not complete");
+        yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 25)));
+
+        const consoleOutput = [
+          ...(yield* TestConsole.logLines),
+          ...(yield* TestConsole.errorLines),
+        ].map(String);
+        const traceOutput = NodeFS.readFileSync(config.serverTracePath, "utf8");
+        const serviceOutput = [...capturedLogs, ...consoleOutput, traceOutput].join("\n");
+        for (const secretMarker of [
+          "Token:",
+          "Pairing URL:",
+          "pairing URL",
+          "/pair#token=",
+          '"pairingUrl"',
+        ]) {
+          assert.notInclude(serviceOutput, secretMarker);
+        }
+
+        yield* Fiber.interrupt(serverFiber);
+
+        const activePairingCredentials = yield* Effect.gen(function* () {
+          const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+          return yield* environmentAuth.listPairingLinks({ excludeSubjects: [] });
+        }).pipe(
+          Effect.provide(
+            EnvironmentAuth.runtimeLayer.pipe(
+              Layer.provide(ServerConfig.layer(config)),
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+        );
+        assert.deepEqual(activePairingCredentials, []);
+      }),
+    ).pipe(Effect.provide(TestConsole.layer)),
   );
 
   it.effect("reports fresh headless connect state without requiring local configuration", () =>

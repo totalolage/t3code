@@ -89,8 +89,8 @@ export interface BootServicePlan {
 
 function serviceExecArgs(plan: BootServicePlan): ReadonlyArray<string> {
   return plan.t3EntryPath === ""
-    ? [plan.nodePath, "serve"]
-    : [plan.nodePath, plan.t3EntryPath, "serve"];
+    ? [plan.nodePath, "service", "run"]
+    : [plan.nodePath, plan.t3EntryPath, "service", "run"];
 }
 
 export function quoteShellValue(value: string): string {
