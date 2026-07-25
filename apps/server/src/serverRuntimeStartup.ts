@@ -454,7 +454,7 @@ export const make = Effect.gen(function* () {
           "headless.output",
           Console.log(formatHeadlessServeOutput(accessInfo)),
         );
-      } else {
+      } else if (serverConfig.startupPresentation === "browser") {
         yield* Effect.logDebug("startup phase: browser open check");
         const startupBrowserTarget = yield* resolveStartupBrowserTarget;
         if (serverConfig.mode !== "desktop") {

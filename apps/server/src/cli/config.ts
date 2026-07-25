@@ -283,10 +283,10 @@ export const resolveServerConfig = (
     const serverTracePath = env.traceFile ?? derivedPaths.serverTracePath;
     yield* fs.makeDirectory(path.dirname(serverTracePath), { recursive: true });
     const startupPresentation = options?.startupPresentation ?? "browser";
-    const isHeadlessStartup = startupPresentation === "headless";
+    const isNonInteractiveStartup = startupPresentation !== "browser";
     const noBrowser = Option.getOrElse(
       resolveOptionPrecedence(
-        isHeadlessStartup ? Option.some(true) : Option.none(),
+        isNonInteractiveStartup ? Option.some(true) : Option.none(),
         normalizedFlags.noBrowser,
         Option.fromUndefinedOr(env.noBrowser),
         Option.fromUndefinedOr(bootstrap?.noBrowser),
@@ -297,7 +297,7 @@ export const resolveServerConfig = (
     const autoBootstrapProjectFromCwd = Option.getOrElse(
       resolveOptionPrecedence(
         Option.fromUndefinedOr(options?.forceAutoBootstrapProjectFromCwd),
-        isHeadlessStartup ? Option.some(false) : Option.none(),
+        isNonInteractiveStartup ? Option.some(false) : Option.none(),
         normalizedFlags.autoBootstrapProjectFromCwd,
         Option.fromUndefinedOr(env.autoBootstrapProjectFromCwd),
       ),
