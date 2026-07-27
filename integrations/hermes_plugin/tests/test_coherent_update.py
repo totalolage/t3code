@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import shutil
 import tempfile
 import threading
 import time
@@ -145,33 +146,54 @@ class CoherentUpdateTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         update_main.assert_called_once_with([plugin_root, "update"])
 
-    def test_fresh_entrypoint_imports_code_from_the_supplied_target(self) -> None:
-        target_root = Path(self.temporary.name) / "target-plugin"
-        package = target_root / "integrations" / "hermes_plugin"
-        package.mkdir(parents=True)
-        marker = target_root / "loaded-target"
-        package.joinpath("coherent_update.py").write_text(
+    def test_candidate_entrypoint_imports_candidate_code_for_legacy_root(
+        self,
+    ) -> None:
+        root = Path(self.temporary.name)
+        candidate_root = root / "candidate-plugin"
+        candidate_package = candidate_root / "integrations" / "hermes_plugin"
+        candidate_package.mkdir(parents=True)
+        legacy_root = root / "installed-legacy-plugin"
+        legacy_package = legacy_root / "integrations" / "hermes_plugin"
+        legacy_package.mkdir(parents=True)
+        candidate_marker = root / "loaded-candidate"
+        legacy_marker = root / "loaded-legacy"
+        candidate_package.joinpath("coherent_update.py").write_text(
             "from pathlib import Path\n"
             "def main(argv):\n"
-            f"    Path({str(marker)!r}).write_text(argv[1], encoding='utf-8')\n"
+            f"    Path({str(candidate_marker)!r}).write_text("
+            "argv[0] + '\\n' + argv[1], encoding='utf-8')\n"
             "    return 0\n",
             encoding="utf-8",
         )
-        worker = Path(coherent_update.__file__).with_name("update_process.py")
+        legacy_package.joinpath("coherent_update.py").write_text(
+            "from pathlib import Path\n"
+            "def main(argv):\n"
+            f"    Path({str(legacy_marker)!r}).write_text("
+            "'legacy', encoding='utf-8')\n"
+            "    return 0\n",
+            encoding="utf-8",
+        )
+        worker = candidate_package / "update_process.py"
+        shutil.copyfile(Path(update_process.__file__), worker)
 
         result = coherent_update._command(
             [
                 coherent_update.sys.executable,
                 "-I",
                 str(worker),
-                str(target_root),
+                str(legacy_root),
                 "update",
             ],
             check=False,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(marker.read_text(encoding="utf-8"), "update")
+        self.assertEqual(
+            candidate_marker.read_text(encoding="utf-8"),
+            f"{legacy_root}\nupdate",
+        )
+        self.assertFalse(legacy_marker.exists())
 
     def test_dirty_checkout_fails_before_target_resolution_or_mutation(self) -> None:
         host = Mock()

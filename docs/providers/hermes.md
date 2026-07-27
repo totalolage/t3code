@@ -75,18 +75,12 @@ Failed rollback retains the staged target and prior snapshot for operator recove
 T3's generated environment marker by hand. Internal source/runtime diagnostics remain available,
 but the dashboard displays only the coherent installed product version.
 
-#### Required Hermes managed-update contract
+#### Hermes managed-update contract
 
-Hermes currently exposes `hermes plugins update <name>` and the Plugins-page update action as a
-generic `git pull --ff-only`, followed by metadata rescan. That operation neither delegates to the
-plugin nor reloads Python routers already mounted in the dashboard process, so it can create the
-source-only state this integration forbids.
+The plugin declares `update.mode: managed` and `contract: t3code-hermes-v1`. A compatible Hermes
+host:
 
-The plugin declares `update.mode: managed` and `contract: t3code-hermes-v1`. Hermes core must add a
-managed-plugin update contract that:
-
-1. hides/delegates its generic Git update action for a managed plugin, including the CLI and dashboard
-   API, so both invoke the plugin's single coherent Update operation;
+1. delegates its CLI, Plugins-page, and plugin-owned Update routes to the same coherent operation;
 2. exposes `hermes_cli.managed_plugin_update.get_managed_update_contract(name)` with version `1`,
    a mutation-free `preflight(plugin_name, plugin_root)`, and
    `complete(plugin_name, plugin_root, source_commit, product_version)`, and
@@ -96,9 +90,20 @@ managed-plugin update contract that:
    version actually mounted, and return only after the requested backend is active. A metadata rescan
    or page reload is not sufficient.
 
-Until Hermes supplies that contract, T3's Update and Install actions fail during preflight before
-fetching, pulling, replacing the binary, or touching supervision. T3 does not emulate the missing
-host primitive with a page reload, metadata rescan, or unsafe self-restart.
+For an installed checkout that predates `update.mode: managed`, Hermes first fetches without changing
+the installed worktree, verifies that the upstream commit is a fast-forward, and inspects the
+candidate manifest in a temporary detached worktree. If the candidate declares the supported
+contract, Hermes invokes that candidate's entrypoint in a fresh process while still passing the real
+legacy checkout as the transaction root. The candidate therefore performs the normal source,
+runtime, service, and mounted-backend cutover as one unit; Hermes never performs a source-only
+bootstrap pull. A dirty checkout, invalid candidate, unavailable coordinator, or failed preflight
+stops before product mutation. The same host interception covers the Update button in a
+still-mounted legacy T3 backend, so it cannot execute the old runtime-only handler.
+
+Until Hermes supplies that contract and migration bootstrap, T3's coherent Update and Install
+actions fail during preflight before fetching releases, replacing the binary, or touching
+supervision. T3 does not emulate the missing host primitive with a page reload, metadata rescan, or
+unsafe self-restart.
 
 The companion watchdog checks for `plugin.yaml` every 15 minutes by default. Two consecutive misses
 remove the T3 Code and watchdog s6 slots. This covers direct plugin-directory removal without making
@@ -151,10 +156,11 @@ to download and verify a replacement.
 
 Plugin versions predating this state file retained only the binary and application data, so a legacy
 install is indistinguishable from one the operator intentionally removed. The plugin therefore never
-infers intent from an old binary or executes it during migration. After Hermes gains the managed
-update contract above, run **Install and start** once to establish a coherent product version and
-explicit durable intent. From then on, boot recovery is automatic and **Remove service** remains
-authoritative.
+infers intent from an old binary or executes it during migration. If an existing installation already
+has explicit `installed` intent but predates the managed manifest, its first **Update** uses the
+staged-candidate bootstrap above and records the coherent identity. An older installation without
+explicit intent must use **Install and start** once. From then on, boot recovery is automatic and
+**Remove service** remains authoritative.
 
 ## Projects and execution
 
