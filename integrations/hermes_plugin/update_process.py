@@ -10,8 +10,8 @@ def main() -> int:
     if len(sys.argv) < 3:
         print("invalid coherent update invocation", file=sys.stderr)
         return 2
-    plugin_root = Path(sys.argv[1]).resolve()
-    sys.path.insert(0, str(plugin_root))
+    implementation_root = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(implementation_root))
     from integrations.hermes_plugin.coherent_update import main as update_main
 
     return update_main(sys.argv[1:])
