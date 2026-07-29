@@ -221,6 +221,8 @@ function readEnvironmentHttpErrorStatus(error: EnvironmentHttpCommonErrorType): 
     case "EnvironmentScopeRequiredError":
     case "EnvironmentOperationForbiddenError":
       return 403;
+    case "EnvironmentConflictError":
+      return 409;
     case "EnvironmentResourceNotFoundError":
       return 404;
     case "EnvironmentInternalError":
