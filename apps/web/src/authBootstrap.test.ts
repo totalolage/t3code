@@ -1,5 +1,6 @@
 import {
   EnvironmentAuthInvalidError,
+  EnvironmentConflictError,
   type AuthBrowserSessionResult,
   type AuthCreatePairingCredentialInput,
   type AuthSessionState,
@@ -376,6 +377,23 @@ describe("resolveInitialServerAuthGateState", () => {
       "Primary environment request failed during list-pairing-links (HTTP 500).",
     );
     expect(error.message).not.toContain(cause.message);
+  });
+
+  it("preserves the conflict status for structured environment errors", async () => {
+    const cause = new EnvironmentConflictError({
+      code: "conflict",
+      reason: "worktree_path_exists",
+      message: "The requested worktree path already exists.",
+      traceId: "trace-worktree-conflict",
+    });
+    const { PrimaryEnvironmentRequestError } = await import("./environments/primary");
+    const error = PrimaryEnvironmentRequestError.fromCause({
+      operation: "fetch-session-state",
+      cause,
+    });
+
+    expect(error.status).toBe(409);
+    expect(error.cause).toBe(cause);
   });
 
   it("waits for the authenticated session to become observable after silent desktop bootstrap", async () => {
