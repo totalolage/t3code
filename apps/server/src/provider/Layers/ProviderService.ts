@@ -679,31 +679,34 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.kind": routed.adapter.provider,
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
-      const sendRoutedTurn = Effect.gen(function* () {
-        const turn = yield* routed.adapter.sendTurn(input);
-        yield* directory.upsert({
-          threadId: input.threadId,
-          provider: routed.adapter.provider,
-          providerInstanceId: routed.instanceId,
-          status: "running",
-          ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
-          runtimePayload: {
-            ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-            activeTurnId: turn.turnId,
-            lastRuntimeEvent: "provider.sendTurn",
-            lastRuntimeEventAt: yield* nowIso,
-          },
-        });
-        yield* analytics.record("provider.turn.sent", {
-          provider: routed.adapter.provider,
-          model: input.modelSelection?.model,
-          interactionMode: input.interactionMode,
-          attachmentCount: input.attachments.length,
-          hasInput: typeof input.input === "string" && input.input.trim().length > 0,
-        });
-        return turn;
+      // A turn is the clearest sign a session is still alive. The MCP
+      // credential is minted once at session start and cannot be rotated into
+      // an already-spawned agent process, so we keep the existing token valid
+      // rather than issuing a new one: sessions that go a long time between
+      // browser tool calls used to lose the toolkit outright.
+      yield* McpSessionRegistry.touchActiveMcpThread(input.threadId);
+      const turn = yield* routed.adapter.sendTurn(input);
+      yield* directory.upsert({
+        threadId: input.threadId,
+        provider: routed.adapter.provider,
+        providerInstanceId: routed.instanceId,
+        status: "running",
+        ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
+        runtimePayload: {
+          ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+          activeTurnId: turn.turnId,
+          lastRuntimeEvent: "provider.sendTurn",
+          lastRuntimeEventAt: yield* nowIso,
+        },
       });
-      return yield* sendRoutedTurn;
+      yield* analytics.record("provider.turn.sent", {
+        provider: routed.adapter.provider,
+        model: input.modelSelection?.model,
+        interactionMode: input.interactionMode,
+        attachmentCount: input.attachments.length,
+        hasInput: typeof input.input === "string" && input.input.trim().length > 0,
+      });
+      return turn;
     }).pipe(
       withMetrics({
         counter: providerTurnsTotal,

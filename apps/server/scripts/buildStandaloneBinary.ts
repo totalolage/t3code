@@ -83,6 +83,7 @@ const result = await Bun.build({
 
 if (!result.success) {
   for (const log of result.logs) {
+    // @effect-diagnostics-next-line globalConsole:off - build script reports pack failures directly to stderr.
     console.error(log);
   }
   process.exitCode = 1;

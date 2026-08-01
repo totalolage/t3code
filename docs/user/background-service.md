@@ -82,6 +82,10 @@ For s6, the root-owned run script remains fixed. It grants the selected group pe
 only that service, drops privileges, and then runs a launcher under the selected identity. Automatic
 updates replace that user-owned launcher rather than modifying a script that s6 executes as root.
 
+The systemd unit runs a small stable launcher. Exact T3 Code versions are installed separately, so
+a failed remote candidate can return to the previous version without rewriting the unit. Releases
+that change the database must be installed with the local `service update` command above.
+
 ## Using It with T3 Connect
 
 T3 Connect may offer to install the service during setup so the host stays reachable after you log

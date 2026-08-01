@@ -33,4 +33,4 @@ export interface QueuedProviderTurnStartRepositoryShape {
 export class QueuedProviderTurnStartRepository extends Context.Service<
   QueuedProviderTurnStartRepository,
   QueuedProviderTurnStartRepositoryShape
->()("t3/persistence/Services/QueuedProviderTurnStartRepository") {}
+>()("t3/persistence/Services/QueuedProviderTurnStarts/QueuedProviderTurnStartRepository") {}

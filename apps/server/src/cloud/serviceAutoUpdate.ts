@@ -249,6 +249,7 @@ export const pruneSupersededStagedBinaries = Effect.fn(
 const request = (url: string, init?: RequestInit) =>
   Effect.tryPromise({
     try: async () => {
+      // @effect-diagnostics-next-line globalFetchInEffect:off - fork updater uses the platform fetch boundary for GitHub release assets.
       const response = await fetch(url, init);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return response;
@@ -273,7 +274,7 @@ export class ServiceAutoUpdate extends Context.Service<
   {
     readonly checkNow: Effect.Effect<void, ServiceAutoUpdateError>;
   }
->()("t3/cloud/ServiceAutoUpdate") {}
+>()("t3/cloud/serviceAutoUpdate") {}
 
 export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;

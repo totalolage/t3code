@@ -35,7 +35,7 @@ export class ServiceUpdateCoordinator extends Context.Service<
     readonly state: Effect.Effect<ServiceUpdateState>;
     readonly changes: Stream.Stream<ServiceUpdateState>;
   }
->()("t3/cloud/ServiceUpdateCoordinator") {}
+>()("t3/cloud/serviceUpdateCoordinator") {}
 
 export const make = Effect.gen(function* () {
   const state = yield* SubscriptionRef.make<ServiceUpdateState>({ status: "idle" });

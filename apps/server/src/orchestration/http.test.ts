@@ -35,6 +35,7 @@ it.effect("maps a nested worktree conflict to an actionable typed HTTP conflict"
     assert.include(error.message, "branch");
     assert.include(error.message, "different branch");
     assert.isAbove(error.traceId.length, 0);
+    // @effect-diagnostics-next-line preferSchemaOverJson:off - verifies no private path leaks through generic serialization.
     assert.notInclude(JSON.stringify(error), "/private/repo");
     const response = yield* HttpServerRespondable.toResponse(error);
     assert.equal(response.status, 409);
@@ -66,6 +67,7 @@ it.effect("keeps an unknown Git failure internal while returning its trace id", 
     assert.isAbove(error.traceId.length, 0);
     assert.equal(gitError.failureKind, "unknown");
     assert.equal(gitError.safeDiagnostic, "fatal: [redacted-url] failed");
+    // @effect-diagnostics-next-line preferSchemaOverJson:off - verifies internal diagnostics do not leak through generic serialization.
     assert.notInclude(JSON.stringify(error), gitError.safeDiagnostic ?? "");
     const response = yield* HttpServerRespondable.toResponse(error);
     assert.equal(response.status, 500);

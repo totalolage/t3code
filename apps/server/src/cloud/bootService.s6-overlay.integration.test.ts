@@ -1,6 +1,9 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Docker integration boundary.
 import * as NodeChildProcess from "node:child_process";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Docker integration boundary.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Docker integration boundary.
 import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -23,6 +26,7 @@ describe.runIf(integrationEnabled)("s6-overlay service integration", () => {
     const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-s6-overlay-test-"));
     const serviceDir = NodePath.join(root, "service");
     const stateDir = NodePath.join(root, "state");
+    // @effect-diagnostics-next-line globalDate:off - unique external Docker resource name.
     const container = `t3-s6-overlay-${process.pid}-${Date.now()}`;
 
     try {
@@ -73,6 +77,7 @@ describe.runIf(integrationEnabled)("s6-overlay service integration", () => {
           "utf8",
         ).catch(() => "");
         if (runtimeUserId.trim() !== "") break;
+        // @effect-diagnostics-next-line globalTimers:off - polling an external Docker process in a Promise-based integration test.
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
 

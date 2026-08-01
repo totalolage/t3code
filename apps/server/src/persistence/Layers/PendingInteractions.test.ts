@@ -261,7 +261,9 @@ layer("PendingInteractionRepository", (it) => {
       };
 
       const initial = yield* listRemotePendingInteractions({ threadId: question.threadId });
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - redaction assertion covers the complete serialized public payload.
       assert.notInclude(JSON.stringify(initial), "/home/alice/private-choice");
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - redaction assertion covers the complete serialized public payload.
       assert.notInclude(JSON.stringify(initial), "Which private choice should be used?");
       assert.deepStrictEqual(
         initial.interactions.map(({ requestId, kind, status, allowedActions }) => ({

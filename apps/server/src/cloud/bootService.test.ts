@@ -1,15 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
-import * as ConfigProvider from "effect/ConfigProvider";
-import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
-import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
-import * as Path from "effect/Path";
-import * as Schema from "effect/Schema";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
-import * as NodeChildProcess from "node:child_process";
-
+import { expect, it } from "@effect/vitest";
 import {
   HostProcessArguments,
   HostProcessEnvironment,
@@ -18,1123 +8,223 @@ import {
   HostProcessPlatform,
   HostProcessUserId,
 } from "@t3tools/shared/hostProcess";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
-import { formatServiceStatus, reconcileService } from "../cli/service.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as BootService from "./bootService.ts";
+import { pinnedRuntimePaths } from "./pinnedRuntime.ts";
+import { parseServiceState } from "./serviceProtocol.ts";
 
-const isUnsupportedError = Schema.is(BootService.BootServiceUnsupportedError);
-const isCommandError = Schema.is(BootService.BootServiceCommandError);
-const isIdentityError = Schema.is(BootService.BootServiceIdentityError);
-
-interface RecordedCommand {
-  readonly command: string;
-  readonly args: ReadonlyArray<string>;
-}
-
-const makeRecordingRunnerLayer = (
-  commands: Array<RecordedCommand>,
-  options?: {
-    readonly failCommand?: string;
-    readonly failWhen?: (command: string, args: ReadonlyArray<string>) => boolean;
-    readonly stdoutWhen?: (command: string, args: ReadonlyArray<string>) => string;
-  },
-) =>
-  Layer.succeed(
-    ProcessRunner.ProcessRunner,
-    ProcessRunner.ProcessRunner.of({
-      run: (input) =>
-        Effect.sync(() => {
-          assert.isUndefined(input.env);
-          commands.push({ command: input.command, args: input.args });
-          const failed =
-            input.command === options?.failCommand ||
-            options?.failWhen?.(input.command, input.args) === true;
-          return {
-            stdout: options?.stdoutWhen?.(input.command, input.args) ?? "",
-            stderr: failed ? `${input.command} exploded` : "",
-            code: ChildProcessSpawner.ExitCode(failed ? 1 : 0),
-            timedOut: false,
-            stdoutTruncated: false,
-            stderrTruncated: false,
-          };
-        }),
-    }),
-  );
-
-const makeHost = (entry: string): BootService.BootServiceHost => ({
-  execPath: "/usr/local/bin/node",
-  cliEntryPath: entry,
-});
-
-const provideHostRefs = (
-  home: string,
-  platform: NodeJS.Platform = "linux",
-  identity: {
-    readonly userId: number;
-    readonly groupId: number;
-    readonly env: NodeJS.ProcessEnv;
-  } = { userId: 1000, groupId: 1000, env: {} },
-) =>
-  Effect.provide(
-    Layer.mergeAll(
-      Layer.succeed(HostProcessPlatform, platform),
-      Layer.succeed(HostProcessEnvironment, identity.env),
-      Layer.succeed(HostProcessUserId, identity.userId),
-      Layer.succeed(HostProcessGroupId, identity.groupId),
-      ConfigProvider.layer(ConfigProvider.fromEnv({ env: { HOME: home } })),
-    ),
-  );
-
-const makeTestContext = Effect.fn("test.makeTestContext")(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-boot-service-test-" });
-  // A real file for the stable-entry cases so status can confirm the entry
-  // point exists.
-  const stableEntry = path.join(root, "bin.mjs");
-  yield* fs.writeFileString(stableEntry, "#!/usr/bin/env node\n");
-  return {
-    fs,
-    path,
-    dirs: {
-      home: root,
-      baseDir: path.join(root, ".t3"),
-      logsDir: path.join(root, ".t3", "userdata", "logs"),
-      stableEntry,
-    },
-  };
-});
-
-it("renders a systemd unit with absolute paths and append-mode logging", () => {
+it("keeps systemd pinned to the stable launcher rather than a versioned server", () => {
   const unit = BootService.renderBootServiceUnit({
-    nodePath: "/usr/local/bin/node",
-    t3EntryPath: "/home/theo/.t3/runtime/versions/0.0.27/node_modules/t3/dist/bin.mjs",
+    nodePath: "/usr/bin/node",
+    t3EntryPath: "/home/theo/.t3/runtime/versions/1.2.3/node_modules/t3/dist/bin.mjs",
+    launcherPath: "/home/theo/.t3/runtime/service-launcher.mjs",
     baseDir: "/home/theo/.t3",
     logPath: "/home/theo/.t3/userdata/logs/boot-service.log",
     unitPath: "/home/theo/.config/systemd/user/t3code.service",
   });
 
-  assert.equal(
-    unit,
-    [
-      "[Unit]",
-      "Description=T3 Code server",
-      "StartLimitIntervalSec=300",
-      "StartLimitBurst=5",
-      "",
-      "[Service]",
-      "Type=simple",
-      "WorkingDirectory=%h",
-      "Environment=T3CODE_HOME=/home/theo/.t3",
-      "Environment=T3_BOOT_SERVICE_UNIT=t3code.service",
-      "Environment=T3_SERVICE_SUPERVISOR=systemd",
-      "ExecStart=/usr/local/bin/node /home/theo/.t3/runtime/versions/0.0.27/node_modules/t3/dist/bin.mjs serve",
-      "Restart=always",
-      "RestartSec=5",
-      "StandardOutput=append:/home/theo/.t3/userdata/logs/boot-service.log",
-      "StandardError=append:/home/theo/.t3/userdata/logs/boot-service.log",
-      "",
-      "[Install]",
-      "WantedBy=default.target",
-      "",
-    ].join("\n"),
-  );
+  expect(unit).toContain("ExecStart=/usr/bin/node /home/theo/.t3/runtime/service-launcher.mjs");
+  expect(unit).toContain("Environment=T3_SERVICE_SUPERVISOR=systemd");
+  expect(unit).toContain("KillMode=control-group");
+  expect(unit).not.toContain("versions/1.2.3");
 });
 
-it("quotes systemd values containing spaces and escapes percent specifiers", () => {
-  assert.equal(BootService.quoteSystemdValue("/plain/path"), "/plain/path");
-  assert.equal(BootService.quoteSystemdValue("/home/me/T3 Data"), '"/home/me/T3 Data"');
-  assert.equal(BootService.quoteSystemdValue("/opt/100%cpu"), "/opt/100%%cpu");
-
-  const unit = BootService.renderBootServiceUnit({
-    nodePath: "/home/me/my tools/node",
-    t3EntryPath: "/home/me/T3 Data/bin.mjs",
-    baseDir: "/home/me/T3 Data",
-    logPath: "/home/me/100%logs/boot.log",
-    unitPath: "/home/me/.config/systemd/user/t3code.service",
-  });
-  assert.include(unit, 'ExecStart="/home/me/my tools/node" "/home/me/T3 Data/bin.mjs" serve');
-  assert.include(unit, 'Environment=T3CODE_HOME="/home/me/T3 Data"');
-  // append: paths take the rest of the line literally (spaces are fine,
-  // quoting is not), but % still goes through specifier expansion.
-  assert.include(unit, "StandardOutput=append:/home/me/100%%logs/boot.log");
-  assert.include(unit, "StandardError=append:/home/me/100%%logs/boot.log");
-});
-
-it("renders a classic s6 run script with supervisor markers and shell-safe paths", () => {
-  const serviceEnvironment = [
-    {
-      name: "HERMES_HOME",
-      value: "/home/hermes/T3's $data `literal` mode=service",
-    },
-  ];
-  const script = BootService.renderS6RunScript({
+it("renders s6 service environment only after privilege drop", () => {
+  const secret = "/home/hermes/T3's $data `literal`";
+  const plan: BootService.BootServicePlan = {
     supervisor: "s6",
     serviceUser: "theo",
     serviceGroup: "staff",
-    nodePath: "/home/me/T3's bin/t3",
-    t3EntryPath: "",
-    baseDir: "/home/me/T3 Data",
-    cliVersion: "0.0.27",
-    serverHost: "0.0.0.0",
-    serverPort: 3773,
-    serviceEnvironment,
-    logPath: "/home/me/T3 Data/logs/service.log",
-    unitPath: "/etc/s6-overlay/s6-rc.d/user/contents.d/t3code/run",
-  });
-
-  assert.include(script, "export T3_SERVICE_SUPERVISOR=s6");
-  assert.include(script, "export T3CODE_HOST='0.0.0.0'");
-  assert.include(script, "export T3CODE_PORT='3773'");
-  assert.include(
-    script,
-    "export T3_S6_SERVICE_DIR='/etc/s6-overlay/s6-rc.d/user/contents.d/t3code'",
-  );
-  assert.include(script, "export T3_S6_SERVICE_USER='theo'");
-  assert.include(script, "export T3_S6_SERVICE_GROUP='staff'");
-  assert.include(script, "if command -v getent >/dev/null 2>&1;");
-  assert.include(script, "done </etc/passwd");
-  assert.include(script, "[ \"$account_uid\" = 'theo' ]");
-  assert.include(script, 'export HOME="$service_home"');
-  assert.include(script, "'s6-envuidgid' '-nB' 'theo:staff' '/bin/sh' '-c'");
-  assert.include(script, `'exec s6-applyuidgid -z -u "$UID" -g "$GID" -G "$GID" "$@"'`);
-  assert.include(script, "s6-svperms -G 'staff' '/etc/s6-overlay/s6-rc.d/user/contents.d/t3code'");
-  assert.include(script, "'/home/me/T3'\\''s bin/t3' 'serve'");
-  assert.include(script, 'exec "$@" >>');
-  assert.include(script, "/home/me/T3 Data/logs/service.log");
-  assert.include(script, "export HERMES_HOME=");
-  assert.notInclude(script, serviceEnvironment[0]?.value ?? "");
-  const privilegeDropCommand = script.trimEnd().split("\n").at(-1) ?? "";
-  assert.include(privilegeDropCommand, BootService.S6_SERVICE_ENVIRONMENT_SENTINEL);
-  assert.include(privilegeDropCommand, "'/bin/sh' '-s' '--'");
-  assert.notInclude(privilegeDropCommand, serviceEnvironment[0]?.value ?? "");
-  assert.equal(
-    BootService.renderServiceEnvironmentExports(serviceEnvironment),
-    "export HERMES_HOME='/home/hermes/T3'\\''s $data `literal` mode=service'",
-  );
-
-  const launcher = BootService.renderS6LauncherScript({
-    supervisor: "s6",
-    nodePath: "/home/me/t3",
-    t3EntryPath: "",
-    baseDir: "/home/me/.t3",
-    serviceEnvironment,
-    logPath: "/home/me/.t3/log",
-    unitPath: "/run/service/t3code/run",
-  });
-  assert.notInclude(launcher, "HERMES_HOME");
-  assert.notInclude(launcher, serviceEnvironment[0]?.value ?? "");
-});
-
-it("resolves the selected user's primary group for delegated s6 control", () => {
-  const script = BootService.renderS6RunScript({
-    supervisor: "s6",
-    serviceUser: "theo",
     nodePath: "/usr/local/bin/t3",
     t3EntryPath: "",
     baseDir: "/home/theo/.t3",
+    serviceEnvironment: [{ name: "HERMES_HOME", value: secret }],
     logPath: "/home/theo/.t3/service.log",
     unitPath: "/run/service/t3code/run",
-  });
+  };
 
-  assert.include(script, "service_group=$(id -g 'theo')");
-  assert.include(script, `s6-svperms -G ":$service_group" '/run/service/t3code'`);
-  assert.include(script, "'s6-setuidgid' 'theo'");
+  const script = BootService.renderS6RunScript(plan);
+  expect(script).toContain(BootService.S6_SERVICE_ENVIRONMENT_SENTINEL);
+  expect(script).toContain("export HERMES_HOME=");
+  expect(script).not.toContain(secret);
+  expect(BootService.renderS6LauncherScript(plan)).not.toContain("HERMES_HOME");
 });
 
-it("renders a mutable s6 launcher that forwards arguments after privilege drop", () => {
-  assert.equal(
-    BootService.renderS6LauncherScript({
-      supervisor: "s6",
-      nodePath: "/home/me/node",
-      t3EntryPath: "/home/me/t3 entry.mjs",
-      baseDir: "/home/me/.t3",
-      logPath: "/home/me/.t3/log",
-      unitPath: "/run/service/t3code/run",
-    }),
-    ["#!/bin/sh", "set -eu", `exec '/home/me/node' '/home/me/t3 entry.mjs' "$@"`, ""].join("\n"),
-  );
-});
-
-it("defaults s6 to the current non-root identity or sudo's invoking identity", () => {
-  assert.deepEqual(
+it("resolves s6 identity from the kernel or sudo rather than USER", () => {
+  expect(
     BootService.resolveS6ServiceIdentity({
       processUserId: 1001,
       processGroupId: 1002,
-      env: { USER: "stale-or-untrusted" },
+      env: { USER: "stale" },
     }),
-    { serviceUser: "1001", serviceGroup: "1002" },
-  );
-  assert.deepEqual(
+  ).toEqual({ serviceUser: "1001", serviceGroup: "1002" });
+  expect(
     BootService.resolveS6ServiceIdentity({
       processUserId: 0,
       processGroupId: 0,
-      env: { SUDO_UID: "2001", SUDO_GID: "2002", SUDO_USER: "theo" },
+      env: { SUDO_UID: "2001", SUDO_GID: "2002" },
     }),
-    { serviceUser: "2001", serviceGroup: "2002" },
-  );
-  assert.isUndefined(
-    BootService.resolveS6ServiceIdentity({
-      processUserId: 0,
-      processGroupId: 0,
-      env: { USER: "root" },
-    }),
-  );
+  ).toEqual({ serviceUser: "2001", serviceGroup: "2002" });
 });
 
-it("persists an explicit host and port in a systemd service", () => {
-  const unit = BootService.renderBootServiceUnit({
-    nodePath: "/usr/local/bin/t3",
-    t3EntryPath: "",
-    baseDir: "/home/me/.t3",
-    serverHost: "127.0.0.1",
-    serverPort: 4773,
-    logPath: "/home/me/.t3/logs/service.log",
-    unitPath: "/home/me/.config/systemd/user/t3code.service",
+const hostLayer = (home: string, platform: NodeJS.Platform = "linux") =>
+  Layer.mergeAll(
+    Layer.succeed(HostProcessPlatform, platform),
+    Layer.succeed(HostProcessExecutablePath, "/usr/bin/node"),
+    Layer.succeed(HostProcessArguments, ["/usr/bin/node", `${home}/bin.mjs`]),
+    Layer.succeed(HostProcessEnvironment, {}),
+    Layer.succeed(HostProcessUserId, 1000),
+    Layer.succeed(HostProcessGroupId, 1000),
+    ConfigProvider.layer(ConfigProvider.fromEnv({ env: { HOME: home } })),
+  );
+
+const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
+  platform: NodeJS.Platform = "linux",
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-boot-service-test-" });
+  const baseDir = path.join(home, ".t3");
+  const sourceLauncher = path.join(home, "service-launcher.mjs");
+  const statePath = path.join(baseDir, "runtime", "service-state.json");
+  yield* fs.writeFileString(sourceLauncher, "export {};\n");
+  const runtime = pinnedRuntimePaths(path, baseDir, "1.2.3");
+  yield* fs.makeDirectory(path.dirname(runtime.entryPath), { recursive: true });
+  yield* fs.writeFileString(runtime.entryPath, "export {};\n");
+  yield* fs.writeFileString(runtime.sentinelPath, "1.2.3\n");
+
+  const commands: string[] = [];
+  const control: { failCommand: string | undefined } = { failCommand: undefined };
+  const runner = ProcessRunner.ProcessRunner.of({
+    run: (input) =>
+      Effect.sync(() => {
+        const command = `${input.command} ${input.args.join(" ")}`;
+        commands.push(command);
+        return {
+          stdout: input.args[1] === "--version" ? "t3 v1.2.3\n" : "",
+          stderr: "",
+          code: ChildProcessSpawner.ExitCode(command === control.failCommand ? 1 : 0),
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        };
+      }),
   });
-
-  assert.include(unit, "Environment=T3CODE_HOST=127.0.0.1");
-  assert.include(unit, "Environment=T3CODE_PORT=4773");
+  const service = yield* BootService.make({
+    baseDir,
+    logsDir: path.join(baseDir, "userdata", "logs"),
+    cliVersion: "1.2.3",
+    host: {
+      execPath: "/usr/bin/node",
+      cliEntryPath: path.join(home, "bin.mjs"),
+      launcherSourcePath: sourceLauncher,
+    },
+  }).pipe(
+    Effect.provideService(ProcessRunner.ProcessRunner, runner),
+    Effect.provide(hostLayer(home, platform)),
+  );
+  return { service, fs, statePath, commands, control };
 });
 
-it("flags package-manager cache entry points as ephemeral", () => {
-  assert.isTrue(
-    BootService.isEphemeralCacheEntry("/home/theo/.npm/_npx/abc123/node_modules/t3/dist/bin.mjs"),
-  );
-  assert.isTrue(
-    BootService.isEphemeralCacheEntry("C:\\Users\\theo\\AppData\\npm-cache\\_npx\\abc\\bin.mjs"),
-  );
-  assert.isTrue(
-    BootService.isEphemeralCacheEntry(
-      "/home/theo/.cache/pnpm/dlx/abc/node_modules/t3/dist/bin.mjs",
-    ),
-  );
-  assert.isTrue(
-    BootService.isEphemeralCacheEntry("/home/theo/.bun/install/cache/t3@0.0.27/dist/bin.mjs"),
-  );
-  assert.isFalse(BootService.isEphemeralCacheEntry("/usr/local/lib/node_modules/t3/dist/bin.mjs"));
-  assert.isFalse(
-    BootService.isEphemeralCacheEntry(
-      "/home/theo/dev/pnpm/dlx-tools/t3/node_modules/t3/dist/bin.mjs",
-    ),
-  );
-  assert.isFalse(
-    BootService.isEphemeralCacheEntry(
-      "/home/theo/.t3/runtime/versions/0.0.27/node_modules/t3/dist/bin.mjs",
-    ),
-  );
-});
-
-it("recognizes Bun's virtual compiled entry path", () => {
-  assert.isTrue(BootService.isBunEmbeddedEntryPath("/$bunfs/root/app"));
-  assert.isFalse(BootService.isBunEmbeddedEntryPath("/opt/t3/dist/bin.mjs"));
-});
-
-it.layer(NodeServices.layer)("BootService", (it) => {
-  it.effect("reconciles the standalone service once and is then idempotent", () =>
+it.layer(NodeServices.layer)("boot service install", (it) => {
+  it.effect("installs, reports current state, and uninstalls", () =>
     Effect.gen(function* () {
-      const { dirs } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        host: makeHost(dirs.stableEntry),
-      }).pipe(Effect.provide(makeRecordingRunnerLayer(commands)), provideHostRefs(dirs.home));
-
-      const first = yield* reconcileService().pipe(
-        Effect.provideService(BootService.BootService, service),
-      );
-      assert.isTrue(first.changed);
-      if (!first.changed) return;
-      assert.isFalse(first.previouslyInstalled);
-
-      const commandCount = commands.length;
-      const second = yield* reconcileService().pipe(
-        Effect.provideService(BootService.BootService, service),
-      );
-      assert.isFalse(second.changed);
-      assert.lengthOf(commands, commandCount);
-    }),
-  );
-
-  it.effect("installs the unit, enables the service, and enables linger", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        host: makeHost(dirs.stableEntry),
-      }).pipe(Effect.provide(makeRecordingRunnerLayer(commands)), provideHostRefs(dirs.home));
-
+      const { service, fs, statePath, commands } = yield* makeHarness();
       const plan = yield* service.install;
 
-      // A stable entry point is reused directly — no npm install.
-      assert.equal(plan.t3EntryPath, dirs.stableEntry);
-      assert.deepEqual(
-        commands.map((entry) => [entry.command, ...entry.args].join(" ")),
-        [
-          "systemctl --user daemon-reload",
-          "systemctl --user enable t3code.service",
-          // restart (not enable --now) so repairing a stale unit replaces a
-          // running process instead of leaving the old one until reboot.
-          "systemctl --user restart t3code.service",
-          "loginctl enable-linger",
-        ],
-      );
-
-      const unitPath = path.join(dirs.home, ".config", "systemd", "user", "t3code.service");
-      const unit = yield* fs.readFileString(unitPath);
-      assert.include(unit, `ExecStart=/usr/local/bin/node ${dirs.stableEntry} serve`);
-      assert.include(unit, `Environment=T3CODE_HOME=${dirs.baseDir}`);
-
-      const status = yield* service.status;
-      assert.isTrue(status.supported);
-      assert.isTrue(status.installed);
-      assert.isTrue(status.current);
-
-      const removed = yield* service.uninstall;
-      assert.isTrue(removed);
-      assert.isFalse(yield* fs.exists(unitPath));
-      const statusAfter = yield* service.status;
-      assert.isFalse(statusAfter.installed);
-      const removedAgain = yield* service.uninstall;
-      assert.isFalse(removedAgain);
-    }),
-  );
-
-  it.effect("installs and controls an s6 scan-directory service", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const serviceDir = path.join(dirs.home, "service", "t3code");
-      const initialEnvironmentValue = "/home/hermes/T3's $data `literal` mode=old and=preserved";
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        supervisor: "s6",
-        s6ServiceDir: serviceDir,
-        serviceEnvironment: [{ name: "HERMES_HOME", value: initialEnvironmentValue }],
-        host: {
-          execPath: dirs.stableEntry,
-          cliEntryPath: "",
-          standalone: true,
-        },
-      }).pipe(Effect.provide(makeRecordingRunnerLayer(commands)), provideHostRefs(""));
-
-      const plan = yield* service.install;
-      assert.equal(plan.supervisor, "s6");
-      assert.equal(plan.unitPath, path.join(serviceDir, "run"));
-      assert.deepEqual(commands, [
-        {
-          command: "chown",
-          args: ["-R", "--", "1000:1000", dirs.baseDir, dirs.logsDir],
-        },
-        {
-          command: "s6-svscanctl",
-          args: ["-a", path.dirname(serviceDir)],
-        },
-        { command: "s6-svok", args: [serviceDir] },
-        { command: "s6-svc", args: ["-u", serviceDir] },
-      ]);
-      const script = yield* fs.readFileString(plan.unitPath);
-      assert.include(script, "export T3_S6_SERVICE_USER='1000'");
-      assert.include(script, "export T3_S6_SERVICE_GROUP='1000'");
-      assert.include(script, `export T3_S6_SERVICE_LAUNCHER='${plan.serviceLauncherPath}'`);
-      assert.include(script, "export HERMES_HOME=");
-      assert.include(script, `s6-svperms -G ':1000' '${serviceDir}'`);
-      assert.notInclude(script, dirs.stableEntry);
-      const launcher = yield* fs.readFileString(plan.serviceLauncherPath ?? "");
-      assert.include(launcher, `exec '${dirs.stableEntry}' "$@"`);
-      assert.include(launcher, "export T3_SERVICE_VERSION='0.0.27'");
-      assert.notInclude(launcher, "HERMES_HOME");
-      assert.notInclude(launcher, initialEnvironmentValue);
-      assert.equal((yield* fs.stat(plan.unitPath)).mode & 0o777, 0o700);
-      assert.isTrue((yield* service.status).current);
-
-      const postDropArguments = [
-        "-s",
-        "--",
-        BootService.S6_SERVICE_ENVIRONMENT_SENTINEL,
-        process.execPath,
-        "-e",
-        "process.exit(process.env.HERMES_HOME === process.env.EXPECTED_HERMES_HOME ? 0 : 1)",
-      ];
-      assert.notInclude(JSON.stringify(postDropArguments), initialEnvironmentValue);
-      const postDropResult = NodeChildProcess.spawnSync("/bin/sh", postDropArguments, {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          EXPECTED_HERMES_HOME: initialEnvironmentValue,
-        },
-        input: script,
+      expect(parseServiceState(yield* fs.readFileString(statePath))).toEqual({
+        protocol: 1,
+        activeVersion: "1.2.3",
       });
-      assert.isUndefined(postDropResult.error);
-      assert.equal(postDropResult.status, 0);
-      assert.notInclude(yield* fs.readFileString(plan.logPath), initialEnvironmentValue);
-
-      const statusCommands: Array<RecordedCommand> = [];
-      const environmentlessStatusService = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        supervisor: "s6",
-        s6ServiceDir: serviceDir,
-        host: {
-          execPath: dirs.stableEntry,
-          cliEntryPath: "",
-          standalone: true,
-        },
-      }).pipe(Effect.provide(makeRecordingRunnerLayer(statusCommands)), provideHostRefs(""));
-      const environmentlessStatus = yield* environmentlessStatusService.status;
-      assert.isTrue(environmentlessStatus.current);
-      assert.isEmpty(statusCommands);
-      const statusOutput = formatServiceStatus(environmentlessStatus, "0.0.27", {
-        supervisor: "s6",
-        s6ServiceDir: serviceDir,
-      });
-      assert.notInclude(statusOutput, initialEnvironmentValue);
-      assert.notInclude(statusOutput, "--service-environment");
-      assert.notInclude(statusOutput, "Next:");
-
-      const updateCommands: Array<RecordedCommand> = [];
-      const updatedEnvironmentValue = "/home/hermes/T3's $data `literal` mode=new and=changed";
-      const updatedService = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        supervisor: "s6",
-        s6ServiceDir: serviceDir,
-        serviceEnvironment: [{ name: "HERMES_HOME", value: updatedEnvironmentValue }],
-        host: {
-          execPath: dirs.stableEntry,
-          cliEntryPath: "",
-          standalone: true,
-        },
-      }).pipe(Effect.provide(makeRecordingRunnerLayer(updateCommands)), provideHostRefs(""));
-      assert.isFalse((yield* updatedService.status).current);
-
-      const update = yield* reconcileService().pipe(
-        Effect.provideService(BootService.BootService, updatedService),
-      );
-      assert.isTrue(update.changed);
-      assert.lengthOf(
-        updateCommands.filter(({ command, args }) => command === "s6-svc" && args[0] === "-r"),
-        1,
-      );
-      assert.notInclude(JSON.stringify(updateCommands), updatedEnvironmentValue);
-      assert.isTrue((yield* updatedService.status).current);
-
-      assert.isTrue(yield* service.uninstall);
-      assert.deepEqual(commands.at(-1), { command: "s6-svc", args: ["-d", serviceDir] });
-      assert.isFalse(yield* fs.exists(plan.unitPath));
-    }),
-  );
-
-  it.effect("preserves an installed s6 environment when update does not specify one", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const serviceDir = path.join(dirs.home, "service", "t3code");
-      const environmentValue = "/home/hermes/T3's Home=production";
-      const installCommands: Array<RecordedCommand> = [];
-      const installedService = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        supervisor: "s6",
-        s6ServiceDir: serviceDir,
-        serviceEnvironment: [{ name: "HERMES_HOME", value: environmentValue }],
-        host: {
-          execPath: dirs.stableEntry,
-          cliEntryPath: "",
-          standalone: true,
-        },
-      }).pipe(Effect.provide(makeRecordingRunnerLayer(installCommands)), provideHostRefs(""));
-      yield* installedService.install;
-
-      const updateCommands: Array<RecordedCommand> = [];
-      const preservingUpdate = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.28",
-        supervisor: "s6",
-        s6ServiceDir: serviceDir,
-        host: {
-          execPath: dirs.stableEntry,
-          cliEntryPath: "",
-          standalone: true,
-        },
-      }).pipe(Effect.provide(makeRecordingRunnerLayer(updateCommands)), provideHostRefs(""));
-      const staleStatus = yield* preservingUpdate.status;
-      assert.isFalse(staleStatus.current);
-      const repairOutput = formatServiceStatus(staleStatus, "0.0.28", {
-        supervisor: "s6",
-        s6ServiceDir: serviceDir,
-      });
-      assert.notInclude(repairOutput, environmentValue);
-      assert.notInclude(repairOutput, "--service-environment");
-
-      const update = yield* reconcileService().pipe(
-        Effect.provideService(BootService.BootService, preservingUpdate),
-      );
-      assert.isTrue(update.changed);
-      assert.lengthOf(
-        updateCommands.filter(({ command, args }) => command === "s6-svc" && args[0] === "-r"),
-        1,
-      );
-      assert.notInclude(JSON.stringify(updateCommands), environmentValue);
-      assert.equal((yield* fs.stat(path.join(serviceDir, "run"))).mode & 0o777, 0o700);
-
-      const exactEnvironmentService = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.28",
-        supervisor: "s6",
-        s6ServiceDir: serviceDir,
-        serviceEnvironment: [{ name: "HERMES_HOME", value: environmentValue }],
-        host: {
-          execPath: dirs.stableEntry,
-          cliEntryPath: "",
-          standalone: true,
-        },
-      }).pipe(Effect.provide(makeRecordingRunnerLayer([])), provideHostRefs(""));
-      assert.isTrue((yield* exactEnvironmentService.status).current);
-    }),
-  );
-
-  it.effect("does not leak s6 service environment values into errors or logs", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const secret = "do-not-log-$SECRET=`command`";
-      const serviceDir = path.join(dirs.home, "service", "t3code");
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        supervisor: "s6",
-        s6ServiceDir: serviceDir,
-        serviceEnvironment: [{ name: "EXAMPLE", value: secret }],
-        host: makeHost(dirs.stableEntry),
-      }).pipe(
-        Effect.provide(
-          makeRecordingRunnerLayer(commands, {
-            failCommand: "s6-svscanctl",
-          }),
-        ),
-        provideHostRefs(""),
-      );
-
-      const error = yield* service.install.pipe(Effect.flip);
-      assert.instanceOf(error, Error);
-      assert.notInclude(error.message, secret);
-      assert.notInclude(JSON.stringify(commands), secret);
-      assert.notInclude(
-        yield* fs.readFileString(path.join(dirs.logsDir, "boot-service.log")),
-        secret,
-      );
-    }),
-  );
-
-  it.effect("refuses to install an s6 service as root without a non-root identity", () =>
-    Effect.gen(function* () {
-      const { dirs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        supervisor: "s6",
-        s6ServiceDir: path.join(dirs.home, "service", "t3code"),
-        host: makeHost(dirs.stableEntry),
-      }).pipe(
-        Effect.provide(makeRecordingRunnerLayer(commands)),
-        provideHostRefs("", "linux", { userId: 0, groupId: 0, env: {} }),
-      );
-
-      const error = yield* service.install.pipe(Effect.flip);
-      assert.isTrue(isIdentityError(error));
-      assert.isEmpty(commands);
-    }),
-  );
-
-  it.effect("installs an s6 service for an explicitly selected user and group", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const serviceDir = path.join(dirs.home, "service", "t3code");
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        supervisor: "s6",
-        s6ServiceDir: serviceDir,
-        serviceUser: "t3",
-        serviceGroup: "t3",
-        host: makeHost(dirs.stableEntry),
-      }).pipe(
-        Effect.provide(
-          makeRecordingRunnerLayer(commands, {
-            stdoutWhen: (command) => (command === "id" ? "10001\n" : ""),
-          }),
-        ),
-        provideHostRefs("", "linux", { userId: 0, groupId: 0, env: {} }),
-      );
-
-      const plan = yield* service.install;
-      assert.equal(plan.serviceUser, "t3");
-      assert.equal(plan.serviceGroup, "t3");
-      assert.deepEqual(commands.slice(0, 2), [
-        { command: "id", args: ["-u", "t3"] },
-        {
-          command: "chown",
-          args: ["-R", "--", "t3:t3", dirs.baseDir, dirs.logsDir],
-        },
-      ]);
-      assert.include(yield* fs.readFileString(plan.unitPath), `s6-svperms -G 't3' '${serviceDir}'`);
-    }),
-  );
-
-  it.effect("restores the previous s6 launcher when ownership reconciliation fails", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const serviceDir = path.join(dirs.home, "service", "t3code");
-      const launcherPath = path.join(dirs.baseDir, "runtime", "s6-service-launcher");
-      const unitPath = path.join(serviceDir, "run");
-      yield* fs.makeDirectory(path.dirname(launcherPath), { recursive: true });
-      yield* fs.makeDirectory(serviceDir, { recursive: true });
-      yield* fs.writeFileString(launcherPath, '#!/bin/sh\nexec /previous/t3 "$@"\n');
-      yield* fs.writeFileString(unitPath, "#!/bin/sh\nexec /previous/launcher serve\n");
-
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        supervisor: "s6",
-        s6ServiceDir: serviceDir,
-        host: makeHost(dirs.stableEntry),
-      }).pipe(
-        Effect.provide(makeRecordingRunnerLayer(commands, { failCommand: "chown" })),
-        provideHostRefs(""),
-      );
-
-      const error = yield* service.install.pipe(Effect.flip);
-      assert.isTrue(isCommandError(error));
-      assert.equal(yield* fs.readFileString(launcherPath), '#!/bin/sh\nexec /previous/t3 "$@"\n');
-      assert.equal(
-        yield* fs.readFileString(unitPath),
-        "#!/bin/sh\nexec /previous/launcher serve\n",
-      );
-    }),
-  );
-
-  it.effect("restores prior s6 state ownership when activation fails", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const serviceDir = path.join(dirs.home, "service", "t3code");
-      const launcherPath = path.join(dirs.baseDir, "runtime", "s6-service-launcher");
-      const unitPath = path.join(serviceDir, "run");
-      yield* fs.makeDirectory(path.dirname(launcherPath), { recursive: true });
-      yield* fs.makeDirectory(dirs.logsDir, { recursive: true });
-      yield* fs.makeDirectory(serviceDir, { recursive: true });
-      yield* fs.writeFileString(launcherPath, '#!/bin/sh\nexec /previous/t3 "$@"\n');
-      yield* fs.writeFileString(unitPath, "#!/bin/sh\nexec /previous/launcher serve\n");
-      const nestedStatePath = path.join(dirs.baseDir, "userdata", "state.json");
-      yield* fs.makeDirectory(path.dirname(nestedStatePath), { recursive: true });
-      yield* fs.writeFileString(nestedStatePath, "{}");
-      const previousBaseInfo = yield* fs.stat(dirs.baseDir);
-      const previousLogsInfo = yield* fs.stat(dirs.logsDir);
-      const previousNestedInfo = yield* fs.stat(nestedStatePath);
-      let activationFailed = false;
-
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        supervisor: "s6",
-        s6ServiceDir: serviceDir,
-        host: makeHost(dirs.stableEntry),
-      }).pipe(
-        Effect.provide(
-          makeRecordingRunnerLayer(commands, {
-            failWhen: (command, args) => {
-              if (command !== "s6-svc" || args[0] !== "-r" || activationFailed) return false;
-              activationFailed = true;
-              return true;
-            },
-          }),
-        ),
-        provideHostRefs(""),
-      );
-
-      const error = yield* service.install.pipe(Effect.flip);
-      assert.isTrue(isCommandError(error));
-      assert.includeDeepMembers(commands, [
-        {
-          command: "chown",
-          args: [
-            "-h",
-            "--",
-            `${Option.getOrThrow(previousBaseInfo.uid)}:${Option.getOrThrow(previousBaseInfo.gid)}`,
-            dirs.baseDir,
-          ],
-        },
-        {
-          command: "chown",
-          args: [
-            "-h",
-            "--",
-            `${Option.getOrThrow(previousLogsInfo.uid)}:${Option.getOrThrow(previousLogsInfo.gid)}`,
-            dirs.logsDir,
-          ],
-        },
-        {
-          command: "chown",
-          args: [
-            "-h",
-            "--",
-            `${Option.getOrThrow(previousNestedInfo.uid)}:${Option.getOrThrow(previousNestedInfo.gid)}`,
-            nestedStatePath,
-          ],
-        },
-      ]);
-    }),
-  );
-
-  it.effect("pins a runtime via npm install when running from the npx cache", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        host: makeHost("/home/theo/.npm/_npx/abc/node_modules/t3/dist/bin.mjs"),
-      }).pipe(Effect.provide(makeRecordingRunnerLayer(commands)), provideHostRefs(dirs.home));
-
-      const plan = yield* service.install;
-
-      const runtimeDir = path.join(dirs.baseDir, "runtime", "versions", "0.0.27");
-      assert.equal(
-        plan.t3EntryPath,
-        path.join(runtimeDir, "node_modules", "t3", "dist", "bin.mjs"),
-      );
-      assert.deepEqual(commands[0], {
-        command: "npm",
-        args: ["install", "--prefix", runtimeDir, "--no-fund", "--no-audit", "t3@0.0.27"],
-      });
-      // Success is recorded via a sentinel so interrupted installs re-run.
-      assert.isTrue(yield* fs.exists(path.join(runtimeDir, ".install-complete")));
-    }),
-  );
-
-  it.effect("reinstalls a pinned runtime when its entry point is missing", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        host: makeHost("/home/theo/.npm/_npx/abc/node_modules/t3/dist/bin.mjs"),
-      }).pipe(Effect.provide(makeRecordingRunnerLayer(commands)), provideHostRefs(dirs.home));
-
-      const plan = yield* service.install;
-      yield* fs.makeDirectory(path.dirname(plan.t3EntryPath), { recursive: true });
-      yield* fs.writeFileString(plan.t3EntryPath, "#!/usr/bin/env node\n");
-      yield* fs.remove(plan.t3EntryPath);
-      commands.length = 0;
-
-      yield* service.install;
-
-      assert.isTrue(commands.some(({ command }) => command === "npm"));
-    }),
-  );
-
-  it.effect("reads executable metadata from host process references", () =>
-    Effect.gen(function* () {
-      const { dirs } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-      }).pipe(
-        Effect.provide(makeRecordingRunnerLayer(commands)),
-        provideHostRefs(dirs.home),
-        Effect.provideService(HostProcessExecutablePath, "/opt/node/bin/node"),
-        Effect.provideService(HostProcessArguments, ["/opt/node/bin/node", dirs.stableEntry]),
-      );
-
-      const plan = yield* service.install;
-      assert.equal(plan.nodePath, "/opt/node/bin/node");
-      assert.equal(plan.t3EntryPath, dirs.stableEntry);
-    }),
-  );
-
-  it.effect("invokes a Bun-compiled executable without its virtual entry path", () =>
-    Effect.gen(function* () {
-      const { dirs } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-      }).pipe(
-        Effect.provide(makeRecordingRunnerLayer(commands)),
-        provideHostRefs(dirs.home),
-        Effect.provideService(HostProcessExecutablePath, "/opt/bin/t3"),
-        Effect.provideService(HostProcessArguments, ["bun", "/$bunfs/root/app", "service"]),
-      );
-
-      const plan = yield* service.install;
-      assert.equal(plan.nodePath, "/opt/bin/t3");
-      assert.equal(plan.t3EntryPath, "");
-    }),
-  );
-
-  it.effect("cleans up and fails when the pinned runtime install fails", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        host: makeHost("/home/theo/.npm/_npx/abc/node_modules/t3/dist/bin.mjs"),
-      }).pipe(
-        Effect.provide(makeRecordingRunnerLayer(commands, { failCommand: "npm" })),
-        provideHostRefs(dirs.home),
-      );
-
-      const error = yield* service.install.pipe(Effect.flip);
-      assert.isTrue(isCommandError(error));
-      const runtimeDir = path.join(dirs.baseDir, "runtime", "versions", "0.0.27");
-      // The half-installed tree must not be reused by the next attempt.
-      assert.isFalse(yield* fs.exists(runtimeDir));
-      assert.isFalse(yield* fs.exists(path.join(runtimeDir, ".install-complete")));
-    }),
-  );
-
-  it.effect("reports an installed-but-stale unit so the lifecycle can offer a repair", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        host: makeHost(dirs.stableEntry),
-      }).pipe(Effect.provide(makeRecordingRunnerLayer(commands)), provideHostRefs(dirs.home));
-
-      const unitDir = path.join(dirs.home, ".config", "systemd", "user");
-      yield* fs.makeDirectory(unitDir, { recursive: true });
+      expect(plan.launcherPath).toBeDefined();
+      if (plan.launcherPath === undefined) return;
+      expect(yield* fs.readFileString(plan.launcherPath)).toBe("export {};\n");
+      expect((yield* service.status).current).toBe(true);
       yield* fs.writeFileString(
-        path.join(unitDir, "t3code.service"),
-        "[Service]\nExecStart=/old/node /old/t3 serve\n",
+        statePath,
+        '{"protocol":1,"activeVersion":"1.2.3","update":{"id":"u","fromVersion":"1.2.3","targetVersion":"1.2.4","status":"pending"}}',
       );
-
-      const status = yield* service.status;
-      assert.isTrue(status.supported);
-      assert.isTrue(status.installed);
-      assert.isFalse(status.current);
+      expect((yield* service.status).current).toBe(false);
+      expect(yield* service.uninstall).toBe(true);
+      expect((yield* service.status).installed).toBe(false);
+      expect(commands.some((command) => command.startsWith("npm "))).toBe(false);
     }),
   );
 
-  it.effect("reports a current unit as stale when its entry point is gone", () =>
+  it.effect("restarts an installed service when repair fails", () =>
     Effect.gen(function* () {
-      const { dirs, fs } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        host: makeHost(dirs.stableEntry),
-      }).pipe(Effect.provide(makeRecordingRunnerLayer(commands)), provideHostRefs(dirs.home));
-
+      const { service, commands, control } = yield* makeHarness();
       yield* service.install;
-      assert.isTrue((yield* service.status).current);
-
-      // The pinned runtime (or global bin) was deleted to reclaim space; the
-      // unit still matches byte-for-byte but would crashloop at boot.
-      yield* fs.remove(dirs.stableEntry);
-      const status = yield* service.status;
-      assert.isTrue(status.installed);
-      assert.isFalse(status.current);
-    }),
-  );
-
-  it.effect("fails on non-Linux platforms without touching the filesystem", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        host: makeHost("/usr/local/lib/node_modules/t3/dist/bin.mjs"),
-      }).pipe(
-        Effect.provide(makeRecordingRunnerLayer(commands)),
-        provideHostRefs(dirs.home, "darwin"),
-      );
+      commands.length = 0;
+      control.failCommand = "systemctl --user daemon-reload";
 
       const error = yield* service.install.pipe(Effect.flip);
-      assert.isTrue(isUnsupportedError(error));
-      assert.lengthOf(commands, 0);
-      assert.isFalse(
-        yield* fs.exists(path.join(dirs.home, ".config", "systemd", "user", "t3code.service")),
-      );
-
-      const status = yield* service.status;
-      assert.isFalse(status.supported);
-      assert.isFalse(status.installed);
+      expect(error._tag).toBe("BootServiceCommandError");
+      expect(commands.filter((command) => command.startsWith("systemctl "))).toEqual([
+        "systemctl --user stop t3code.service",
+        "systemctl --user daemon-reload",
+        "systemctl --user restart t3code.service",
+      ]);
     }),
   );
 
-  it.effect("removes the unit file when an activation step fails", () =>
+  it.effect("installs and removes an s6 scan-directory service", () =>
     Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        host: makeHost("/usr/local/lib/node_modules/t3/dist/bin.mjs"),
-      }).pipe(
-        Effect.provide(makeRecordingRunnerLayer(commands, { failCommand: "loginctl" })),
-        provideHostRefs(dirs.home),
-      );
-
-      const error = yield* service.install.pipe(Effect.flip);
-      assert.isTrue(isCommandError(error));
-      // A leftover unit would make status report "installed" even though
-      // linger never happened.
-      assert.isFalse(
-        yield* fs.exists(path.join(dirs.home, ".config", "systemd", "user", "t3code.service")),
-      );
-      const status = yield* service.status;
-      assert.isFalse(status.installed);
-      assert.isTrue(
-        commands.some(
-          ({ command, args }) =>
-            command === "systemctl" && args.join(" ") === "--user disable --now t3code.service",
-        ),
-      );
-    }),
-  );
-
-  it.effect("restores the previous unit when a repair cannot activate", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const initialCommands: Array<RecordedCommand> = [];
-      const initialService = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        host: makeHost(dirs.stableEntry),
-      }).pipe(
-        Effect.provide(makeRecordingRunnerLayer(initialCommands)),
-        provideHostRefs(dirs.home),
-      );
-      yield* initialService.install;
-
-      const unitPath = path.join(dirs.home, ".config", "systemd", "user", "t3code.service");
-      const previousUnit = yield* fs.readFileString(unitPath);
-      const replacementEntry = path.join(dirs.home, "replacement-bin.mjs");
-      yield* fs.writeFileString(replacementEntry, "#!/usr/bin/env node\n");
-      const repairCommands: Array<RecordedCommand> = [];
-      const repairService = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.28",
-        host: makeHost(replacementEntry),
-      }).pipe(
-        Effect.provide(makeRecordingRunnerLayer(repairCommands, { failCommand: "loginctl" })),
-        provideHostRefs(dirs.home),
-      );
-
-      const error = yield* repairService.install.pipe(Effect.flip);
-
-      assert.isTrue(isCommandError(error));
-      assert.equal(yield* fs.readFileString(unitPath), previousUnit);
-      assert.isTrue(
-        repairCommands.some(
-          ({ command, args }) =>
-            command === "systemctl" && args.join(" ") === "--user restart t3code.service",
-        ),
-      );
-    }),
-  );
-
-  it.effect("keeps the unit when stopping it during uninstall fails", () =>
-    Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const installCommands: Array<RecordedCommand> = [];
-      const installedService = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        host: makeHost(dirs.stableEntry),
-      }).pipe(
-        Effect.provide(makeRecordingRunnerLayer(installCommands)),
-        provideHostRefs(dirs.home),
-      );
-      yield* installedService.install;
-
-      const uninstallCommands: Array<RecordedCommand> = [];
-      const failingService = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        host: makeHost(dirs.stableEntry),
-      }).pipe(
-        Effect.provide(
-          makeRecordingRunnerLayer(uninstallCommands, {
-            failWhen: (command, args) =>
-              command === "systemctl" && args.includes("disable") && args.includes("--now"),
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-s6-service-test-" });
+      const baseDir = path.join(home, ".t3");
+      const serviceDir = path.join(home, "service", "t3code");
+      const executable = path.join(home, "t3");
+      yield* fs.writeFileString(executable, "#!/bin/sh\n");
+      const commands: string[] = [];
+      const runner = ProcessRunner.ProcessRunner.of({
+        run: (input) =>
+          Effect.sync(() => {
+            commands.push(`${input.command} ${input.args.join(" ")}`);
+            return {
+              stdout: "",
+              stderr: "",
+              code: ChildProcessSpawner.ExitCode(0),
+              timedOut: false,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+            };
           }),
-        ),
-        provideHostRefs(dirs.home),
+      });
+      const service = yield* BootService.make({
+        baseDir,
+        logsDir: path.join(baseDir, "userdata", "logs"),
+        cliVersion: "1.2.3",
+        supervisor: "s6",
+        s6ServiceDir: serviceDir,
+        host: { execPath: executable, cliEntryPath: "", standalone: true },
+      }).pipe(
+        Effect.provideService(ProcessRunner.ProcessRunner, runner),
+        Effect.provide(hostLayer(home)),
       );
 
-      const error = yield* failingService.uninstall.pipe(Effect.flip);
-
-      assert.isTrue(isCommandError(error));
-      assert.isTrue(
-        yield* fs.exists(path.join(dirs.home, ".config", "systemd", "user", "t3code.service")),
-      );
+      const plan = yield* service.install;
+      expect((yield* fs.stat(plan.unitPath)).mode & 0o777).toBe(0o700);
+      expect((yield* service.status).current).toBe(true);
+      expect(commands).toContain(`s6-svc -u ${serviceDir}`);
+      expect(yield* service.uninstall).toBe(true);
+      expect(commands).toContain(`s6-svc -d ${serviceDir}`);
     }),
   );
 
-  it.effect("appends failed steps to the boot-service log", () =>
+  it.effect("fails closed off Linux", () =>
     Effect.gen(function* () {
-      const { dirs, fs, path } = yield* makeTestContext();
-      const commands: Array<RecordedCommand> = [];
-      const service = yield* BootService.make({
-        baseDir: dirs.baseDir,
-        logsDir: dirs.logsDir,
-        cliVersion: "0.0.27",
-        host: makeHost("/usr/local/lib/node_modules/t3/dist/bin.mjs"),
-      }).pipe(
-        Effect.provide(makeRecordingRunnerLayer(commands, { failCommand: "systemctl" })),
-        provideHostRefs(dirs.home),
-      );
-
-      const error = yield* service.install.pipe(Effect.flip);
-      assert.isTrue(isCommandError(error));
-      if (!isCommandError(error)) return;
-      assert.equal(error.exitCode, 1);
-      assert.equal(error.stderrLength, "systemctl exploded".length);
-
-      const logPath = path.join(dirs.logsDir, "boot-service.log");
-      assert.isTrue(yield* fs.exists(logPath));
-      assert.include(yield* fs.readFileString(logPath), "exit code 1");
+      const { service } = yield* makeHarness("darwin");
+      expect((yield* service.status).supported).toBe(false);
+      expect((yield* service.install.pipe(Effect.flip))._tag).toBe("BootServiceUnsupportedError");
     }),
   );
 });

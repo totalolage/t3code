@@ -114,6 +114,7 @@ const makeCliTestServerConfig = (baseDir: string) =>
       ...derivedPaths,
       staticDir: undefined,
       devUrl: undefined,
+      devAllowedOrigins: [],
       noBrowser: true,
       startupPresentation: "browser",
       desktopBootstrapToken: undefined,
@@ -315,6 +316,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       NodeFS.mkdirSync(NodePath.dirname(config.serverRuntimeStatePath), { recursive: true });
       NodeFS.writeFileSync(
         config.serverRuntimeStatePath,
+        // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed malformed runtime-state fixture.
         `${JSON.stringify({
           version: 1,
           pid: 2_147_483_647,

@@ -25,6 +25,7 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as OrchestrationEngine from "./Services/OrchestrationEngine.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { projectThreadDetailSnapshot } from "./ActivityPayloadProjection.ts";
 import { normalizeDispatchCommand } from "./Normalizer.ts";
 import {
   annotateEnvironmentRequest,
@@ -150,8 +151,13 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.snapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          // Serve the lightweight command read model (thread bodies empty)
+          // instead of the fully hydrated snapshot. Hydrating every message
+          // and activity payload in the database has OOM-killed servers, and
+          // the route's only consumer (the project CLI) reads projects alone —
+          // UI clients load the shell and per-thread snapshots instead.
           return yield* projectionSnapshotQuery
-            .getSnapshot()
+            .getCommandReadModel()
             .pipe(
               Effect.catch((cause) =>
                 failEnvironmentInternal("orchestration_snapshot_failed", cause),
@@ -188,7 +194,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           if (Option.isNone(snapshot)) {
             return yield* failEnvironmentNotFound("thread_not_found");
           }
-          return snapshot.value;
+          return projectThreadDetailSnapshot(snapshot.value);
         }),
       )
       .handle(

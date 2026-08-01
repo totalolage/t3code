@@ -7,6 +7,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
+import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeHermesTextGeneration } from "../../textGeneration/HermesTextGeneration.ts";
@@ -34,6 +35,7 @@ const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
 const decodeSettings = Schema.decodeSync(HermesSettings);
 
 export type HermesDriverEnv =
+  | BackgroundPolicy.BackgroundPolicy
   | ChildProcessSpawner.ChildProcessSpawner
   | Crypto.Crypto
   | FileSystem.FileSystem

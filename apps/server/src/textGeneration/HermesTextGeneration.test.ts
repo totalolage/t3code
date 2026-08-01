@@ -68,6 +68,7 @@ it.layer(testLayer)("HermesTextGeneration", (it) => {
         const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
         const binaryPath = makeHermesWrapper(tempDir, {
           T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - shell fixture environment contains a fixed JSON response.
           T3_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({
             title: "Migrate Hermes to ACP",
           }),

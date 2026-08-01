@@ -1,8 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { Command } from "effect/unstable/cli";
 
+import * as NetService from "@t3tools/shared/Net";
 import { formatServiceStatus, parseServiceEnvironmentEntries, serviceCommand } from "./service.ts";
 
 const status = {
@@ -129,7 +131,7 @@ it.effect("rejects the option on install and update without CLI error leakage", 
       assert.include(error.message, "--supervisor s6");
       assert.notInclude(error.message, secret);
     }
-  }).pipe(Effect.provide(NodeServices.layer)),
+  }).pipe(Effect.provide(Layer.merge(NodeServices.layer, NetService.layer))),
 );
 
 it("does not include service environment values in stale status output", () => {

@@ -556,6 +556,7 @@ describe("remote thread watch", () => {
         }).pipe(Effect.flip);
         expect(question).toBeInstanceOf(RemoteWatchInteractionRequiredError);
         expect(question.message).not.toContain("secret");
+        // @effect-diagnostics-next-line preferSchemaOverJson:off - asserting the CLI's intentionally JSON-formatted error message.
         expect(JSON.parse(question.message).interaction).toMatchObject({
           kind: "user-input",
           requestId: "request-lifecycle-question",
@@ -570,6 +571,7 @@ describe("remote thread watch", () => {
         }).pipe(Effect.flip);
         expect(approval).toBeInstanceOf(RemoteWatchInteractionRequiredError);
         expect(approval.message).not.toContain("secret-command");
+        // @effect-diagnostics-next-line preferSchemaOverJson:off - asserting the CLI's intentionally JSON-formatted error message.
         expect(JSON.parse(approval.message).interaction).toEqual({
           kind: "approval",
           requestId: "request-lifecycle-approval",

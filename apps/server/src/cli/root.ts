@@ -1,14 +1,16 @@
 import * as Effect from "effect/Effect";
-import { Command } from "effect/unstable/cli";
+import { Argument, Command } from "effect/unstable/cli";
 import * as CliError from "effect/unstable/cli/CliError";
 
 import { authCommand } from "./auth.ts";
 import { connectCommand } from "./connect.ts";
 import { sharedServerCommandFlags } from "./config.ts";
 import { projectCommand } from "./project.ts";
+import { pairCommand } from "./pair.ts";
 import { localOrchestrationCommands, remoteCommand } from "./remote.ts";
 import { runServerCommand, serveCommand, startCommand } from "./server.ts";
 import { serviceCommand } from "./service.ts";
+import { servicePreflightCommand } from "./servicePreflight.ts";
 import { hasCloudPublicConfig } from "../cloud/publicConfig.ts";
 
 const connectPublicConfigMissingMessage =
@@ -20,7 +22,9 @@ class ConnectPublicConfigMissingError extends CliError.UserError {
   }
 }
 
-const connectUnavailableCommand = Command.make("connect").pipe(
+const connectUnavailableCommand = Command.make("connect", {
+  command: Argument.string("command").pipe(Argument.variadic),
+}).pipe(
   Command.withDescription("T3 Connect is unavailable in builds without public configuration."),
   Command.withHidden,
   Command.withHandler(() =>
@@ -40,9 +44,11 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
     Command.withSubcommands([
       startCommand,
       serveCommand,
+      pairCommand,
       authCommand,
       projectCommand,
       serviceCommand,
+      servicePreflightCommand,
       remoteCommand,
       ...localOrchestrationCommands,
       cloudEnabled ? connectCommand : connectUnavailableCommand,
