@@ -10,6 +10,7 @@
     const [status, setStatus] = useState(null);
     const [error, setError] = useState("");
     const [busy, setBusy] = useState("");
+    const [notice, setNotice] = useState("");
 
     const refresh = useCallback(async function () {
       try {
@@ -29,11 +30,21 @@
     async function run(action) {
       setBusy(action);
       setError("");
+      setNotice("");
       try {
         const body = await SDK.fetchJSON("/api/plugins/t3code/" + action, {
           method: "POST",
         });
         setStatus(body.status);
+        if (body.action === "not_needed") {
+          setNotice("Already up to date at " + body.desired_tag + ".");
+        } else if (body.action === "updated") {
+          setNotice("Updated the T3 service to " + body.installed_tag + ".");
+        } else if (body.action === "installed") {
+          setNotice("Installed and started the T3 service at " + body.installed_tag + ".");
+        } else if (body.action === "uninstalled") {
+          setNotice("Removed the supervised T3 service.");
+        }
       } catch (nextError) {
         setError(nextError instanceof Error ? nextError.message : String(nextError));
       } finally {
@@ -61,11 +72,20 @@
           error
             ? React.createElement("div", { className: "t3code-plugin__error" }, error)
             : null,
+          notice
+            ? React.createElement("p", { className: "t3code-plugin__note" }, notice)
+            : null,
           status
             ? React.createElement("dl", { className: "t3code-plugin__status" },
-                React.createElement("dt", null, "Installed product version"),
+                React.createElement("dt", null, "Repository release"),
+                React.createElement("dd", null, status.desired_tag || "No release tag"),
+                React.createElement("dt", null, "Installed service release"),
+                React.createElement("dd", null, status.installed_tag || "Not installed"),
+                React.createElement("dt", null, "Update status"),
                 React.createElement("dd", null,
-                  status.coherent ? status.installed_version : "Needs Update"
+                  status.update_available
+                    ? "Update available"
+                    : status.coherent ? "Up to date" : "Unknown"
                 ),
                 React.createElement("dt", null, "Address"),
                 React.createElement("dd", null, status.url),
@@ -92,7 +112,8 @@
                   React.createElement(Button, {
                     disabled: Boolean(busy),
                     onClick: function () { run("update"); }
-                  }, busy === "update" ? "Updating…" : "Update"),
+                  }, busy === "update" ? "Updating…" :
+                    status.update_available ? "Update service" : "Check for update"),
                   React.createElement(Button, {
                     variant: "outline",
                     disabled: Boolean(busy),
@@ -114,8 +135,8 @@
           ),
           installed
             ? React.createElement("p", { className: "t3code-plugin__note" },
-                "Update advances the T3/Hermes integration and native runtime " +
-                "together, activates them, and verifies service health. " +
+                "Hermes updates the plugin repository. This action reconciles the " +
+                "native service to the repository release tag and verifies service health. " +
                 "Removing the service keeps the downloaded binary and T3 Code data. " +
                 "If Hermes removes the plugin directory directly, the delayed watchdog " +
                 "removes both s6 slots."

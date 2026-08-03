@@ -11,10 +11,10 @@ import shutil
 import subprocess
 import tempfile
 import urllib.request
-from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from .config import PluginConfig
 
@@ -37,10 +37,9 @@ class ReleaseAsset:
 
 
 @dataclass(frozen=True)
-class CoherentRelease:
+class StagedRelease:
     version: str
     tag: str
-    source_commit: str
     binary_sha256: str
 
 
@@ -82,47 +81,52 @@ def _release_assets(
     if not isinstance(releases, list):
         raise ReleaseError("GitHub returned an invalid release list")
 
-    resolved: list[ReleaseAsset] = []
-    for release in releases:
-        if not isinstance(release, dict) or release.get("draft"):
-            continue
-        tag = release.get("tag_name")
-        assets = release.get("assets")
-        if not isinstance(tag, str) or not isinstance(assets, list):
-            continue
-        by_name = {
-            asset.get("name"): asset.get("browser_download_url")
-            for asset in assets
-            if isinstance(asset, dict)
-            and isinstance(asset.get("name"), str)
-            and isinstance(asset.get("browser_download_url"), str)
-        }
-        binary_names = [
-            name
-            for name in by_name
-            if isinstance(name, str)
-            and name.endswith(f"-{suffix}")
-            and not name.endswith(".sha256")
-        ]
-        if len(binary_names) != 1:
-            continue
-        binary_name = binary_names[0]
-        checksum_name = f"{binary_name}.sha256"
-        checksum_url = by_name.get(checksum_name)
-        if not isinstance(checksum_url, str):
-            continue
-        resolved.append(
-            ReleaseAsset(
-                version=tag.removeprefix("v"),
-                tag=tag,
-                binary_url=by_name[binary_name],
-                checksum_url=checksum_url,
-            )
-        )
+    resolved = [
+        asset
+        for release in releases
+        if (asset := _release_asset(release, suffix)) is not None
+    ]
     return resolved
 
 
-def resolve_release(config: PluginConfig, *, machine: str | None = None) -> ReleaseAsset:
+def _release_asset(value: object, suffix: str) -> ReleaseAsset | None:
+    if not isinstance(value, dict) or value.get("draft"):
+        return None
+    tag = value.get("tag_name")
+    assets = value.get("assets")
+    if not isinstance(tag, str) or not isinstance(assets, list):
+        return None
+    by_name = {
+        asset.get("name"): asset.get("browser_download_url")
+        for asset in assets
+        if isinstance(asset, dict)
+        and isinstance(asset.get("name"), str)
+        and isinstance(asset.get("browser_download_url"), str)
+    }
+    binary_names = [
+        name
+        for name in by_name
+        if isinstance(name, str)
+        and name.endswith(f"-{suffix}")
+        and not name.endswith(".sha256")
+    ]
+    if len(binary_names) != 1:
+        return None
+    binary_name = binary_names[0]
+    checksum_url = by_name.get(f"{binary_name}.sha256")
+    if not isinstance(checksum_url, str):
+        return None
+    return ReleaseAsset(
+        version=tag.removeprefix("v"),
+        tag=tag,
+        binary_url=by_name[binary_name],
+        checksum_url=checksum_url,
+    )
+
+
+def resolve_release(
+    config: PluginConfig, *, machine: str | None = None
+) -> ReleaseAsset:
     releases = _release_assets(config, machine=machine)
     if releases:
         return releases[0]
@@ -227,6 +231,63 @@ def install_release(config: PluginConfig) -> ReleaseAsset:
     return release
 
 
+def repository_release_tag(config: PluginConfig) -> str:
+    """Return the single release tag attached to the repository's current HEAD."""
+
+    result = _git(config.plugin_root, ["tag", "--points-at", "HEAD"])
+    tags = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not tags:
+        raise ReleaseError(
+            "the current T3 Code checkout is not at a release tag; update the "
+            "plugin repository with Hermes, then retry"
+        )
+    if len(tags) != 1:
+        raise ReleaseError(
+            "the current T3 Code checkout has multiple release tags; Hermes must "
+            "select one unambiguous release checkout"
+        )
+    tag = tags[0]
+    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._+-]*", tag):
+        raise ReleaseError("the current T3 Code checkout has an unsafe release tag")
+    return tag
+
+
+def resolve_release_tag(
+    config: PluginConfig,
+    tag: str,
+    *,
+    machine: str | None = None,
+) -> ReleaseAsset:
+    suffix = _target_suffix(machine)
+    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._+-]*", tag):
+        raise ReleaseError("release tag is unsafe for artifact resolution")
+    value = _request_json(
+        f"{GITHUB_API}/repos/{config.repository}/releases/tags/{quote(tag, safe='')}"
+    )
+    release = _release_asset(value, suffix)
+    if release is not None and release.tag == tag:
+        return release
+    raise ReleaseError(
+        f"release {tag} has no {suffix} artifact with an adjacent .sha256 checksum"
+    )
+
+
+def stage_release_tag(
+    config: PluginConfig,
+    tag: str,
+    destination: Path,
+    *,
+    machine: str | None = None,
+) -> StagedRelease:
+    release = resolve_release_tag(config, tag, machine=machine)
+    binary_sha256 = _stage_verified_binary(release, destination)
+    return StagedRelease(
+        version=release.version,
+        tag=release.tag,
+        binary_sha256=binary_sha256,
+    )
+
+
 def _git(
     plugin_root: Path,
     args: list[str],
@@ -250,96 +311,3 @@ def _git(
         detail = (result.stderr or result.stdout).strip()
         raise ReleaseError(detail or "git source validation failed")
     return result
-
-
-def _coherent_source_commit(
-    config: PluginConfig,
-    plugin_root: Path,
-    release: ReleaseAsset,
-) -> str:
-    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._+-]*", release.tag):
-        raise ReleaseError("release tag is unsafe for source resolution")
-    remote = _git(plugin_root, ["remote", "get-url", "origin"]).stdout.strip()
-    scp_match = re.fullmatch(
-        r"(?:[^@/\s]+@)?github\.com:([^/\s]+/[^/\s]+)",
-        remote,
-        flags=re.IGNORECASE,
-    )
-    if scp_match:
-        remote_repository = scp_match.group(1)
-    else:
-        parsed = urlsplit(remote)
-        if (
-            parsed.scheme not in {"https", "ssh", "git"}
-            or (parsed.hostname or "").lower() != "github.com"
-            or parsed.query
-            or parsed.fragment
-        ):
-            remote_repository = ""
-        else:
-            remote_repository = parsed.path.lstrip("/")
-    remote_repository = remote_repository.removesuffix(".git")
-    if remote_repository.lower() != config.repository.lower():
-        raise ReleaseError(
-            "plugin checkout origin does not match the configured T3 repository"
-        )
-    local_ref = f"refs/t3code-product-tags/{release.tag}"
-    _git(
-        plugin_root,
-        [
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "origin",
-            f"refs/tags/{release.tag}:{local_ref}",
-        ],
-    )
-    commit = _git(
-        plugin_root,
-        ["rev-parse", f"{local_ref}^{{commit}}"],
-    ).stdout.strip()
-    if not re.fullmatch(r"[0-9a-f]{40}", commit):
-        raise ReleaseError("release tag did not resolve to a source commit")
-    manifest_path = "integrations/hermes_plugin/product-release.json"
-    raw_manifest = _git(
-        plugin_root,
-        ["show", f"{commit}:{manifest_path}"],
-    ).stdout
-    try:
-        manifest = json.loads(raw_manifest)
-    except json.JSONDecodeError as error:
-        raise ReleaseError("coherent release manifest is malformed") from error
-    if manifest != {
-        "schema_version": 1,
-        "product": "t3code-hermes",
-        "version_identity": "release-tag",
-    }:
-        raise ReleaseError("release does not declare the Hermes product contract")
-    return commit
-
-
-def stage_coherent_release(
-    config: PluginConfig,
-    *,
-    plugin_root: Path,
-    destination: Path,
-    machine: str | None = None,
-) -> CoherentRelease:
-    failures: list[str] = []
-    for release in _release_assets(config, machine=machine):
-        try:
-            source_commit = _coherent_source_commit(config, plugin_root, release)
-            binary_sha256 = _stage_verified_binary(release, destination)
-            return CoherentRelease(
-                version=release.version,
-                tag=release.tag,
-                source_commit=source_commit,
-                binary_sha256=binary_sha256,
-            )
-        except ReleaseError as error:
-            failures.append(f"{release.tag}: {error}")
-    suffix = f": {'; '.join(failures)}" if failures else ""
-    raise ReleaseError(
-        "no release declares a compatible T3/Hermes source-and-runtime unit"
-        + suffix
-    )
