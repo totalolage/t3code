@@ -1,9 +1,9 @@
-import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import test from "node:test";
-import vm from "node:vm";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeTest from "node:test";
+import * as NodeVM from "node:vm";
 
-const source = await readFile(new URL("./dist/index.js", import.meta.url), "utf8");
+const source = await NodeFSP.readFile(new URL("./dist/index.js", import.meta.url), "utf8");
 
 function renderStatus(status) {
   let registeredComponent;
@@ -42,7 +42,7 @@ function renderStatus(status) {
       },
     },
   };
-  vm.runInNewContext(source, { window });
+  NodeVM.runInNewContext(source, { window });
   return registeredComponent();
 }
 
@@ -101,7 +101,7 @@ function currentStatus(overrides = {}) {
   };
 }
 
-test("durably uninstalled service offers Install despite a stale s6 slot", () => {
+NodeTest.test("durably uninstalled service offers Install despite a stale s6 slot", () => {
   const page = renderStatus(
     currentStatus({
       desired_state: "uninstalled",
@@ -113,12 +113,12 @@ test("durably uninstalled service offers Install despite a stale s6 slot", () =>
     }),
   );
 
-  assert.match(text(page), /Stale supervisor/);
-  assert.ok(buttons(page).some(({ label }) => label === "Install and start"));
-  assert.ok(!buttons(page).some(({ label }) => /Update service|Check for update/.test(label)));
+  NodeAssert.match(text(page), /Stale supervisor/);
+  NodeAssert.ok(buttons(page).some(({ label }) => label === "Install and start"));
+  NodeAssert.ok(!buttons(page).some(({ label }) => /Update service|Check for update/.test(label)));
 });
 
-test("durably uninstalled service distinguishes a stale running process", () => {
+NodeTest.test("durably uninstalled service distinguishes a stale running process", () => {
   const page = renderStatus(
     currentStatus({
       desired_state: "uninstalled",
@@ -129,11 +129,11 @@ test("durably uninstalled service distinguishes a stale running process", () => 
     }),
   );
 
-  assert.match(text(page), /Stale process/);
-  assert.ok(buttons(page).some(({ label }) => label === "Install and start"));
+  NodeAssert.match(text(page), /Stale process/);
+  NodeAssert.ok(buttons(page).some(({ label }) => label === "Install and start"));
 });
 
-test("pre-PR50 backend schema requires a dashboard restart", () => {
+NodeTest.test("pre-PR50 backend schema requires a dashboard restart", () => {
   const page = renderStatus({
     installed_version: "0.0.30",
     coherent: true,
@@ -147,23 +147,23 @@ test("pre-PR50 backend schema requires a dashboard restart", () => {
   });
   const pageText = text(page);
 
-  assert.match(pageText, /Restart Hermes Dashboard to activate the updated plugin backend/);
-  assert.doesNotMatch(pageText, /No release tag/);
-  assert.deepEqual(
+  NodeAssert.match(pageText, /Restart Hermes Dashboard to activate the updated plugin backend/);
+  NodeAssert.doesNotMatch(pageText, /No release tag/);
+  NodeAssert.deepEqual(
     buttons(page).find(({ label }) => label === "Restart required"),
     { label: "Restart required", disabled: true },
   );
 });
 
-test("installed current service is shown as up to date", () => {
+NodeTest.test("installed current service is shown as up to date", () => {
   const page = renderStatus(currentStatus());
 
-  assert.match(text(page), /Up to date/);
-  assert.ok(buttons(page).some(({ label }) => label === "Check for update"));
-  assert.ok(buttons(page).some(({ label }) => label === "Remove service"));
+  NodeAssert.match(text(page), /Up to date/);
+  NodeAssert.ok(buttons(page).some(({ label }) => label === "Check for update"));
+  NodeAssert.ok(buttons(page).some(({ label }) => label === "Remove service"));
 });
 
-test("installed older release is shown as update available", () => {
+NodeTest.test("installed older release is shown as update available", () => {
   const page = renderStatus(
     currentStatus({
       desired_tag: "v0.0.31",
@@ -173,22 +173,25 @@ test("installed older release is shown as update available", () => {
     }),
   );
 
-  assert.match(text(page), /Update available/);
-  assert.ok(buttons(page).some(({ label }) => label === "Update service"));
+  NodeAssert.match(text(page), /Update available/);
+  NodeAssert.ok(buttons(page).some(({ label }) => label === "Update service"));
 });
 
-test("current backend tag-resolution failure is not a restart-required state", () => {
+NodeTest.test("current backend tag-resolution failure is not a restart-required state", () => {
   const page = renderStatus(
     currentStatus({ desired_tag: null, coherent: false, update_available: false }),
   );
   const pageText = text(page);
 
-  assert.match(pageText, /No release tag/);
-  assert.match(pageText, /Release tag unavailable/);
-  assert.doesNotMatch(pageText, /Restart Hermes Dashboard to activate the updated plugin backend/);
+  NodeAssert.match(pageText, /No release tag/);
+  NodeAssert.match(pageText, /Release tag unavailable/);
+  NodeAssert.doesNotMatch(
+    pageText,
+    /Restart Hermes Dashboard to activate the updated plugin backend/,
+  );
 });
 
-test("reconciliation failure takes precedence over current release labels", () => {
+NodeTest.test("reconciliation failure takes precedence over current release labels", () => {
   const page = renderStatus(
     currentStatus({
       reachable: false,
@@ -198,8 +201,8 @@ test("reconciliation failure takes precedence over current release labels", () =
   );
   const pageText = text(page);
 
-  assert.match(pageText, /Recovery failed/);
-  assert.match(pageText, /Retained runtime checksum mismatch/);
-  assert.doesNotMatch(pageText, /Up to date/);
-  assert.doesNotMatch(pageText, /Starting/);
+  NodeAssert.match(pageText, /Recovery failed/);
+  NodeAssert.match(pageText, /Retained runtime checksum mismatch/);
+  NodeAssert.doesNotMatch(pageText, /Up to date/);
+  NodeAssert.doesNotMatch(pageText, /Starting/);
 });
