@@ -58,8 +58,14 @@ class HermesPluginContractTest(unittest.TestCase):
         manifest_text = (REPOSITORY_ROOT / "plugin.yaml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("  mode: managed\n", manifest_text)
-        self.assertIn("  contract: t3code-hermes-v1\n", manifest_text)
+        self.assertNotIn("mode: managed", manifest_text)
+        self.assertNotIn("t3code-hermes-v1", manifest_text)
+        dashboard_source = (
+            REPOSITORY_ROOT / "dashboard" / "dist" / "index.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"Repository release"', dashboard_source)
+        self.assertIn('"Installed service release"', dashboard_source)
+        self.assertIn('body.action === "not_needed"', dashboard_source)
 
         parent = types.ModuleType("hermes_plugins")
         parent.__path__ = []

@@ -10,14 +10,15 @@ from unittest.mock import patch
 
 from integrations.hermes_plugin.config import load_config
 from integrations.hermes_plugin.releases import (
-    CoherentRelease,
     ReleaseAsset,
     ReleaseError,
+    StagedRelease,
     install_release,
+    repository_release_tag,
     resolve_release,
-    stage_coherent_release,
+    resolve_release_tag,
+    stage_release_tag,
 )
-from integrations.hermes_plugin import releases as releases_module
 
 
 class ReleaseResolutionTest(unittest.TestCase):
@@ -119,13 +120,7 @@ class ReleaseResolutionTest(unittest.TestCase):
         self.assertEqual(config.binary_path.read_bytes(), binary)
         self.assertTrue(config.binary_path.stat().st_mode & 0o100)
 
-    def test_selects_newest_release_with_matching_source_contract(self) -> None:
-        newest = ReleaseAsset(
-            version="1.2.4",
-            tag="v1.2.4",
-            binary_url="https://example.test/t3-1.2.4",
-            checksum_url="https://example.test/t3-1.2.4.sha256",
-        )
+    def test_stages_the_exact_requested_tag_instead_of_the_newest_release(self) -> None:
         compatible = ReleaseAsset(
             version="1.2.3",
             tag="v1.2.3",
@@ -134,66 +129,66 @@ class ReleaseResolutionTest(unittest.TestCase):
         )
         destination = Path(self.temporary.name) / "staged" / "t3"
 
-        def source_commit(_config, _plugin_root, release):
-            if release is newest:
-                raise ReleaseError("missing coherent manifest")
-            return "a" * 40
-
         with (
             patch(
-                "integrations.hermes_plugin.releases._release_assets",
-                return_value=[newest, compatible],
-            ),
-            patch(
-                "integrations.hermes_plugin.releases._coherent_source_commit",
-                side_effect=source_commit,
-            ),
+                "integrations.hermes_plugin.releases._request_json",
+                return_value={
+                    "tag_name": compatible.tag,
+                    "draft": False,
+                    "assets": [
+                        {
+                            "name": "t3-1.2.3-linux-x64",
+                            "browser_download_url": compatible.binary_url,
+                        },
+                        {
+                            "name": "t3-1.2.3-linux-x64.sha256",
+                            "browser_download_url": compatible.checksum_url,
+                        },
+                    ],
+                },
+            ) as request_json,
             patch(
                 "integrations.hermes_plugin.releases._stage_verified_binary",
                 return_value="b" * 64,
             ) as stage_binary,
         ):
-            release = stage_coherent_release(
+            release = stage_release_tag(
                 self.config,
-                plugin_root=Path(self.temporary.name),
-                destination=destination,
+                compatible.tag,
+                destination,
             )
 
         self.assertEqual(
             release,
-            CoherentRelease(
+            StagedRelease(
                 version="1.2.3",
                 tag="v1.2.3",
-                source_commit="a" * 40,
                 binary_sha256="b" * 64,
             ),
         )
         stage_binary.assert_called_once_with(compatible, destination)
-
-    def test_rejects_suffix_matching_non_github_source_origin(self) -> None:
-        release = ReleaseAsset(
-            version="1.2.3",
-            tag="v1.2.3",
-            binary_url="https://example.test/t3",
-            checksum_url="https://example.test/t3.sha256",
+        request_json.assert_called_once_with(
+            "https://api.github.com/repos/totalolage/t3code/releases/tags/v1.2.3"
         )
+
+    def test_requested_tag_must_have_a_release_artifact(self) -> None:
         with (
             patch(
-                "integrations.hermes_plugin.releases._git",
-                return_value=CompletedProcess(
-                    args=[],
-                    returncode=0,
-                    stdout="https://evil.example/x/totalolage/t3code.git\n",
-                    stderr="",
-                ),
+                "integrations.hermes_plugin.releases._request_json",
+                return_value={},
             ),
-            self.assertRaisesRegex(
-                ReleaseError,
-                "origin does not match",
-            ),
+            self.assertRaisesRegex(ReleaseError, "v1.2.3 has no linux-x64 artifact"),
         ):
-            releases_module._coherent_source_commit(
-                self.config,
-                Path(self.temporary.name),
-                release,
-            )
+            resolve_release_tag(self.config, "v1.2.3", machine="x86_64")
+
+    def test_current_checkout_requires_one_unambiguous_tag(self) -> None:
+        for output, message in (("", "not at a release tag"), ("v1\nv2\n", "multiple")):
+            with self.subTest(output=output):
+                with (
+                    patch(
+                        "integrations.hermes_plugin.releases._git",
+                        return_value=CompletedProcess([], 0, output, ""),
+                    ),
+                    self.assertRaisesRegex(ReleaseError, message),
+                ):
+                    repository_release_tag(self.config)

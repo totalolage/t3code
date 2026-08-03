@@ -1254,7 +1254,7 @@ class ServiceDefinitionTest(unittest.TestCase):
                     ).hexdigest(),
                     "binary_version": "0.0.30",
                     "product_version": "0.0.30",
-                    "product_source_commit": "a" * 40,
+                    "product_release_tag": "v0.0.30",
                 }
             )
             + "\n",
@@ -1267,21 +1267,20 @@ class ServiceDefinitionTest(unittest.TestCase):
                 return_value="0.0.30",
             ),
             patch(
-                "integrations.hermes_plugin.service._current_source_commit",
-                return_value="a" * 40,
-            ),
-            patch(
-                "integrations.hermes_plugin.service._source_checkout_clean",
-                return_value=True,
+                "integrations.hermes_plugin.service.repository_release_tag",
+                return_value="v0.0.30",
             ),
         ):
             current = status(config)
 
         self.assertTrue(current.coherent)
         self.assertEqual(current.installed_version, "0.0.30")
+        self.assertEqual(current.desired_tag, "v0.0.30")
+        self.assertEqual(current.installed_tag, "v0.0.30")
+        self.assertFalse(current.update_available)
         self.assertEqual(current.binary_version, "0.0.30")
 
-    def test_source_only_and_runtime_only_states_never_report_success(self) -> None:
+    def test_release_tag_alone_decides_update_drift(self) -> None:
         root = Path(self.temporary.name)
         config = replace(
             self.config,
@@ -1301,91 +1300,39 @@ class ServiceDefinitionTest(unittest.TestCase):
                     ).hexdigest(),
                     "binary_version": "0.0.30",
                     "product_version": "0.0.30",
-                    "product_source_commit": "a" * 40,
+                    "product_release_tag": "v0.0.30",
                 }
             )
             + "\n",
             encoding="utf-8",
         )
 
-        for binary, source in (
-            ("0.0.30", "b" * 40),
-            ("0.0.31", "a" * 40),
-        ):
-            with self.subTest(binary=binary, source=source):
-                with (
-                    patch(
-                        "integrations.hermes_plugin.service.binary_version",
-                        return_value=binary,
-                    ),
-                    patch(
-                        "integrations.hermes_plugin.service._current_source_commit",
-                        return_value=source,
-                    ),
-                    patch(
-                        "integrations.hermes_plugin.service._source_checkout_clean",
-                        return_value=True,
-                    ),
-                ):
-                    current = status(config)
-                self.assertFalse(current.coherent)
-                self.assertIsNone(current.installed_version)
-
         with (
             patch(
                 "integrations.hermes_plugin.service.binary_version",
-                return_value="0.0.30",
+                return_value="9.9.9-different-binary-version",
             ),
             patch(
-                "integrations.hermes_plugin.service._current_source_commit",
-                return_value="a" * 40,
+                "integrations.hermes_plugin.service.repository_release_tag",
+                return_value="v0.0.30",
             ),
+        ):
+            current = status(config)
+        self.assertTrue(current.coherent)
+        self.assertFalse(current.update_available)
+        self.assertEqual(current.installed_tag, "v0.0.30")
+
+        with (
             patch(
-                "integrations.hermes_plugin.service._source_checkout_clean",
-                return_value=False,
+                "integrations.hermes_plugin.service.repository_release_tag",
+                return_value="v0.0.31",
             ),
         ):
             current = status(config)
         self.assertFalse(current.coherent)
-        self.assertIsNone(current.installed_version)
-
-        with (
-            patch(
-                "integrations.hermes_plugin.service._current_source_commit",
-                return_value="a" * 40,
-            ),
-            patch(
-                "integrations.hermes_plugin.service._source_checkout_clean",
-                return_value=False,
-            ),
-            self.assertRaisesRegex(
-                ServiceError,
-                "source that is changed",
-            ),
-        ):
-            service_module._validate_recovery_source(
-                config,
-                {"product_source_commit": "a" * 40},
-            )
-
-        config.binary_path.write_bytes(b"changed runtime reporting same version")
-        with (
-            patch(
-                "integrations.hermes_plugin.service.binary_version",
-                return_value="0.0.30",
-            ),
-            patch(
-                "integrations.hermes_plugin.service._current_source_commit",
-                return_value="a" * 40,
-            ),
-            patch(
-                "integrations.hermes_plugin.service._source_checkout_clean",
-                return_value=True,
-            ),
-        ):
-            current = status(config)
-        self.assertFalse(current.coherent)
-        self.assertIsNone(current.installed_version)
+        self.assertTrue(current.update_available)
+        self.assertEqual(current.desired_tag, "v0.0.31")
+        self.assertEqual(current.installed_tag, "v0.0.30")
 
     def test_product_health_proves_current_process_listener_and_http(self) -> None:
         proc_root = Path(self.temporary.name) / "proc"
@@ -1509,20 +1456,12 @@ class ServiceDefinitionTest(unittest.TestCase):
             patch(
                 "integrations.hermes_plugin.service._verify_product_health"
             ) as verify_health,
-            patch(
-                "integrations.hermes_plugin.service._current_source_commit",
-                return_value="a" * 40,
-            ),
-            patch(
-                "integrations.hermes_plugin.service._source_checkout_clean",
-                return_value=True,
-            ),
         ):
             result = service_module._activate_staged_product_locked(
                 config,
                 staged_binary=staged,
                 product_version="0.0.30",
-                source_commit="a" * 40,
+                release_tag="v0.0.30",
                 binary_sha256=checksum,
             )
 
@@ -1533,9 +1472,9 @@ class ServiceDefinitionTest(unittest.TestCase):
         verify_health.assert_called_once_with(config, 9621)
         state = json.loads(config.service_state_path.read_text(encoding="utf-8"))
         self.assertEqual(state["product_version"], "0.0.30")
-        self.assertEqual(state["product_source_commit"], "a" * 40)
+        self.assertEqual(state["product_release_tag"], "v0.0.30")
 
-    def test_coherent_activation_rejects_a_late_source_move(self) -> None:
+    def test_service_activation_does_not_compare_source_commit(self) -> None:
         root = Path(self.temporary.name)
         config = replace(
             self.config,
@@ -1564,30 +1503,23 @@ class ServiceDefinitionTest(unittest.TestCase):
             ),
             patch("integrations.hermes_plugin.service._verify_product_health"),
             patch(
-                "integrations.hermes_plugin.service._current_source_commit",
-                return_value="b" * 40,
-            ),
-            patch(
-                "integrations.hermes_plugin.service._source_checkout_clean",
-                return_value=True,
-            ),
-            patch(
                 "integrations.hermes_plugin.service._set_desired_state"
             ) as set_desired_state,
-            self.assertRaisesRegex(
-                ServiceError,
-                "source changed during coherent activation",
-            ),
         ):
             service_module._activate_staged_product_locked(
                 config,
                 staged_binary=staged,
                 product_version="0.0.30",
-                source_commit="a" * 40,
+                release_tag="v0.0.30",
                 binary_sha256=checksum,
             )
 
-        set_desired_state.assert_not_called()
+        set_desired_state.assert_called_once_with(
+            config,
+            "installed",
+            version="0.0.30",
+            release_tag="v0.0.30",
+        )
 
     def test_coherent_activation_rechecks_retained_runtime_checksum(self) -> None:
         root = Path(self.temporary.name)
@@ -1613,7 +1545,7 @@ class ServiceDefinitionTest(unittest.TestCase):
                 config,
                 staged_binary=config.binary_path,
                 product_version="0.0.30",
-                source_commit="a" * 40,
+                release_tag="v0.0.30",
                 binary_sha256=hashlib.sha256(b"verified runtime").hexdigest(),
             )
 

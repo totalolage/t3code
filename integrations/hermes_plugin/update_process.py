@@ -1,4 +1,4 @@
-"""Isolated entry point for coherent Hermes product updates."""
+"""Isolated entry point for tag-driven T3 service updates."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 def main() -> int:
     if len(sys.argv) < 3:
-        print("invalid coherent update invocation", file=sys.stderr)
+        print("invalid service update invocation", file=sys.stderr)
         return 2
     plugin_root = Path(sys.argv[1]).resolve()
     sys.path.insert(0, str(plugin_root))

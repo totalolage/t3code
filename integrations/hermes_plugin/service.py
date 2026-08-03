@@ -26,7 +26,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import PluginConfig
-from .releases import binary_version, install_release
+from .releases import (
+    ReleaseError,
+    binary_version,
+    install_release,
+    repository_release_tag,
+)
 
 
 class ServiceError(RuntimeError):
@@ -50,7 +55,9 @@ class ServiceStatus:
     reconciliation_status: str = "idle"
     reconciliation_error: str | None = None
     installed_version: str | None = None
-    source_commit: str | None = None
+    desired_tag: str | None = None
+    installed_tag: str | None = None
+    update_available: bool = False
     coherent: bool = False
 
     def to_dict(self) -> dict[str, object]:
@@ -188,7 +195,7 @@ def _set_desired_state(
     desired_state: str,
     *,
     version: str | None = None,
-    source_commit: str | None = None,
+    release_tag: str | None = None,
 ) -> None:
     state: dict[str, object] = {
         "version": _STATE_VERSION,
@@ -199,9 +206,9 @@ def _set_desired_state(
         state["binary_sha256"] = _binary_sha256(config.binary_path)
         if version is not None:
             state["binary_version"] = version
-        if source_commit is not None and version is not None:
+        if release_tag is not None and version is not None:
             state["product_version"] = version
-            state["product_source_commit"] = source_commit
+            state["product_release_tag"] = release_tag
     _write_service_state(config, state)
     with _RECONCILIATION_LOCK:
         _RUNTIME_RECONCILIATION.pop(str(config.service_state_path), None)
@@ -678,43 +685,6 @@ def _verify_product_health(
         raise ServiceError("live T3 service did not pass HTTP health verification")
 
 
-def _current_source_commit(config: PluginConfig) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=config.plugin_root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    commit = result.stdout.strip()
-    if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", commit):
-        return commit
-    return None
-
-
-def _source_checkout_clean(config: PluginConfig) -> bool:
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            cwd=config.plugin_root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0 and not result.stdout.strip()
-
-
 def _binary_digest_for_status(path: Path) -> str | None:
     try:
         before = path.stat()
@@ -761,20 +731,17 @@ def status(config: PluginConfig) -> ServiceStatus:
     desired_state, reconciliation_status, reconciliation_error = (
         _service_state_for_status(config)
     )
-    source_commit = _current_source_commit(config)
     product_version = None
-    expected_source_commit = None
+    installed_tag = None
     expected_binary_sha256 = None
     try:
         state = _read_service_state(config)
         if state is not None:
             raw_version = state.get("product_version")
-            raw_commit = state.get("product_source_commit")
+            raw_tag = state.get("product_release_tag")
             raw_digest = state.get("binary_sha256")
             product_version = str(raw_version) if isinstance(raw_version, str) else None
-            expected_source_commit = (
-                str(raw_commit) if isinstance(raw_commit, str) else None
-            )
+            installed_tag = str(raw_tag) if isinstance(raw_tag, str) else None
             expected_binary_sha256 = (
                 str(raw_digest) if isinstance(raw_digest, str) else None
             )
@@ -792,14 +759,19 @@ def status(config: PluginConfig) -> ServiceStatus:
     current_binary_version = (
         binary_version(config.binary_path) if binary_verified else None
     )
-    coherent = bool(
-        product_version
-        and product_version == current_binary_version
-        and binary_verified
-        and expected_source_commit
-        and expected_source_commit == source_commit
-        and _source_checkout_clean(config)
-    )
+    try:
+        desired_tag = repository_release_tag(config)
+    except ReleaseError:
+        desired_tag = None
+    if (
+        installed_tag is None
+        and product_version is not None
+        and desired_tag is not None
+    ):
+        installed_tag = (
+            f"v{product_version}" if desired_tag.startswith("v") else product_version
+        )
+    coherent = bool(desired_tag and installed_tag and desired_tag == installed_tag)
     return ServiceStatus(
         binary_installed=config.binary_path.is_file(),
         binary_version=current_binary_version,
@@ -815,8 +787,14 @@ def status(config: PluginConfig) -> ServiceStatus:
         desired_state=desired_state,
         reconciliation_status=reconciliation_status,
         reconciliation_error=reconciliation_error,
-        installed_version=product_version if coherent else None,
-        source_commit=source_commit,
+        installed_version=product_version,
+        desired_tag=desired_tag,
+        installed_tag=installed_tag,
+        update_available=bool(
+            desired_tag
+            and desired_state == _DESIRED_INSTALLED
+            and desired_tag != installed_tag
+        ),
         coherent=coherent,
     )
 
@@ -1185,15 +1163,15 @@ def _activate_staged_product_locked(
     *,
     staged_binary: Path,
     product_version: str,
-    source_commit: str,
+    release_tag: str,
     binary_sha256: str,
 ) -> dict[str, object]:
     if _binary_sha256(staged_binary) != binary_sha256:
-        raise ServiceError("staged coherent runtime checksum changed before activation")
+        raise ServiceError("staged runtime checksum changed before activation")
     reported_version = binary_version(staged_binary)
     if reported_version != product_version:
         raise ServiceError(
-            f"staged coherent runtime reported {reported_version or 'no version'}; "
+            f"staged runtime reported {reported_version or 'no version'}; "
             f"expected {product_version}"
         )
     config.binary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1213,19 +1191,11 @@ def _activate_staged_product_locked(
     _install_watchdog(config)
     pid = _verify_t3_service_up(config)
     _verify_product_health(config, pid)
-    if (
-        _current_source_commit(config) != source_commit
-        or not _source_checkout_clean(config)
-    ):
-        raise ServiceError(
-            "plugin source changed during coherent activation; durable product "
-            "state was not updated"
-        )
     _set_desired_state(
         config,
         _DESIRED_INSTALLED,
         version=product_version,
-        source_commit=source_commit,
+        release_tag=release_tag,
     )
     return {
         "ok": True,
@@ -1328,22 +1298,6 @@ def _validate_recovery_binary(
     return version
 
 
-def _validate_recovery_source(
-    config: PluginConfig,
-    state: dict[str, object],
-) -> None:
-    expected = state.get("product_source_commit")
-    if not isinstance(expected, str):
-        return
-    current = _current_source_commit(config)
-    if current != expected or not _source_checkout_clean(config):
-        raise ServiceError(
-            "automatic recovery found plugin source that is changed or does "
-            "not match the installed coherent product version; use the single "
-            "Update action after resolving local checkout changes"
-        )
-
-
 def reconcile(config: PluginConfig) -> dict[str, object]:
     """Restore missing ephemeral s6 slots from durable operator intent."""
 
@@ -1364,8 +1318,6 @@ def _reconcile_locked(config: PluginConfig) -> dict[str, object]:
         if state is None or state["desired_state"] != _DESIRED_INSTALLED:
             _record_reconciliation(config, "not_requested")
             return {"ok": True, "action": "not_requested"}
-        _validate_recovery_source(config, state)
-
         service_installed = (config.service_dir / "run").is_file()
         watchdog_installed = (config.watchdog_service_dir / "run").is_file()
         service_running = service_installed and _service_running(config.service_dir)
