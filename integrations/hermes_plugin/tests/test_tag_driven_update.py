@@ -180,6 +180,67 @@ class TagDrivenUpdateTest(unittest.TestCase):
         resolve_target.assert_not_called()
         activate.assert_not_called()
 
+    def test_install_converges_an_uninstalled_stale_slot_via_update_lifecycle(
+        self,
+    ) -> None:
+        desired_tag = "v0.0.31"
+        self.config.service_dir.mkdir(parents=True)
+        (self.config.service_dir / "run").write_text(
+            "stale slot\n", encoding="utf-8"
+        )
+        service._set_desired_state(self.config, "uninstalled")
+        staged = self.config.runtime_root / ".transaction" / "t3"
+        staged.parent.mkdir(parents=True)
+        staged.write_bytes(b"new verified coherent runtime")
+        target = coherent_update.ProductTarget(
+            version="0.0.31",
+            tag=desired_tag,
+            staged_binary=staged,
+            binary_sha256=hashlib.sha256(staged.read_bytes()).hexdigest(),
+        )
+        current_status = {
+            "desired_state": "installed",
+            "desired_tag": desired_tag,
+            "installed_tag": desired_tag,
+        }
+
+        with (
+            patch(
+                "integrations.hermes_plugin.coherent_update.repository_release_tag",
+                return_value=desired_tag,
+            ),
+            patch(
+                "integrations.hermes_plugin.coherent_update._resolve_target",
+                return_value=target,
+            ),
+            patch(
+                "integrations.hermes_plugin.service.binary_version",
+                return_value="0.0.31",
+            ),
+            patch("integrations.hermes_plugin.service._prepare_service_dir"),
+            patch(
+                "integrations.hermes_plugin.service._write_t3_s6_service"
+            ) as write_service,
+            patch("integrations.hermes_plugin.service._install_watchdog"),
+            patch(
+                "integrations.hermes_plugin.service._verify_t3_service_up",
+                return_value=9621,
+            ),
+            patch("integrations.hermes_plugin.service._verify_product_health"),
+            patch("integrations.hermes_plugin.service.status") as status,
+        ):
+            status.return_value.to_dict.return_value = current_status
+            result = coherent_update._perform_locked(self.config, "install")
+
+        self.assertEqual(result["action"], "installed")
+        self.assertEqual(result["status"], current_status)
+        write_service.assert_called_once_with(self.config, "update", timeout=45)
+        state = json.loads(
+            self.config.service_state_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["desired_state"], "installed")
+        self.assertEqual(state["product_release_tag"], desired_tag)
+
     def test_different_tags_reject_a_tampered_prior_runtime_before_mutation(
         self,
     ) -> None:
