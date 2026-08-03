@@ -24,20 +24,22 @@ it.layer(NodeServices.layer)("service update preflight", (it) => {
       for (const [id, name] of migrationManifest) insert.run(id, name);
       database.close();
 
-      expect(runServicePreflight({ databasePath, launcherProtocol: 1, version: "1.2.3" })).toEqual({
-        status: "ready",
-        version: "1.2.3",
-        launcherProtocol: 1,
-      });
+      expect(
+        yield* Effect.promise(() =>
+          runServicePreflight({ databasePath, launcherProtocol: 1, version: "1.2.3" }),
+        ),
+      ).toEqual({ status: "ready", version: "1.2.3", launcherProtocol: 1 });
 
       const changed = new NodeSqlite.DatabaseSync(databasePath);
       changed.exec("DELETE FROM effect_sql_migrations WHERE migration_id = 35");
       changed.close();
-      const blocked = runServicePreflight({
-        databasePath,
-        launcherProtocol: 1,
-        version: "1.2.3",
-      });
+      const blocked = yield* Effect.promise(() =>
+        runServicePreflight({
+          databasePath,
+          launcherProtocol: 1,
+          version: "1.2.3",
+        }),
+      );
       expect(blocked.status).toBe("blocked");
       if (blocked.status === "blocked") {
         expect(blocked.reason).toContain("npx t3@1.2.3 service update");

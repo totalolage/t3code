@@ -1,5 +1,3 @@
-import * as NodeSqlite from "node:sqlite";
-
 import packageJson from "../../package.json" with { type: "json" };
 import { migrationManifest } from "../persistence/Migrations.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
@@ -19,6 +17,30 @@ export type ServicePreflightResult =
 const localUpdateReason = (version: string) =>
   `This version includes a database update and cannot be installed remotely. Run \`npx t3@${version} service update\` on the server machine.`;
 
+const readMigrationRows = async (databasePath: string): Promise<ReadonlyArray<unknown>> => {
+  if (typeof Bun !== "undefined") {
+    const { Database } = await import("bun:sqlite");
+    const database = new Database(databasePath, { readonly: true });
+    try {
+      return database
+        .prepare("SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id")
+        .all();
+    } finally {
+      database.close();
+    }
+  }
+
+  const { DatabaseSync } = await import("node:sqlite");
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    return database
+      .prepare("SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id")
+      .all();
+  } finally {
+    database.close();
+  }
+};
+
 const isMigrationRow = (
   value: unknown,
 ): value is { readonly migration_id: number; readonly name: string } =>
@@ -29,11 +51,11 @@ const isMigrationRow = (
   "name" in value &&
   typeof value.name === "string";
 
-export function runServicePreflight(input: {
+export async function runServicePreflight(input: {
   readonly databasePath: string;
   readonly launcherProtocol: number;
   readonly version?: string;
-}): ServicePreflightResult {
+}): Promise<ServicePreflightResult> {
   const version = input.version ?? packageJson.version;
   if (input.launcherProtocol !== SERVICE_LAUNCHER_PROTOCOL) {
     return {
@@ -45,23 +67,16 @@ export function runServicePreflight(input: {
   }
 
   try {
-    const database = new NodeSqlite.DatabaseSync(input.databasePath, { readOnly: true });
-    try {
-      const rows: ReadonlyArray<unknown> = database
-        .prepare("SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id")
-        .all();
-      const exact =
-        rows.length === migrationManifest.length &&
-        rows.every((row, index) => {
-          const expected = migrationManifest[index];
-          return (
-            isMigrationRow(row) && row.migration_id === expected?.[0] && row.name === expected?.[1]
-          );
-        });
-      if (!exact) return { status: "blocked", version, reason: localUpdateReason(version) };
-    } finally {
-      database.close();
-    }
+    const rows = await readMigrationRows(input.databasePath);
+    const exact =
+      rows.length === migrationManifest.length &&
+      rows.every((row, index) => {
+        const expected = migrationManifest[index];
+        return (
+          isMigrationRow(row) && row.migration_id === expected?.[0] && row.name === expected?.[1]
+        );
+      });
+    if (!exact) return { status: "blocked", version, reason: localUpdateReason(version) };
   } catch {
     return { status: "blocked", version, reason: localUpdateReason(version) };
   }

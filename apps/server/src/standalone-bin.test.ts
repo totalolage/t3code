@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off - standalone startup is verified in a Bun subprocess.
+import * as NodeChildProcess from "node:child_process";
+import * as NodePath from "node:path";
+
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -14,6 +18,17 @@ import { resolveEmbeddedClientAsset, type EmbeddedClientFile } from "./standalon
 
 const cli = makeCli({ cloudEnabled: true });
 const CliTestLayer = Layer.mergeAll(BunServices.layer, NetService.layer, TestConsole.layer);
+
+it("starts the standalone entrypoint under Bun", () => {
+  const result = NodeChildProcess.spawnSync(
+    "bun",
+    [NodePath.join(import.meta.dirname, "standalone-bin.ts"), "--version"],
+    { encoding: "utf8" },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^t3 v\d+\.\d+\.\d+/u);
+});
 
 it("resolves exact standalone web assets and falls back to the SPA entry", () => {
   const index = Object.assign(new Blob(["index"]), {

@@ -10,8 +10,12 @@ export const servicePreflightCommand = Command.make("__service-preflight", {
 }).pipe(
   Command.withHidden,
   Command.withHandler(({ databasePath, launcherProtocol }) =>
-    Console.log(JSON.stringify(runServicePreflight({ databasePath, launcherProtocol }))).pipe(
-      Effect.asVoid,
-    ),
+    Effect.gen(function* () {
+      const result = yield* Effect.promise(() =>
+        runServicePreflight({ databasePath, launcherProtocol }),
+      );
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed launcher-owned protocol DTO.
+      yield* Console.log(JSON.stringify(result));
+    }),
   ),
 );
