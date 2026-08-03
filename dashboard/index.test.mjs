@@ -29,9 +29,10 @@ function renderStatus(status) {
         },
       },
       components: Object.fromEntries(
-        ["Badge", "Button", "Card", "CardContent", "CardHeader", "CardTitle"].map(
-          (name) => [name, name],
-        ),
+        ["Badge", "Button", "Card", "CardContent", "CardHeader", "CardTitle"].map((name) => [
+          name,
+          name,
+        ]),
       ),
       fetchJSON() {},
     },
@@ -146,10 +147,7 @@ test("pre-PR50 backend schema requires a dashboard restart", () => {
   });
   const pageText = text(page);
 
-  assert.match(
-    pageText,
-    /Restart Hermes Dashboard to activate the updated plugin backend/,
-  );
+  assert.match(pageText, /Restart Hermes Dashboard to activate the updated plugin backend/);
   assert.doesNotMatch(pageText, /No release tag/);
   assert.deepEqual(
     buttons(page).find(({ label }) => label === "Restart required"),
@@ -187,10 +185,7 @@ test("current backend tag-resolution failure is not a restart-required state", (
 
   assert.match(pageText, /No release tag/);
   assert.match(pageText, /Release tag unavailable/);
-  assert.doesNotMatch(
-    pageText,
-    /Restart Hermes Dashboard to activate the updated plugin backend/,
-  );
+  assert.doesNotMatch(pageText, /Restart Hermes Dashboard to activate the updated plugin backend/);
 });
 
 test("reconciliation failure takes precedence over current release labels", () => {
