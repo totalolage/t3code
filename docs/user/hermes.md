@@ -71,11 +71,21 @@ reports success only after the new process owns the configured listener and pass
 process identity, service-account, `HERMES_HOME`, and HTTP health checks. Source commits, binary
 hashes, and other identities do not participate in the update-needed decision.
 
+The dashboard chooses **Install and start** versus **Update service** from the durable desired state
+and installed release, not merely from the presence of an s6 slot. If intent is `uninstalled`, a
+leftover supervisor or process is labeled stale and **Install and start** safely converges that slot
+through the existing service lifecycle before recording the installed release.
+
 The action runs in an isolated child process using the files at the current checkout. This means an
 already-loaded dashboard backend can perform the service update after Hermes pulls the repository,
 even though Python imported the older plugin modules when the dashboard started. Restart the Hermes
 dashboard after a plugin repository update to load newly changed backend status behavior and routes;
 T3 does not attempt to restart Hermes or recreate a host-specific handoff.
+
+If the updated dashboard frontend is served before that restart and detects the older backend status
+schema, it shows **Restart Hermes Dashboard to activate the updated plugin backend** and withholds
+incompatible service actions. This compatibility state is separate from **No release tag**, which
+means the current backend loaded successfully but could not resolve one release tag at the checkout.
 
 The companion watchdog checks for `plugin.yaml` every 15 minutes by default. Two consecutive misses
 remove the T3 Code and watchdog s6 slots. This covers direct plugin-directory removal without making

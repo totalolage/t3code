@@ -52,8 +52,57 @@
       }
     }
 
-    const installed = Boolean(status && status.service_installed);
+    const restartRequired = Boolean(
+      status && !Object.prototype.hasOwnProperty.call(status, "desired_tag")
+    );
+    const installed = Boolean(
+      status && status.desired_state === "installed" && status.installed_tag
+    );
+    const deliberatelyUninstalled = Boolean(
+      status && status.desired_state === "uninstalled"
+    );
+    const reconciliationFailed = Boolean(
+      status && status.reconciliation_status === "failed"
+    );
+    const staleProcess = Boolean(
+      deliberatelyUninstalled && (status.service_running || status.reachable)
+    );
+    const staleSupervisor = Boolean(
+      deliberatelyUninstalled && !staleProcess && status.service_installed
+    );
     const ready = Boolean(status && status.reachable);
+    const stateLabel = restartRequired
+      ? "Restart required"
+      : reconciliationFailed
+        ? "Recovery failed"
+        : staleProcess
+          ? "Stale process"
+          : staleSupervisor
+            ? "Stale supervisor"
+            : deliberatelyUninstalled
+              ? "Not installed"
+              : installed && status.update_available
+                ? "Update available"
+                : installed && status.coherent
+                  ? ready ? "Running" : "Starting"
+                  : "Status unknown";
+    const updateLabel = restartRequired
+      ? "Restart required"
+      : reconciliationFailed
+        ? "Recovery failed"
+        : staleProcess
+          ? "Stale process"
+          : staleSupervisor
+            ? "Stale supervisor"
+            : deliberatelyUninstalled
+              ? "Deliberately uninstalled"
+              : installed && status.update_available
+                ? "Update available"
+                : installed && status.coherent
+                  ? "Up to date"
+                  : status && status.desired_tag === null
+                    ? "Release tag unavailable"
+                    : "Unknown";
 
     return React.createElement("div", { className: "t3code-plugin" },
       React.createElement(Card, null,
@@ -64,8 +113,8 @@
               "A supervised T3 Code server using this Hermes installation over ACP."
             )
           ),
-          React.createElement(Badge, { variant: ready ? "default" : "secondary" },
-            ready ? "Running" : installed ? "Starting" : "Not installed"
+          React.createElement(Badge, { variant: ready && installed ? "default" : "secondary" },
+            stateLabel
           )
         ),
         React.createElement(CardContent, null,
@@ -75,23 +124,44 @@
           notice
             ? React.createElement("p", { className: "t3code-plugin__note" }, notice)
             : null,
+          restartRequired
+            ? React.createElement("div", { className: "t3code-plugin__error" },
+                "Restart Hermes Dashboard to activate the updated plugin backend"
+              )
+            : null,
+          reconciliationFailed
+            ? React.createElement("div", { className: "t3code-plugin__error" },
+                status.reconciliation_error || "Service recovery failed."
+              )
+            : null,
           status
             ? React.createElement("dl", { className: "t3code-plugin__status" },
                 React.createElement("dt", null, "Repository release"),
-                React.createElement("dd", null, status.desired_tag || "No release tag"),
-                React.createElement("dt", null, "Installed service release"),
-                React.createElement("dd", null, status.installed_tag || "Not installed"),
-                React.createElement("dt", null, "Update status"),
                 React.createElement("dd", null,
-                  status.update_available
-                    ? "Update available"
-                    : status.coherent ? "Up to date" : "Unknown"
+                  restartRequired
+                    ? "Backend restart required"
+                    : status.desired_tag || "No release tag"
                 ),
+                React.createElement("dt", null, "Installed service release"),
+                React.createElement("dd", null,
+                  restartRequired
+                    ? "Backend restart required"
+                    : status.installed_tag ||
+                      (deliberatelyUninstalled ? "Not installed" : "Unknown")
+                ),
+                React.createElement("dt", null, "Update status"),
+                React.createElement("dd", null, updateLabel),
                 React.createElement("dt", null, "Address"),
                 React.createElement("dd", null, status.url),
                 React.createElement("dt", null, "Supervisor"),
                 React.createElement("dd", null,
-                  status.service_running ? "s6 · up" : status.service_installed ? "s6 · down" : "—"
+                  staleProcess
+                    ? "s6 · up · stale process"
+                    : staleSupervisor
+                      ? "s6 · down · stale supervisor"
+                      : status.service_running
+                        ? "s6 · up"
+                        : status.service_installed ? "s6 · down" : "—"
                 ),
                 React.createElement("dt", null, "Orphan cleanup"),
                 React.createElement("dd", null,
@@ -103,7 +173,9 @@
               )
             : React.createElement("p", null, "Loading service status…"),
           React.createElement("div", { className: "t3code-plugin__actions" },
-            !installed
+            restartRequired
+              ? React.createElement(Button, { disabled: true }, "Restart required")
+              : !installed
               ? React.createElement(Button, {
                   disabled: Boolean(busy),
                   onClick: function () { run("install"); }
