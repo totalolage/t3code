@@ -18,7 +18,11 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 import * as ProcessRunner from "../processRunner.ts";
 import * as BootService from "./bootService.ts";
 import { pinnedRuntimePaths } from "./pinnedRuntime.ts";
-import { parseServiceState } from "./serviceProtocol.ts";
+import {
+  parseServiceState,
+  SERVICE_LAUNCHER_PROTOCOL,
+  serviceStateHasPendingUpdate,
+} from "./serviceProtocol.ts";
 
 it("keeps systemd pinned to the stable launcher rather than a versioned server", () => {
   const unit = BootService.renderBootServiceUnit({
@@ -87,6 +91,7 @@ const hostLayer = (home: string, platform: NodeJS.Platform = "linux") =>
 
 const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
   platform: NodeJS.Platform = "linux",
+  usePinnedLauncher = false,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -98,6 +103,10 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
   const runtime = pinnedRuntimePaths(path, baseDir, "1.2.3");
   yield* fs.makeDirectory(path.dirname(runtime.entryPath), { recursive: true });
   yield* fs.writeFileString(runtime.entryPath, "export {};\n");
+  yield* fs.writeFileString(
+    path.join(path.dirname(runtime.entryPath), "service-launcher.mjs"),
+    "export const source = 'pinned runtime';\n",
+  );
   yield* fs.writeFileString(runtime.sentinelPath, "1.2.3\n");
 
   const commands: string[] = [];
@@ -124,7 +133,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
     host: {
       execPath: "/usr/bin/node",
       cliEntryPath: path.join(home, "bin.mjs"),
-      launcherSourcePath: sourceLauncher,
+      ...(usePinnedLauncher ? {} : { launcherSourcePath: sourceLauncher }),
     },
   }).pipe(
     Effect.provideService(ProcessRunner.ProcessRunner, runner),
@@ -140,21 +149,43 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       const plan = yield* service.install;
 
       expect(parseServiceState(yield* fs.readFileString(statePath))).toEqual({
-        protocol: 1,
+        protocol: SERVICE_LAUNCHER_PROTOCOL,
         activeVersion: "1.2.3",
       });
       expect(plan.launcherPath).toBeDefined();
       if (plan.launcherPath === undefined) return;
       expect(yield* fs.readFileString(plan.launcherPath)).toBe("export {};\n");
       expect((yield* service.status).current).toBe(true);
-      yield* fs.writeFileString(
-        statePath,
-        '{"protocol":1,"activeVersion":"1.2.3","update":{"id":"u","fromVersion":"1.2.3","targetVersion":"1.2.4","status":"pending"}}',
-      );
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed launcher-owned test document.
+      const pendingState = JSON.stringify({
+        protocol: SERVICE_LAUNCHER_PROTOCOL,
+        activeVersion: "1.2.3",
+        update: {
+          id: "u",
+          fromVersion: "1.2.3",
+          targetVersion: "1.2.4",
+          dbPath: "/tmp/state.sqlite",
+          status: "pending",
+        },
+      });
+      yield* fs.writeFileString(statePath, pendingState);
       expect((yield* service.status).current).toBe(false);
       expect(yield* service.uninstall).toBe(true);
       expect((yield* service.status).installed).toBe(false);
       expect(commands.some((command) => command.startsWith("npm "))).toBe(false);
+    }),
+  );
+
+  it.effect("copies the launcher from the prepared pinned runtime", () =>
+    Effect.gen(function* () {
+      const { service, fs } = yield* makeHarness("linux", true);
+      const plan = yield* service.install;
+
+      expect(plan.launcherPath).toBeDefined();
+      if (plan.launcherPath === undefined) return;
+      expect(yield* fs.readFileString(plan.launcherPath)).toBe(
+        "export const source = 'pinned runtime';\n",
+      );
     }),
   );
 
@@ -170,6 +201,33 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       expect(commands.filter((command) => command.startsWith("systemctl "))).toEqual([
         "systemctl --user stop t3code.service",
         "systemctl --user daemon-reload",
+        "systemctl --user restart t3code.service",
+      ]);
+    }),
+  );
+
+  it.effect("restarts without overwriting a pending remote update", () =>
+    Effect.gen(function* () {
+      const { service, fs, statePath, commands } = yield* makeHarness();
+      yield* service.install;
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed launcher-owned test document.
+      const pendingState = JSON.stringify({
+        protocol: SERVICE_LAUNCHER_PROTOCOL - 1,
+        activeVersion: "1.2.3",
+        update: {
+          id: "remote-update",
+          fromVersion: "1.2.3",
+          targetVersion: "1.2.4",
+          status: "pending",
+        },
+      });
+      yield* fs.writeFileString(statePath, pendingState);
+      commands.length = 0;
+
+      expect((yield* service.install.pipe(Effect.flip))._tag).toBe("BootServiceUpdatePendingError");
+      expect(serviceStateHasPendingUpdate(yield* fs.readFileString(statePath))).toBe(true);
+      expect(commands.filter((command) => command.startsWith("systemctl "))).toEqual([
+        "systemctl --user stop t3code.service",
         "systemctl --user restart t3code.service",
       ]);
     }),

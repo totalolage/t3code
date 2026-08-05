@@ -69,6 +69,7 @@ export const ServerProviderModel = Schema.Struct({
   subProvider: Schema.optional(TrimmedNonEmptyString),
   isCustom: Schema.Boolean,
   isDefault: Schema.optional(Schema.Boolean),
+  isLegacy: Schema.optional(Schema.Boolean),
   capabilities: Schema.NullOr(ModelCapabilities),
 });
 export type ServerProviderModel = typeof ServerProviderModel.Type;
@@ -200,7 +201,11 @@ export const ServerProvider = Schema.Struct({
 });
 export type ServerProvider = typeof ServerProvider.Type;
 
-export const ServerProviders = Schema.Array(ServerProvider);
+// Provider status kinds grow over time (ServerProviderState,
+// ServerProviderAuthStatus, ServerProviderVersionAdvisoryStatus,
+// ServerProviderUpdateStatus); an older client must not fail the whole config
+// decode over one provider it cannot render.
+export const ServerProviders = ForwardCompatibleArray(ServerProvider);
 export type ServerProviders = typeof ServerProviders.Type;
 
 /**
