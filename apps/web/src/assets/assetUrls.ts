@@ -12,7 +12,7 @@ export { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 export type AssetUrlState =
   | { readonly _tag: "Loading" }
   | { readonly _tag: "Failure" }
-  | { readonly _tag: "Success"; readonly url: string };
+  | { readonly _tag: "Success"; readonly url: string; readonly sourcePath?: string };
 
 export function useAssetUrlState(
   environmentId: EnvironmentId,
@@ -36,7 +36,13 @@ export function useAssetUrlState(
     result.value.relativeUrl,
     preparedConnection.value.queryParameters,
   );
-  return url === null ? { _tag: "Failure" } : { _tag: "Success", url };
+  return url === null
+    ? { _tag: "Failure" }
+    : {
+        _tag: "Success",
+        url,
+        ...(result.value.sourcePath !== undefined ? { sourcePath: result.value.sourcePath } : {}),
+      };
 }
 
 export function useAssetUrl(environmentId: EnvironmentId, resource: AssetResource): string | null {

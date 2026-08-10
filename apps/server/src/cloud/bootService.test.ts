@@ -36,7 +36,7 @@ it("keeps systemd pinned to the stable launcher rather than a versioned server",
 
   expect(unit).toContain("ExecStart=/usr/bin/node /home/theo/.t3/runtime/service-launcher.mjs");
   expect(unit).toContain("Environment=T3_SERVICE_SUPERVISOR=systemd");
-  expect(unit).toContain("KillMode=control-group");
+  expect(unit).toContain("KillMode=mixed");
   expect(unit).not.toContain("versions/1.2.3");
 });
 
@@ -88,6 +88,19 @@ const hostLayer = (home: string, platform: NodeJS.Platform = "linux") =>
     Layer.succeed(HostProcessGroupId, 1000),
     ConfigProvider.layer(ConfigProvider.fromEnv({ env: { HOME: home } })),
   );
+
+it("survives the kernel OOM-killing a greedy agent child", () => {
+  const unit = BootService.renderBootServiceUnit({
+    nodePath: "/usr/bin/node",
+    t3EntryPath: "/home/theo/.t3/runtime/versions/1.2.3/node_modules/t3/dist/bin.mjs",
+    launcherPath: "/home/theo/.t3/runtime/service-launcher.mjs",
+    baseDir: "/home/theo/.t3",
+    logPath: "/home/theo/.t3/userdata/logs/boot-service.log",
+    unitPath: "/home/theo/.config/systemd/user/t3code.service",
+  });
+
+  expect(unit).toContain("OOMPolicy=continue");
+});
 
 const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
   platform: NodeJS.Platform = "linux",

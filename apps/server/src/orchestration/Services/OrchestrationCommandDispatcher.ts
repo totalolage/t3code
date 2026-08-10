@@ -440,7 +440,15 @@ function makeDispatcher(
             return yield* invalidBootstrap("Bootstrap project working directory is unavailable.");
           }
           let worktreeBaseRef = bootstrap.prepareWorktree.baseBranch;
-          if (bootstrap.prepareWorktree.startFromOrigin) {
+          // Repositories without an origin remote fall back to the local base
+          // branch instead of failing the whole bootstrap on `git fetch origin`.
+          const startFromOrigin =
+            bootstrap.prepareWorktree.startFromOrigin === true &&
+            (yield* gitWorkflow.remoteExists({
+              cwd: projectCwd,
+              remoteName: "origin",
+            }));
+          if (startFromOrigin) {
             yield* gitWorkflow.fetchRemote({
               cwd: projectCwd,
               remoteName: "origin",

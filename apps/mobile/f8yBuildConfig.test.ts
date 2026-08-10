@@ -28,6 +28,6 @@ it("validates f8y version names and Android version codes", () => {
 });
 
 it("preserves existing variant defaults without release environment variables", () => {
-  assert.equal(resolveF8yReleaseVersion("production", undefined), "0.1.0");
+  assert.equal(resolveF8yReleaseVersion("production", undefined), "1.0.2");
   assert.equal(resolveF8yAndroidVersionCode("production", undefined), undefined);
 });

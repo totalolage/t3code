@@ -94,6 +94,7 @@ export const fetchRemoteOrchestrationThread = Effect.fn(
     client.orchestration.threadSnapshot({
       params: { threadId: input.threadId },
       headers: bearerHeaders(input.authorization),
+      payload: {},
     }),
   );
 });

@@ -25,7 +25,7 @@ export function resolveAppVariant(value: string | undefined): AppVariant {
 }
 
 export function resolveF8yReleaseVersion(variant: AppVariant, value: string | undefined): string {
-  if (variant !== "f8y") return "0.1.0";
+  if (variant !== "f8y") return "1.0.2";
 
   const version = value?.trim() ?? "";
   if (!F8Y_RELEASE_VERSION_PATTERN.test(version)) {

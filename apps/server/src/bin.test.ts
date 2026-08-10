@@ -1013,6 +1013,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
           const threadDetail = yield* client.orchestration.threadSnapshot({
             headers,
             params: { threadId },
+            payload: {},
           });
           assert.equal(threadDetail.thread.id, threadId);
           assert.equal(threadDetail.thread.messages[0]?.text, "hello from REST");
