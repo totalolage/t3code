@@ -7610,6 +7610,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         layers: {
           gitVcsDriver: {
             createWorktree,
+            remoteExists: () => Effect.succeed(true),
             fetchRemote: () => Effect.void,
             resolveRemoteTrackingCommit: () =>
               Effect.succeed({
