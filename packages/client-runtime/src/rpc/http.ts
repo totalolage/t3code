@@ -137,6 +137,12 @@ export const makeEnvironmentHttpApiClient = (
           ),
   });
 
+/** Contract-derived request URLs for authentication proofs, tracing, and structured errors. */
+export const makeEnvironmentHttpApiUrlBuilder = (httpBaseUrl: string) =>
+  HttpApiClient.urlBuilder(EnvironmentHttpApi, {
+    baseUrl: remoteApiBaseUrl(httpBaseUrl),
+  });
+
 const failRemoteRequest = (
   requestUrl: string,
   cause: unknown,
