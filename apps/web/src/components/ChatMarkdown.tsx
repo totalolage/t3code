@@ -4,8 +4,13 @@ import {
   ChevronRightIcon,
   CopyIcon,
   GlobeIcon,
+  InfoIcon,
+  LightbulbIcon,
   Maximize2Icon,
+  MessageSquareWarningIcon,
   Minimize2Icon,
+  OctagonAlertIcon,
+  TriangleAlertIcon,
   WrapTextIcon,
 } from "lucide-react";
 import type { ScopedThreadRef, ServerProviderSkill } from "@t3tools/contracts";
@@ -38,6 +43,7 @@ import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
+import { remarkGithubAlerts } from "../markdown-github-alerts";
 import { renderSkillInlineMarkdownChildren } from "./chat/SkillInlineText";
 import { CHAT_FILE_TAG_CHIP_CLASS_NAME, FileTagChipContent } from "./chat/FileTagChip";
 import { PierreEntryIcon } from "./chat/PierreEntryIcon";
@@ -84,6 +90,7 @@ import { usePreparedConnection } from "../state/session";
 import { previewEnvironment } from "../state/preview";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
+import { useOpenChangeRequestLink } from "~/lib/openPullRequestLink";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { isPreviewSupportedInRuntime } from "../previewStateStore";
 import {
@@ -145,6 +152,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
     ...defaultSchema.attributes,
     "*": (defaultSchema.attributes?.["*"] ?? []).filter((attribute) => attribute !== "title"),
     code: [...(defaultSchema.attributes?.code ?? []), "dataCodeMeta", "dataInlineCode"],
+    blockquote: [...(defaultSchema.attributes?.blockquote ?? []), "dataAlert"],
   },
   protocols: {
     ...defaultSchema.protocols,
@@ -154,6 +162,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
 
 const CHAT_MARKDOWN_REMARK_PLUGINS = [
   remarkGfm,
+  remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
   remarkPreserveCodeMeta,
   remarkTagInlineCode,
@@ -161,6 +170,7 @@ const CHAT_MARKDOWN_REMARK_PLUGINS = [
 
 const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS = [
   remarkGfm,
+  remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
   remarkBreaks,
   remarkPreserveCodeMeta,
@@ -171,6 +181,43 @@ const CHAT_MARKDOWN_REHYPE_PLUGINS = [
   rehypeRaw,
   [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA],
 ] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
+
+/** GitHub's own five alert kinds, in its colors: the glyph names the urgency, the title says it. */
+const GITHUB_ALERT_PRESENTATIONS: Record<
+  string,
+  { label: string; Icon: typeof InfoIcon; borderClassName: string; titleClassName: string }
+> = {
+  note: {
+    label: "Note",
+    Icon: InfoIcon,
+    borderClassName: "border-blue-500/70",
+    titleClassName: "text-blue-600 dark:text-blue-400",
+  },
+  tip: {
+    label: "Tip",
+    Icon: LightbulbIcon,
+    borderClassName: "border-emerald-500/70",
+    titleClassName: "text-emerald-600 dark:text-emerald-400",
+  },
+  important: {
+    label: "Important",
+    Icon: MessageSquareWarningIcon,
+    borderClassName: "border-purple-500/70",
+    titleClassName: "text-purple-600 dark:text-purple-400",
+  },
+  warning: {
+    label: "Warning",
+    Icon: TriangleAlertIcon,
+    borderClassName: "border-amber-500/70",
+    titleClassName: "text-amber-600 dark:text-amber-500",
+  },
+  caution: {
+    label: "Caution",
+    Icon: OctagonAlertIcon,
+    borderClassName: "border-red-500/70",
+    titleClassName: "text-red-600 dark:text-red-400",
+  },
+};
 
 function extractFenceLanguage(className: string | undefined): string {
   const match = className?.match(CODE_FENCE_LANGUAGE_REGEX);
@@ -402,7 +449,7 @@ function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
           {children}
         </table>
       </ScrollArea>
-      <div className="chat-markdown-table-footer select-none">
+      <div className="mt-0.5 flex items-center justify-between select-none">
         <Tooltip>
           <TooltipTrigger
             render={
@@ -595,12 +642,12 @@ function MarkdownCodeBlock({
 
   return (
     <div
-      className="chat-markdown-codeblock border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"
+      className="chat-markdown-codeblock my-[0.65rem] overflow-hidden rounded-[var(--radius)] border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"
       data-language={language}
       data-wrap={wrapped ? "true" : "false"}
     >
-      <div className="chat-markdown-codeblock-header select-none">
-        <span className="chat-markdown-codeblock-title">
+      <div className="chat-markdown-codeblock-header flex items-center justify-between gap-2 pt-1.5 pr-1.5 pb-0 pl-3 select-none">
+        <span className="inline-flex min-w-0 items-center gap-[0.4rem] [font-family:var(--font-mono,ui-monospace,SFMono-Regular,monospace)] [font-size:0.6875rem]">
           <MarkdownCodeBlockTitleContent
             fenceTitle={fenceTitle}
             language={language}
@@ -850,7 +897,10 @@ const failedFaviconHosts = new Set<string>();
 const MarkdownLinkFavicon = memo(function MarkdownLinkFavicon({ host }: { host: string }) {
   const [failedHost, setFailedHost] = useState<string | null>(null);
   return (
-    <span className="chat-markdown-link-favicon" aria-hidden>
+    <span
+      className="ms-[0.25em] me-[0.2em] inline-flex size-[14px] [vertical-align:-0.125em]"
+      aria-hidden
+    >
       {failedHost === host || failedFaviconHosts.has(host) ? (
         <GlobeIcon className={MARKDOWN_LINK_FAVICON_CLASS_NAME} />
       ) : (
@@ -903,6 +953,25 @@ function plainHastText(node: unknown): string | null {
     return null;
   });
   return parts.every((part) => part !== null) ? parts.join("") : null;
+}
+
+/**
+ * Whether the link carries any words of its own. An anchor that is only an image — a badge, a
+ * "Fix in Cursor" button — already shows its identity, and a favicon bolted on in front of it
+ * is a stray logo rather than a hint.
+ */
+function hastHasText(node: unknown): boolean {
+  if (!node || typeof node !== "object") return false;
+  if (
+    "type" in node &&
+    node.type === "text" &&
+    "value" in node &&
+    typeof node.value === "string" &&
+    node.value.trim().length > 0
+  ) {
+    return true;
+  }
+  return "children" in node && Array.isArray(node.children) && node.children.some(hastHasText);
 }
 
 const SANITIZED_FRAGMENT_PREFIX = "user-content-";
@@ -978,7 +1047,7 @@ function MarkdownExternalLinkContent({
     const leadingLength = leadingExternalLinkTextLength(plainText);
     return (
       <>
-        <span className="chat-markdown-link-leading">
+        <span className="whitespace-nowrap">
           <MarkdownLinkFavicon host={host} />
           {plainText.slice(0, leadingLength)}
         </span>
@@ -994,7 +1063,7 @@ function MarkdownExternalLinkContent({
     const leadingLength = leadingExternalLinkTextLength(firstChild);
     return (
       <>
-        <span className="chat-markdown-link-leading">
+        <span className="whitespace-nowrap">
           <MarkdownLinkFavicon host={host} />
           {firstChild.slice(0, leadingLength)}
         </span>
@@ -1006,7 +1075,7 @@ function MarkdownExternalLinkContent({
 
   return (
     <>
-      <span className="chat-markdown-link-leading">
+      <span className="whitespace-nowrap">
         <MarkdownLinkFavicon host={host} />
         {firstChild}
       </span>
@@ -1223,7 +1292,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         side="top"
         className="max-w-[min(40rem,calc(100vw-2rem))] font-mono text-[11px] leading-tight"
       >
-        <div className="markdown-file-link-tooltip-scroll overflow-x-auto whitespace-nowrap">
+        <div className="overflow-x-auto whitespace-nowrap [scrollbar-color:color-mix(in_srgb,var(--border)_78%,transparent)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[color-mix(in_srgb,var(--border)_78%,transparent)] [&::-webkit-scrollbar-track]:bg-transparent">
           {displayPath}
         </div>
       </TooltipPopup>
@@ -1324,6 +1393,7 @@ function ChatMarkdown({
     event.clipboardData.setData("text/plain", payload.text);
     event.clipboardData.setData("text/html", payload.html);
   }, []);
+  const openChangeRequestLink = useOpenChangeRequestLink(threadRef);
   const openExternalLinkInPreview = useCallback(
     (url: string) => {
       if (!threadRef) {
@@ -1417,6 +1487,26 @@ function ChatMarkdown({
       p({ node: _node, children, ...props }) {
         return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
       },
+      blockquote({ node: _node, children, ...props }) {
+        const alert =
+          GITHUB_ALERT_PRESENTATIONS[
+            String((props as Record<string, unknown>)["data-alert"] ?? "")
+          ];
+        if (!alert) {
+          return <blockquote {...props}>{children}</blockquote>;
+        }
+        // Not a <blockquote>: the stylesheet mutes those, and an alert's body is ordinary
+        // text under a colored title — which is how the host renders it.
+        return (
+          <div role="note" className={cn("my-1 border-l-2 pl-3", alert.borderClassName)}>
+            <p className={cn("flex items-center gap-1.5 font-medium", alert.titleClassName)}>
+              <alert.Icon aria-hidden className="size-3.5 shrink-0" />
+              {alert.label}
+            </p>
+            {children}
+          </div>
+        );
+      },
       li({ node, children, ...props }) {
         const listItemStart = node?.position?.start.offset;
         const markerOffset =
@@ -1474,16 +1564,23 @@ function ChatMarkdown({
                 onClick?.(event);
                 if (isSameDocumentLink && href) {
                   handleMarkdownFragmentClick(event, href);
+                  return;
                 }
+                // A link to a change request in a workspace project opens beside the
+                // conversation instead of in a browser: it is the thing being talked about, and
+                // the panel it opens offers the browser as one of its actions. Anything else is
+                // an ordinary link and keeps the `_blank` the shell already handles.
+                if (href) openChangeRequestLink(event, href);
               }}
               onContextMenu={(event) => {
-                if (!canOpenInPreview || !href || !faviconHost) return;
+                if (!href || !faviconHost) return;
                 event.preventDefault();
                 event.stopPropagation();
                 const api = readLocalApi();
                 if (!api) return;
                 void showExternalLinkContextMenu({
                   href,
+                  canOpenInPreview,
                   position: { x: event.clientX, y: event.clientY },
                   showContextMenu: (items, position) => api.contextMenu.show(items, position),
                   openInPreview: async (target) => {
@@ -1503,7 +1600,7 @@ function ChatMarkdown({
                 });
               }}
             >
-              {faviconHost ? (
+              {faviconHost && hastHasText(node) ? (
                 <MarkdownExternalLinkContent host={faviconHost} plainText={plainHastText(node)}>
                   {children}
                 </MarkdownExternalLinkContent>
@@ -1606,7 +1703,7 @@ function ChatMarkdown({
   return (
     <div
       className={cn(
-        "chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80",
+        "chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80 [overflow-wrap:anywhere] [word-break:break-word]",
         className,
       )}
       onCopy={handleCopy}

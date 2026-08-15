@@ -136,6 +136,8 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
           timedOut: false,
           stdoutTruncated: false,
           stderrTruncated: false,
+          stdoutInvalidUtf8: false,
+          stderrInvalidUtf8: false,
         };
       }),
   });
@@ -267,6 +269,8 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
               timedOut: false,
               stdoutTruncated: false,
               stderrTruncated: false,
+              stdoutInvalidUtf8: false,
+              stderrInvalidUtf8: false,
             };
           }),
       });
