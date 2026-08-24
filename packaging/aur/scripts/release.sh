@@ -15,7 +15,7 @@ elif [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}\.[0-9]+$ ]]; then
   icon_path='assets/nightly/nightly-universal-1024.png'
 elif [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-f8y\.[0-9]{8}\.[0-9]+$ ]]; then
   pkgname='t3code-f8y-bin'
-  package_kind='cli'
+  icon_path='assets/prod/black-universal-1024.png'
 else
   echo "Release $tag does not publish an AUR package."
   exit 0

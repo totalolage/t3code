@@ -3,27 +3,100 @@
 pkgname=t3code-f8y-bin
 pkgver=0.0.33_f8y.20260815.55
 pkgrel=1
-pkgdesc='Self-contained T3 Code CLI from the totalolage f8y releases'
+pkgdesc='Desktop control surface for local coding agents from the totalolage f8y releases'
 arch=('x86_64')
 url='https://github.com/totalolage/t3code'
 license=('MIT')
-depends=('glibc')
-provides=("t3=$pkgver")
+depends=(
+  'alsa-lib'
+  'at-spi2-core'
+  'cairo'
+  'dbus'
+  'expat'
+  'gdk-pixbuf2'
+  'glib2'
+  'glibc'
+  'gtk3'
+  'hicolor-icon-theme'
+  'libcups'
+  'libdrm'
+  'libgcc'
+  'libstdc++'
+  'libx11'
+  'libxcb'
+  'libxcomposite'
+  'libxdamage'
+  'libxext'
+  'libxfixes'
+  'libxkbcommon'
+  'libxrandr'
+  'mesa'
+  'nspr'
+  'nss'
+  'pango'
+  'systemd-libs'
+  'xdg-utils'
+  'zlib'
+)
+optdepends=('openai-codex: use the system-installed Codex CLI')
+provides=("t3code=$pkgver")
+conflicts=('t3code')
 options=('!debug' '!strip')
 
 _upstream_version="${pkgver/_f8y./-f8y.}"
-_binary="t3-${_upstream_version}-linux-x64"
+_appimage="T3-Code-${_upstream_version}-${CARCH}.AppImage"
 source=(
-  "$_binary::https://github.com/totalolage/t3code/releases/download/v${_upstream_version}/$_binary"
+  "$_appimage::https://github.com/totalolage/t3code/releases/download/v${_upstream_version}/$_appimage"
+  "${pkgname}-${pkgver}.png::https://raw.githubusercontent.com/totalolage/t3code/v${_upstream_version}/assets/prod/black-universal-1024.png"
   "${pkgname}-${pkgver}-LICENSE::https://raw.githubusercontent.com/totalolage/t3code/v${_upstream_version}/LICENSE"
 )
 sha256sums=(
-  '442a62be20ae4d79c1c1c535937d3df075591b980c9e3c683d14c9ed7a87a2d4' # binary
+  '0000000000000000000000000000000000000000000000000000000000000000' # AppImage
+  '403e874556ffbecee8d1b2b5d612a874303fac791212a261bb3bd1b71d83e78d' # icon
   '935d8f2af0c703f9c39517ee57cc4930b19d02d533be930b63f0e82f93614b43' # upstream license
 )
 
+prepare() {
+  chmod +x "$srcdir/$_appimage"
+  rm -rf "$srcdir/squashfs-root"
+  "$srcdir/$_appimage" --appimage-extract >/dev/null
+
+  if [[ ! -x "$srcdir/squashfs-root/AppRun" ||
+        ! -f "$srcdir/squashfs-root/chrome-sandbox" ]]; then
+    echo 'The AppImage payload is missing its launcher or Chromium sandbox.' >&2
+    return 1
+  fi
+}
+
 package() {
-  install -Dm755 "$srcdir/$_binary" "$pkgdir/usr/bin/t3"
+  install -d "$pkgdir/opt/$pkgname"
+  cp -a --no-preserve=ownership "$srcdir/squashfs-root/." "$pkgdir/opt/$pkgname/"
+  chmod -R u=rwX,go=rX "$pkgdir/opt/$pkgname"
+  chmod 4755 "$pkgdir/opt/$pkgname/chrome-sandbox"
+
+  install -Dm755 /dev/stdin "$pkgdir/usr/bin/t3code" <<'EOF'
+#!/bin/sh
+exec /opt/t3code-f8y-bin/AppRun "$@"
+EOF
+  ln -s t3code "$pkgdir/usr/bin/t3-code-desktop"
+
+  install -Dm644 "$srcdir/${pkgname}-${pkgver}.png" \
+    "$pkgdir/usr/share/icons/hicolor/1024x1024/apps/t3code.png"
+
+  install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/t3code.desktop" <<'EOF'
+[Desktop Entry]
+Name=T3 Code (f8y)
+Comment=Desktop control surface for local coding agents
+Exec=t3code %U
+TryExec=t3code
+Terminal=false
+Type=Application
+Icon=t3code
+StartupWMClass=t3code
+Categories=Development;
+MimeType=x-scheme-handler/t3code;
+EOF
+
   install -Dm644 "$srcdir/${pkgname}-${pkgver}-LICENSE" \
     "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

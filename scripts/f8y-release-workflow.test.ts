@@ -21,6 +21,8 @@ it("publishes the desktop, mobile, and standalone CLI artifacts for every main p
   assert.include(workflow, "make_latest: false");
   assert.include(workflow, "release-assets/*.dmg");
   assert.include(workflow, "release-assets/*.dmg.sha256");
+  assert.include(workflow, "release-assets/*.AppImage");
+  assert.include(workflow, "release-assets/*.AppImage.sha256");
   assert.include(workflow, "release-assets/*.apk");
   assert.include(workflow, "release-assets/t3-*-darwin-arm64");
   assert.include(workflow, "release-assets/t3-*-darwin-arm64.sha256");
@@ -77,6 +79,18 @@ it("builds and verifies versioned self-contained full CLIs for macOS and Linux",
     workflow,
     "needs: [metadata_and_checks, build_macos_arm64, build_linux_x64, build_android_apk]",
   );
+});
+
+it("builds and verifies the Linux desktop AppImage", () => {
+  assert.include(workflow, "name: Build Linux x86_64 artifacts");
+  assert.include(workflow, "dtolnay/rust-toolchain@stable");
+  assert.include(workflow, "vp run --filter @t3tools/desktop ensure:electron");
+  assert.include(workflow, "T3CODE_DESKTOP_APP_ID: com.f8y.t3code");
+  assert.include(workflow, "--platform linux");
+  assert.include(workflow, "--target AppImage");
+  assert.include(workflow, "appimages=(release/*.AppImage)");
+  assert.include(workflow, '"$appimage" --appimage-extract');
+  assert.include(workflow, "release-publish/*.AppImage");
 });
 
 it("ad-hoc-signs and integrity-checks the account-free macOS release", () => {
