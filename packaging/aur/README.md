@@ -1,8 +1,10 @@
 # AUR packaging
 
-This directory maintains the [`t3code-bin`](https://aur.archlinux.org/packages/t3code-bin) and
-[`t3code-nightly-bin`](https://aur.archlinux.org/packages/t3code-nightly-bin) packages. Both
-repackage the official x86_64 AppImage from GitHub Releases.
+This directory maintains the [`t3code-bin`](https://aur.archlinux.org/packages/t3code-bin),
+[`t3code-nightly-bin`](https://aur.archlinux.org/packages/t3code-nightly-bin), and
+[`t3code-f8y-bin`](https://aur.archlinux.org/packages/t3code-f8y-bin) packages. The stable and
+nightly packages repackage the official x86_64 AppImage. The f8y package installs the
+self-contained Linux x86_64 CLI binary from `totalolage/t3code` releases.
 
 ## Publishing
 

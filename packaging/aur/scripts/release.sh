@@ -2,9 +2,10 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-repo='pingdotgg/t3code'
+repo="${GITHUB_REPOSITORY:-pingdotgg/t3code}"
 tag="${RELEASE_TAG:?RELEASE_TAG is required}"
 pkgrel="${PKGREL:-1}"
+package_kind='desktop'
 
 if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   pkgname='t3code-bin'
@@ -12,6 +13,9 @@ if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 elif [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}\.[0-9]+$ ]]; then
   pkgname='t3code-nightly-bin'
   icon_path='assets/nightly/nightly-universal-1024.png'
+elif [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-f8y\.[0-9]{8}\.[0-9]+$ ]]; then
+  pkgname='t3code-f8y-bin'
+  package_kind='cli'
 else
   echo "Release $tag does not publish an AUR package."
   exit 0
@@ -19,13 +23,17 @@ fi
 
 version="${tag#v}"
 pkgver="${version//-/_}"
-asset_name="T3-Code-${version}-x86_64.AppImage"
+if [[ "$package_kind" == 'cli' ]]; then
+  asset_name="t3-${version}-linux-x64"
+else
+  asset_name="T3-Code-${version}-x86_64.AppImage"
+fi
 release_json="$(gh api "repos/$repo/releases/tags/$tag")"
 asset_digest="$(jq -r --arg name "$asset_name" \
   '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
-appimage_sha256="${asset_digest#sha256:}"
+artifact_sha256="${asset_digest#sha256:}"
 
-if [[ ! "$appimage_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+if [[ ! "$artifact_sha256" =~ ^[0-9a-f]{64}$ ]]; then
   echo "Release $tag is missing $asset_name or its SHA-256 digest." >&2
   exit 1
 fi
@@ -33,21 +41,31 @@ fi
 work_dir="$(mktemp -d)"
 trap 'rm -rf -- "$work_dir"' EXIT
 gh api -H 'Accept: application/vnd.github.raw' \
-  "repos/$repo/contents/$icon_path?ref=$tag" > "$work_dir/icon.png"
-gh api -H 'Accept: application/vnd.github.raw' \
   "repos/$repo/contents/LICENSE?ref=$tag" > "$work_dir/LICENSE"
-icon_sha256="$(sha256sum "$work_dir/icon.png" | awk '{print $1}')"
 license_sha256="$(sha256sum "$work_dir/LICENSE" | awk '{print $1}')"
+
+if [[ "$package_kind" == 'desktop' ]]; then
+  gh api -H 'Accept: application/vnd.github.raw' \
+    "repos/$repo/contents/$icon_path?ref=$tag" > "$work_dir/icon.png"
+  icon_sha256="$(sha256sum "$work_dir/icon.png" | awk '{print $1}')"
+fi
 
 package_dir="$repo_root/packaging/aur/$pkgname"
 cd "$package_dir"
-sed -Ei \
+sed_args=(
   -e "s/^pkgver=.*/pkgver=$pkgver/" \
   -e "s/^pkgrel=.*/pkgrel=$pkgrel/" \
-  -e "/# AppImage$/s/'[0-9a-f]{64}'/'$appimage_sha256'/" \
-  -e "/# icon$/s/'[0-9a-f]{64}'/'$icon_sha256'/" \
-  -e "/# upstream license$/s/'[0-9a-f]{64}'/'$license_sha256'/" \
-  PKGBUILD
+  -e "/# upstream license$/s/'[0-9a-f]{64}'/'$license_sha256'/"
+)
+if [[ "$package_kind" == 'cli' ]]; then
+  sed_args+=(-e "/# binary$/s/'[0-9a-f]{64}'/'$artifact_sha256'/")
+else
+  sed_args+=(
+    -e "/# AppImage$/s/'[0-9a-f]{64}'/'$artifact_sha256'/"
+    -e "/# icon$/s/'[0-9a-f]{64}'/'$icon_sha256'/"
+  )
+fi
+sed -Ei "${sed_args[@]}" PKGBUILD
 
 run_as_builder() {
   if [[ "$(id -u)" == 0 ]]; then
@@ -62,7 +80,7 @@ if [[ "$(id -u)" == 0 ]]; then
 fi
 run_as_builder namcap PKGBUILD
 run_as_builder makepkg --printsrcinfo > .SRCINFO
-run_as_builder makepkg --syncdeps --cleanbuild --clean --noconfirm
+run_as_builder makepkg --force --syncdeps --cleanbuild --clean --noconfirm
 run_as_builder namcap "$(run_as_builder makepkg --packagelist)"
 
 if [[ -z "${AUR_SSH_PRIVATE_KEY:-}" ]]; then

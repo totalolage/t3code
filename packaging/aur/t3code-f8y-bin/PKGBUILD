@@ -1,0 +1,29 @@
+# Maintainer: Filip Kalny <filip@kalny.net>
+
+pkgname=t3code-f8y-bin
+pkgver=0.0.33_f8y.20260815.55
+pkgrel=1
+pkgdesc='Self-contained T3 Code CLI from the totalolage f8y releases'
+arch=('x86_64')
+url='https://github.com/totalolage/t3code'
+license=('MIT')
+depends=('glibc')
+provides=("t3=$pkgver")
+options=('!debug' '!strip')
+
+_upstream_version="${pkgver/_f8y./-f8y.}"
+_binary="t3-${_upstream_version}-linux-x64"
+source=(
+  "$_binary::https://github.com/totalolage/t3code/releases/download/v${_upstream_version}/$_binary"
+  "${pkgname}-${pkgver}-LICENSE::https://raw.githubusercontent.com/totalolage/t3code/v${_upstream_version}/LICENSE"
+)
+sha256sums=(
+  '442a62be20ae4d79c1c1c535937d3df075591b980c9e3c683d14c9ed7a87a2d4' # binary
+  '935d8f2af0c703f9c39517ee57cc4930b19d02d533be930b63f0e82f93614b43' # upstream license
+)
+
+package() {
+  install -Dm755 "$srcdir/$_binary" "$pkgdir/usr/bin/t3"
+  install -Dm644 "$srcdir/${pkgname}-${pkgver}-LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

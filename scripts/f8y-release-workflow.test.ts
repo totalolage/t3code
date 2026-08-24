@@ -26,6 +26,9 @@ it("publishes the desktop, mobile, and standalone CLI artifacts for every main p
   assert.include(workflow, "release-assets/t3-*-darwin-arm64.sha256");
   assert.include(workflow, "release-assets/t3-*-linux-x64");
   assert.include(workflow, "release-assets/t3-*-linux-x64.sha256");
+  assert.include(workflow, "publish_aur:");
+  assert.include(workflow, "uses: ./.github/workflows/publish-aur.yml");
+  assert.include(workflow, "release_tag: ${{ needs.metadata_and_checks.outputs.tag }}");
   assert.notInclude(workflow, "blacksmith-");
   assert.notInclude(workflow, "EXPO_TOKEN");
   assert.notInclude(workflow, "CSC_LINK");
