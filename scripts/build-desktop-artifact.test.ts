@@ -243,12 +243,13 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
-  it.effect("configures the f8y updater feed for AppImage builds", () =>
+  it.effect("configures the f8y updater feed and stable macOS artwork", () =>
     Effect.gen(function* () {
+      const version = "0.0.34-f8y.20260825.53";
       const buildConfig = yield* createBuildConfig(
         "linux",
         "AppImage",
-        "0.0.34-f8y.20260825.53",
+        version,
         false,
         false,
         undefined,
@@ -264,6 +265,20 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           channel: "f8y",
         },
       ]);
+
+      const macBuildConfig = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        version,
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      assert.equal(
+        (macBuildConfig.dmg as Record<string, unknown>).background,
+        "dmg/dmg-background-latest.png",
+      );
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(
