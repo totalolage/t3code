@@ -189,6 +189,27 @@ describe("attachmentUploadQueue", () => {
     );
   });
 
+  it("keeps remote routing query parameters on upload URLs", async () => {
+    mocks.readPreparedConnection.mockReturnValue({
+      httpBaseUrl: "https://environment.test/",
+      queryParameters: [
+        { key: "proxy-token", value: "secret" },
+        { key: "route", value: "devbox" },
+      ],
+    });
+    const image = makeImage("image-remote");
+
+    startAttachmentUpload({ environmentId: firstEnvironment, image });
+    await Promise.resolve();
+
+    const request = TestXmlHttpRequest.requests[0]!;
+    expect(request.url).toBe(
+      "https://environment.test/api/attachments/upload/pending-environment-1-image-remote.png?proxy-token=secret&route=devbox",
+    );
+    request.complete();
+    await awaitAttachmentUploads([image.id]);
+  });
+
   it("retries rejected uploads", async () => {
     const image = makeImage("image-retry");
     startAttachmentUpload({ environmentId: firstEnvironment, image });

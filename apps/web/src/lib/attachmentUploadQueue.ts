@@ -145,7 +145,9 @@ async function runUpload(job: UploadJob): Promise<void> {
   job.attachmentId = minted.value.attachmentId;
 
   const connection = readPreparedConnection(job.environmentId);
-  const url = connection ? resolveAssetUrl(connection.httpBaseUrl, minted.value.relativeUrl) : null;
+  const url = connection
+    ? resolveAssetUrl(connection.httpBaseUrl, minted.value.relativeUrl, connection.queryParameters)
+    : null;
   if (!url) {
     setUploadState(job.image.id, {
       status: "failed",
