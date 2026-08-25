@@ -17,6 +17,7 @@ it("runs the complete CI suite on hosted runners outside the upstream repository
   assert.strictEqual(workflow.match(/\|\| 'macos-15'/gu)?.length, 1);
   assert.include(workflow, "blacksmith-8vcpu-ubuntu-2404");
   assert.include(workflow, "blacksmith-6vcpu-macos-26");
+  assert.strictEqual(workflow.match(/- name: Setup Bun/gmu)?.length, 2);
 });
 
 it("keeps upstream-owned deployment workflows disabled in forks", () => {
