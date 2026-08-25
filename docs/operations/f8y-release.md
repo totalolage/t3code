@@ -4,10 +4,12 @@
 also be started manually. A release is atomic: it is published only after all platform builds
 succeed.
 
-Each release contains seven assets:
+Each release contains:
 
 - an ad-hoc-signed Apple Silicon (`arm64`) macOS DMG
 - the DMG's SHA-256 checksum
+- a Linux x86_64 AppImage and its SHA-256 checksum
+- the `f8y-linux.yml` AppImage update manifest
 - a signed Android APK named `T3-Code-<version>-android.apk`
 - a self-contained, ad-hoc-signed Apple Silicon CLI named `t3-<version>-darwin-arm64`
 - the macOS CLI's SHA-256 checksum
@@ -105,6 +107,18 @@ requires an Apple-issued provisioning profile.
 Automatic macOS updates additionally require publishing the Electron ZIP and channel metadata
 alongside the DMG. The f8y workflow currently publishes only the manually installable DMG.
 
+## Linux installation and updates
+
+Run the downloaded AppImage directly to use in-app updates. The app checks the `f8y` prerelease
+channel in `totalolage/t3code`, then asks before downloading and again before restarting to install.
+Each release publishes the AppImage and `f8y-linux.yml`; both are required for updates. The AppImage
+contains its blockmap data.
+
+Users of an older feedless f8y AppImage must download the first updater-enabled release manually.
+
+The `t3code-f8y-bin` AUR package extracts the AppImage, so it continues to update through the AUR
+rather than the in-app updater.
+
 ## Standalone CLI
 
 The macOS arm64 and Linux x86_64 CLIs embed their JavaScript runtime and dependencies, so Node.js,
@@ -144,8 +158,8 @@ t3 remote --help
 
 For the first release:
 
-1. Confirm the GitHub prerelease targets the expected `main` commit and contains one DMG, one APK,
-   both CLI binaries, and all four checksums.
+1. Confirm the GitHub prerelease targets the expected `main` commit and contains the DMG, AppImage,
+   `f8y-linux.yml`, APK, both CLI binaries, and their checksums.
 2. Install the APK through Obtainium.
 3. Verify the installed package is `com.f8y.t3code` and its version matches the release.
 4. Download the DMG and checksum in a browser and confirm `shasum -a 256 -c` reports `OK`.
@@ -154,6 +168,8 @@ For the first release:
 7. Install the update without uninstalling and confirm settings and application data remain intact.
 8. Install each CLI on Apple Silicon macOS and Linux x86_64 without Node.js or Bun and confirm
    `t3 remote --help` succeeds.
+9. Run the AppImage, publish a later f8y release, and confirm the app can download, restart, and
+   replace the AppImage in place.
 
 The workflow verifies the APK signature, package ID, version name, and version code before it uploads
 the asset. Starting with the second release, it also compares the certificate and `versionCode` with

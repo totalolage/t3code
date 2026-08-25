@@ -38,6 +38,7 @@ import {
   resolveFffNativeDependencies,
   resolveBuildOptions,
   resolveDesktopBuildIconAssets,
+  resolveDesktopPublishChannel,
   resolveDesktopProductName,
   resolveDesktopUpdateChannel,
   resolveDesktopWebAssetBrand,
@@ -156,6 +157,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it("resolves the dedicated nightly updater channel from nightly versions", () => {
     assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
+    assert.equal(resolveDesktopPublishChannel("0.0.17-f8y.20260825.53"), "f8y");
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
@@ -206,6 +208,17 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ),
         ),
       );
+      const f8yConfig = yield* resolveGitHubPublishConfig("f8y").pipe(
+        Effect.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({
+              env: {
+                T3CODE_DESKTOP_UPDATE_REPOSITORY: "totalolage/t3code",
+              },
+            }),
+          ),
+        ),
+      );
 
       assert.deepStrictEqual(latestConfig, {
         provider: "github",
@@ -220,7 +233,46 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         releaseType: "prerelease",
         channel: "nightly",
       });
+      assert.deepStrictEqual(f8yConfig, {
+        provider: "github",
+        owner: "totalolage",
+        repo: "t3code",
+        releaseType: "prerelease",
+        channel: "f8y",
+      });
     }),
+  );
+
+  it.effect("configures the f8y updater feed for AppImage builds", () =>
+    Effect.gen(function* () {
+      const buildConfig = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "0.0.34-f8y.20260825.53",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+
+      assert.deepStrictEqual(buildConfig.publish, [
+        {
+          provider: "github",
+          owner: "totalolage",
+          repo: "t3code",
+          releaseType: "prerelease",
+          channel: "f8y",
+        },
+      ]);
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: { T3CODE_DESKTOP_UPDATE_REPOSITORY: "totalolage/t3code" },
+          }),
+        ),
+      ),
+    ),
   );
 
   it.effect("disables desktop update metadata for f8y builds", () =>
