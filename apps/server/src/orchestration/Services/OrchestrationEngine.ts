@@ -10,7 +10,12 @@
  *
  * @module OrchestrationEngineService
  */
-import type { CommandId, OrchestrationCommand, OrchestrationEvent } from "@t3tools/contracts";
+import type {
+  CommandId,
+  OrchestrationClientOrigin,
+  OrchestrationCommand,
+  OrchestrationEvent,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
@@ -46,6 +51,8 @@ export interface OrchestrationEngineShape {
    * Dispatch a validated orchestration command.
    *
    * @param command - Valid orchestration command.
+   * @param options - Optional client origin (surface/app version) stamped into
+   *   the metadata of every event the command produces.
    * @returns Effect containing the sequence of the persisted event.
    *
    * Dispatch is serialized through an internal queue and deduplicated via
@@ -53,6 +60,7 @@ export interface OrchestrationEngineShape {
    */
   readonly dispatch: (
     command: OrchestrationCommand,
+    options?: { readonly origin?: OrchestrationClientOrigin },
   ) => Effect.Effect<{ sequence: number }, OrchestrationDispatchError, never>;
 
   /** Read a command receipt without dispatching or running external side effects. */

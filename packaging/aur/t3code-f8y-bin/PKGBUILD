@@ -47,12 +47,10 @@ _upstream_version="${pkgver/_f8y./-f8y.}"
 _appimage="T3-Code-${_upstream_version}-${CARCH}.AppImage"
 source=(
   "$_appimage::https://github.com/totalolage/t3code/releases/download/v${_upstream_version}/$_appimage"
-  "${pkgname}-${pkgver}.png::https://raw.githubusercontent.com/totalolage/t3code/v${_upstream_version}/assets/prod/black-universal-1024.png"
   "${pkgname}-${pkgver}-LICENSE::https://raw.githubusercontent.com/totalolage/t3code/v${_upstream_version}/LICENSE"
 )
 sha256sums=(
   '93c2642d08cf1e17c4bc4e18a1aad9e0b8253e277982257437c2041820717dde' # AppImage
-  '403e874556ffbecee8d1b2b5d612a874303fac791212a261bb3bd1b71d83e78d' # icon
   '935d8f2af0c703f9c39517ee57cc4930b19d02d533be930b63f0e82f93614b43' # upstream license
 )
 
@@ -80,8 +78,12 @@ exec /opt/t3code-f8y-bin/AppRun "$@"
 EOF
   ln -s t3code "$pkgdir/usr/bin/t3-code-desktop"
 
-  install -Dm644 "$srcdir/${pkgname}-${pkgver}.png" \
-    "$pkgdir/usr/share/icons/hicolor/1024x1024/apps/t3code.png"
+  local icon size_dir
+  for icon in "$srcdir"/squashfs-root/usr/share/icons/hicolor/*/apps/t3code.png; do
+    size_dir="${icon%/apps/t3code.png}"
+    install -Dm644 "$icon" \
+      "$pkgdir/usr/share/icons/hicolor/${size_dir##*/}/apps/t3code.png"
+  done
 
   install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/t3code.desktop" <<'EOF'
 [Desktop Entry]

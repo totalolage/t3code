@@ -33,6 +33,31 @@ const clientMetadataTokenExchangeFields = (
   ...(clientMetadata?.os ? { client_os: clientMetadata.os } : {}),
 });
 
+// The server reads these off the /ws upgrade URL next to wsTicket. Optional on
+// both ends: old servers ignore unknown params, old clients never send them.
+export const appendClientConnectionParams = (
+  url: URL,
+  clientMetadata: AuthClientPresentationMetadata | undefined,
+): void => {
+  if (clientMetadata?.surface) {
+    url.searchParams.set("clientSurface", clientMetadata.surface);
+  }
+  if (clientMetadata?.appVersion) {
+    url.searchParams.set("clientAppVersion", clientMetadata.appVersion);
+  }
+  if (clientMetadata?.surface === "mobile") {
+    if (clientMetadata.os) {
+      url.searchParams.set("clientOs", clientMetadata.os);
+    }
+    if (clientMetadata.osMajorVersion !== undefined) {
+      url.searchParams.set("clientOsMajorVersion", String(clientMetadata.osMajorVersion));
+    }
+    if (clientMetadata.deviceModel) {
+      url.searchParams.set("clientDeviceModel", clientMetadata.deviceModel);
+    }
+  }
+};
+
 export const exchangeRemoteDpopAccessToken = Effect.fn(
   "clientRuntime.authorization.exchangeRemoteDpopAccessToken",
 )(function* (input: {
@@ -188,6 +213,7 @@ export const resolveRemoteWebSocketConnectionUrl = Effect.fn(
   readonly httpBaseUrl: string;
   readonly bearerToken: string;
   readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
+  readonly clientMetadata?: AuthClientPresentationMetadata;
   readonly timeoutMs?: number;
 }) {
   const issued = yield* issueRemoteWebSocketTicket({
@@ -205,6 +231,7 @@ export const resolveRemoteWebSocketConnectionUrl = Effect.fn(
   for (const parameter of input.queryParameters ?? []) {
     url.searchParams.append(parameter.key, parameter.value);
   }
+  appendClientConnectionParams(url, input.clientMetadata);
   return url.toString();
 });
 
@@ -216,6 +243,7 @@ export const resolveRemoteDpopWebSocketConnectionUrl = Effect.fn(
   readonly accessToken: string;
   readonly dpopProof: string;
   readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
+  readonly clientMetadata?: AuthClientPresentationMetadata;
   readonly timeoutMs?: number;
 }) {
   const issued = yield* issueRemoteDpopWebSocketTicket({
@@ -233,5 +261,6 @@ export const resolveRemoteDpopWebSocketConnectionUrl = Effect.fn(
   for (const parameter of input.queryParameters ?? []) {
     url.searchParams.append(parameter.key, parameter.value);
   }
+  appendClientConnectionParams(url, input.clientMetadata);
   return url.toString();
 });

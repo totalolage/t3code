@@ -3,8 +3,6 @@ import { stripPairingTokenFromUrl } from "@t3tools/shared/remote";
 import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 
-export { authClientMetadata } from "./authClientMetadata";
-
 export interface SavedRemoteConnection {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;

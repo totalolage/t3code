@@ -11,9 +11,9 @@ const readWorkflow = (name: string) =>
 it("runs the complete CI suite on hosted runners outside the upstream repository", () => {
   const workflow = readWorkflow("ci.yml");
 
-  assert.strictEqual(workflow.match(/^    runs-on:/gmu)?.length, 4);
-  assert.strictEqual(workflow.match(/github\.repository == 'pingdotgg\/t3code'/gu)?.length, 4);
-  assert.strictEqual(workflow.match(/\|\| 'ubuntu-24\.04'/gu)?.length, 3);
+  assert.strictEqual(workflow.match(/^    runs-on:/gmu)?.length, 7);
+  assert.strictEqual(workflow.match(/github\.repository == 'pingdotgg\/t3code'/gu)?.length, 7);
+  assert.strictEqual(workflow.match(/\|\| 'ubuntu-24\.04'/gu)?.length, 6);
   assert.strictEqual(workflow.match(/\|\| 'macos-15'/gu)?.length, 1);
   assert.include(workflow, "blacksmith-8vcpu-ubuntu-2404");
   assert.include(workflow, "blacksmith-6vcpu-macos-26");

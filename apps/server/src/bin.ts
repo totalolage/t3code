@@ -11,10 +11,17 @@ import packageJson from "../package.json" with { type: "json" };
 export { cli, makeCli } from "./cli/root.ts";
 import { cli } from "./cli/root.ts";
 import { formatRemoteCliDiagnostic, isOrchestrationCliInvocation } from "./cli/remote.ts";
+import { isEntrypoint } from "./entrypoint.ts";
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
 
-if (import.meta.main) {
+if (
+  isEntrypoint({
+    moduleUrl: import.meta.url,
+    entryPath: process.argv[1],
+    runtimeMain: import.meta.main,
+  })
+) {
   Command.run(cli, { version: packageJson.version }).pipe(
     Effect.scoped,
     Effect.provide(CliRuntimeLayer),

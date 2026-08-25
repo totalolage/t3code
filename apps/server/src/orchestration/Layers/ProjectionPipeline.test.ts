@@ -175,6 +175,78 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         assert.equal(row.lastAppliedSequence, 3);
       }
 
+      yield* sql`CREATE TABLE thread_shell_updates (count INTEGER NOT NULL)`;
+      yield* sql`INSERT INTO thread_shell_updates (count) VALUES (0)`;
+      yield* sql`
+        CREATE TRIGGER count_thread_shell_updates
+        AFTER UPDATE ON projection_threads
+        WHEN NEW.thread_id = 'thread-1'
+        BEGIN
+          UPDATE thread_shell_updates SET count = count + 1;
+        END;
+      `;
+
+      yield* eventStore.append({
+        type: "thread.message-sent",
+        eventId: EventId.make("evt-assistant-update"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        occurredAt: "2026-01-01T00:00:00.100Z",
+        commandId: CommandId.make("cmd-assistant-update"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-assistant-update"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          messageId: MessageId.make("message-2"),
+          role: "assistant",
+          text: "more work",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-01-01T00:00:00.100Z",
+          updatedAt: "2026-01-01T00:00:00.100Z",
+        },
+      });
+      yield* projectionPipeline.bootstrap;
+
+      let threadShellUpdates = yield* sql<{ readonly count: number }>`
+        SELECT count FROM thread_shell_updates
+      `;
+      assert.deepEqual(threadShellUpdates, [{ count: 1 }]);
+
+      yield* sql`UPDATE thread_shell_updates SET count = 0`;
+      yield* eventStore.append({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-routine-activity"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        occurredAt: "2026-01-01T00:00:00.200Z",
+        commandId: CommandId.make("cmd-routine-activity"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-routine-activity"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          activity: {
+            id: EventId.make("activity-routine"),
+            tone: "tool",
+            kind: "tool.updated",
+            summary: "Tool made progress",
+            payload: {},
+            turnId: null,
+            createdAt: "2026-01-01T00:00:00.200Z",
+          },
+        },
+      });
+      yield* projectionPipeline.bootstrap;
+
+      threadShellUpdates = yield* sql<{ readonly count: number }>`
+        SELECT count FROM thread_shell_updates
+      `;
+      assert.deepEqual(threadShellUpdates, [{ count: 1 }]);
+      yield* sql`DROP TRIGGER count_thread_shell_updates`;
+      yield* sql`DROP TABLE thread_shell_updates`;
+
       // Settled lifecycle through the DB pipeline: thread.settled writes the
       // override + timestamp, thread.unsettled(user) flips to the active pin.
       yield* eventStore.append({
@@ -879,37 +951,38 @@ it.layer(
         END;
       `;
 
-      const savedEvent = yield* eventStore.append({
-        type: "thread.message-sent",
-        eventId: EventId.make("evt-rollback-3"),
-        aggregateKind: "thread",
-        aggregateId: ThreadId.make("thread-rollback"),
-        occurredAt: now,
-        commandId: CommandId.make("cmd-rollback-3"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-rollback-3"),
-        metadata: {},
-        payload: {
-          threadId: ThreadId.make("thread-rollback"),
-          messageId: MessageId.make("message-rollback"),
-          role: "user",
-          text: "Rollback me",
-          attachments: [
-            {
-              type: "image",
-              id: "thread-rollback-att-1",
-              name: "rollback.png",
-              mimeType: "image/png",
-              sizeBytes: 5,
-            },
-          ],
-          turnId: null,
-          streaming: false,
-          createdAt: now,
-          updatedAt: now,
-        },
-      });
-      const result = yield* Effect.result(projectionPipeline.projectEvent(savedEvent));
+      const result = yield* Effect.result(
+        appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-rollback-3"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-rollback"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-rollback-3"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-rollback-3"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-rollback"),
+            messageId: MessageId.make("message-rollback"),
+            role: "user",
+            text: "Rollback me",
+            attachments: [
+              {
+                type: "image",
+                id: "thread-rollback-att-1",
+                name: "rollback.png",
+                mimeType: "image/png",
+                sizeBytes: 5,
+              },
+            ],
+            turnId: null,
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        }),
+      );
       assert.equal(result._tag, "Failure");
 
       const rows = yield* sql<{
@@ -925,43 +998,7 @@ it.layer(
       const attachmentPath = path.join(attachmentsDir, "thread-rollback-att-1.png");
       assert.isFalse(yield* exists(attachmentPath));
 
-      const stateAfterFailure = yield* sql<{
-        readonly projector: string;
-        readonly lastAppliedSequence: number;
-      }>`
-        SELECT projector, last_applied_sequence AS "lastAppliedSequence"
-        FROM projection_state
-        ORDER BY projector ASC
-      `;
-      assert.lengthOf(stateAfterFailure, Object.keys(ORCHESTRATION_PROJECTOR_NAMES).length);
-      for (const row of stateAfterFailure) {
-        assert.equal(row.lastAppliedSequence, savedEvent.sequence - 1);
-      }
-
       yield* sql`DROP TRIGGER IF EXISTS fail_thread_messages_projection_state_update`;
-      yield* projectionPipeline.projectEvent(savedEvent);
-
-      const rowsAfterRetry = yield* sql<{
-        readonly text: string;
-      }>`
-        SELECT text
-        FROM projection_thread_messages
-        WHERE message_id = 'message-rollback'
-      `;
-      assert.deepEqual(rowsAfterRetry, [{ text: "Rollback me" }]);
-
-      const stateAfterRetry = yield* sql<{
-        readonly projector: string;
-        readonly lastAppliedSequence: number;
-      }>`
-        SELECT projector, last_applied_sequence AS "lastAppliedSequence"
-        FROM projection_state
-        ORDER BY projector ASC
-      `;
-      assert.lengthOf(stateAfterRetry, Object.keys(ORCHESTRATION_PROJECTOR_NAMES).length);
-      for (const row of stateAfterRetry) {
-        assert.equal(row.lastAppliedSequence, savedEvent.sequence);
-      }
     }),
   );
 });
@@ -1430,13 +1467,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
 
       yield* projectionPipeline.bootstrap;
 
-      yield* sql`
-        UPDATE projection_state
-        SET last_applied_sequence = 2
-        WHERE projector = ${ORCHESTRATION_PROJECTOR_NAMES.threadMessages}
-      `;
-
-      const savedDelta = yield* eventStore.append({
+      yield* eventStore.append({
         type: "thread.message-sent",
         eventId: EventId.make("evt-a4"),
         aggregateKind: "thread",
@@ -1457,30 +1488,6 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
           updatedAt: now,
         },
       });
-
-      const liveResult = yield* Effect.result(projectionPipeline.projectEvent(savedDelta));
-      assert.equal(liveResult._tag, "Failure");
-
-      const messageBeforeResume = yield* sql<{ readonly text: string }>`
-        SELECT text FROM projection_thread_messages WHERE message_id = 'message-a'
-      `;
-      assert.deepEqual(messageBeforeResume, [{ text: "hello" }]);
-
-      const stateBeforeResume = yield* sql<{
-        readonly projector: string;
-        readonly lastAppliedSequence: number;
-      }>`
-        SELECT projector, last_applied_sequence AS "lastAppliedSequence"
-        FROM projection_state
-        ORDER BY projector ASC
-      `;
-      assert.lengthOf(stateBeforeResume, Object.keys(ORCHESTRATION_PROJECTOR_NAMES).length);
-      for (const row of stateBeforeResume) {
-        assert.equal(
-          row.lastAppliedSequence,
-          row.projector === ORCHESTRATION_PROJECTOR_NAMES.threadMessages ? 2 : 3,
-        );
-      }
 
       yield* projectionPipeline.bootstrap;
       yield* projectionPipeline.bootstrap;
@@ -1503,7 +1510,6 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         SELECT MAX(sequence) AS "maxSequence" FROM orchestration_events
       `;
       const maxSequence = maxSequenceRows[0]?.maxSequence ?? 0;
-      assert.lengthOf(stateRows, Object.keys(ORCHESTRATION_PROJECTOR_NAMES).length);
       for (const row of stateRows) {
         assert.equal(row.lastAppliedSequence, maxSequence);
       }

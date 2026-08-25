@@ -26,7 +26,7 @@ import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as OrchestrationEngine from "./Services/OrchestrationEngine.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { projectThreadDetailSnapshot } from "./ActivityPayloadProjection.ts";
-import { normalizeDispatchCommand } from "./Normalizer.ts";
+import { cleanupFailedUploadedAttachments, normalizeDispatchCommand } from "./Normalizer.ts";
 import {
   annotateEnvironmentRequest,
   failEnvironmentConflict,
@@ -358,9 +358,12 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           const normalizedCommand = yield* normalizeDispatchCommand(args.payload).pipe(
             Effect.catch((cause) => failEnvironmentInvalidRequest("invalid_command", cause)),
           );
-          return yield* orchestrationCommandDispatcher
-            .dispatch(normalizedCommand)
-            .pipe(Effect.catch(failEnvironmentDispatch));
+          return yield* orchestrationCommandDispatcher.dispatch(normalizedCommand).pipe(
+            Effect.tapError(() =>
+              cleanupFailedUploadedAttachments(args.payload, normalizedCommand),
+            ),
+            Effect.catch(failEnvironmentDispatch),
+          );
         }),
       )
       .handle(

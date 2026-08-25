@@ -500,6 +500,13 @@ describe("remote environment authorization", () => {
           { key: "proxy", value: "secret value" },
           { key: "proxy", value: "second" },
         ],
+        clientMetadata: {
+          surface: "mobile",
+          appVersion: "1.2.3",
+          os: "Android",
+          osMajorVersion: 15,
+          deviceModel: "Pixel 9",
+        },
       }).pipe(provideRemoteHttp(fetch.fetchFn));
 
       expectFetchCall(fetch.calls, 1, {
@@ -508,7 +515,7 @@ describe("remote environment authorization", () => {
         headers: { authorization: "Bearer bearer-token" },
       });
       expect(url).toBe(
-        "wss://remote.example.com/ws?wsTicket=ws-ticket&proxy=secret+value&proxy=second",
+        "wss://remote.example.com/ws?wsTicket=ws-ticket&proxy=secret+value&proxy=second&clientSurface=mobile&clientAppVersion=1.2.3&clientOs=Android&clientOsMajorVersion=15&clientDeviceModel=Pixel+9",
       );
     }),
   );

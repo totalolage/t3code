@@ -51,6 +51,7 @@ export const HostProcessArguments = Context.Reference<ReadonlyArray<string>>(
   },
 );
 
+/** Undefined on platforms without POSIX uids (Windows). */
 export const HostProcessUserId = Context.Reference<number | undefined>(
   "@t3tools/shared/hostProcess/HostProcessUserId",
   {
@@ -64,5 +65,4 @@ export const HostProcessGroupId = Context.Reference<number | undefined>(
     defaultValue: () => process.getgid?.(),
   },
 );
-
 export const isHostWindows = Effect.map(HostProcessPlatform, (platform) => platform === "win32");

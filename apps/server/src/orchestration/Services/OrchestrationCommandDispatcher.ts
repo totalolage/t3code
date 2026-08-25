@@ -1,6 +1,7 @@
 import {
   CommandId,
   EventId,
+  type OrchestrationClientOrigin,
   type OrchestrationCommand,
   OrchestrationDispatchCommandError,
   type ThreadId,
@@ -97,6 +98,7 @@ export function isExpectedClientDispatchError(error: unknown): boolean {
 export interface OrchestrationCommandDispatcherShape {
   readonly dispatch: (
     command: OrchestrationCommand,
+    options?: { readonly origin?: OrchestrationClientOrigin },
   ) => Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError, never>;
 }
 
@@ -133,7 +135,10 @@ function makeDispatcher(
   const dispatchBootstrapTurnStart = Effect.fn("OrchestrationCommandDispatcher.bootstrap")(
     function* (
       command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
+      options?: { readonly origin?: OrchestrationClientOrigin },
     ): Effect.fn.Return<{ readonly sequence: number }, OrchestrationDispatchCommandError, never> {
+      const dispatchCommand = (command: OrchestrationCommand) =>
+        orchestrationEngine.dispatch(command, options);
       const existingReceipt = yield* orchestrationEngine
         .getCommandReceipt(command.commandId)
         .pipe(
@@ -249,7 +254,7 @@ function makeDispatcher(
           if (createdThread) {
             yield* serverCommandId("bootstrap-thread-delete").pipe(
               Effect.flatMap((commandId) =>
-                orchestrationEngine.dispatch({
+                dispatchCommand({
                   type: "thread.delete",
                   commandId,
                   threadId: command.threadId,
@@ -274,7 +279,7 @@ function makeDispatcher(
           activityId: serverEventId,
         }).pipe(
           Effect.flatMap(({ commandId, activityId }) =>
-            orchestrationEngine.dispatch({
+            dispatchCommand({
               type: "thread.activity.append",
               commandId,
               threadId: input.threadId,
@@ -418,7 +423,7 @@ function makeDispatcher(
 
       const bootstrapProgram = Effect.gen(function* () {
         if (bootstrap?.createThread) {
-          yield* orchestrationEngine.dispatch({
+          yield* dispatchCommand({
             type: "thread.create",
             commandId: yield* serverCommandId("bootstrap-thread-create"),
             threadId: command.threadId,
@@ -470,7 +475,7 @@ function makeDispatcher(
           targetWorktreePath = worktree.worktree.path;
           createdWorktreeBranch = worktree.worktree.refName;
           createdWorktreePath = targetWorktreePath;
-          yield* orchestrationEngine.dispatch({
+          yield* dispatchCommand({
             type: "thread.meta.update",
             commandId: yield* serverCommandId("bootstrap-thread-meta-update"),
             threadId: command.threadId,
@@ -481,7 +486,7 @@ function makeDispatcher(
         }
 
         yield* runSetupProgram();
-        return yield* orchestrationEngine.dispatch(finalTurnStartCommand).pipe(
+        return yield* dispatchCommand(finalTurnStartCommand).pipe(
           Effect.tap(() =>
             Effect.sync(() => {
               finalCommandAccepted = true;
@@ -513,12 +518,15 @@ function makeDispatcher(
 
   const dispatch = Effect.fn("OrchestrationCommandDispatcher.dispatch")(function* (
     command: OrchestrationCommand,
+    options?: { readonly origin?: OrchestrationClientOrigin },
   ): Effect.fn.Return<{ readonly sequence: number }, OrchestrationDispatchCommandError, never> {
     const dispatchEffect =
       command.type === "thread.turn.start" && command.bootstrap
-        ? orchestrationEngine.withBootstrapDispatchLock(dispatchBootstrapTurnStart(command))
+        ? orchestrationEngine.withBootstrapDispatchLock(
+            dispatchBootstrapTurnStart(command, options),
+          )
         : orchestrationEngine
-            .dispatch(command)
+            .dispatch(command, options)
             .pipe(
               Effect.mapError((cause) =>
                 toDispatchCommandError(cause, "Failed to dispatch orchestration command"),

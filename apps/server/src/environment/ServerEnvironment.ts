@@ -150,12 +150,14 @@ export const make = Effect.gen(function* () {
     capabilities: {
       repositoryIdentity: true,
       connectionProbe: true,
+      attachmentUploads: true,
       pullRequests: true,
       threadSettlement: true,
       threadSnooze: true,
       threadPinning: true,
       threadPinReorder: true,
       threadTitleRegeneration: true,
+      threadPullRequestLinking: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
       orchestration: {
         pendingInteractions: true,

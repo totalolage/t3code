@@ -11,6 +11,7 @@ import { localOrchestrationCommands, remoteCommand } from "./remote.ts";
 import { runServerCommand, serveCommand, startCommand } from "./server.ts";
 import { serviceCommand } from "./service.ts";
 import { servicePreflightCommand } from "./servicePreflight.ts";
+import { triageCommand } from "./triage.ts";
 import { hasCloudPublicConfig } from "../cloud/publicConfig.ts";
 
 const connectPublicConfigMissingMessage =
@@ -49,6 +50,7 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
       projectCommand,
       serviceCommand,
       servicePreflightCommand,
+      triageCommand,
       remoteCommand,
       ...localOrchestrationCommands,
       cloudEnabled ? connectCommand : connectUnavailableCommand,
