@@ -27,9 +27,9 @@ signing only when platform credentials are present. macOS passkey builds additio
 `APPLE_TEAM_ID` and the `MACOS_PROVISIONING_PROFILE` secret; Windows uses Azure Trusted Signing.
 Without the core signing credentials, it still releases unsigned artifacts.
 
-The fork's `.github/workflows/f8y-release.yml` publishes an unsigned Apple Silicon DMG and one
-persistently signed Android APK as an `f8y` prerelease after every successful build of `main`. See
-[f8y Continuous Releases](../operations/f8y-release.md) for the fork pipeline, Android keystore,
-and Obtainium setup.
+The fork's `.github/workflows/f8y-release.yml` publishes an unsigned Apple Silicon DMG, a
+self-updating Linux x86_64 AppImage, and one persistently signed Android APK as an `f8y` prerelease
+after every successful build of `main`. See [f8y Continuous Releases](../operations/f8y-release.md)
+for the fork pipeline, Android keystore, and Obtainium setup.
 
 See [Release Checklist](../operations/release.md) for the full release/signing setup checklist.

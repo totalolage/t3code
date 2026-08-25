@@ -1991,8 +1991,10 @@ export function resolveDesktopRuntimeDependencies(
   return resolveCatalogDependencies(runtimeDependencies, catalog, "apps/desktop");
 }
 
+type DesktopPublishChannel = "latest" | "nightly" | "f8y";
+
 export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
-  updateChannel: "latest" | "nightly",
+  updateChannel: DesktopPublishChannel,
 ) {
   const env = yield* Config.all({
     disableUpdateConfig: Config.boolean("T3CODE_DESKTOP_DISABLE_UPDATE_CONFIG").pipe(
@@ -2017,13 +2019,17 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
     provider: "github",
     owner,
     repo,
-    releaseType: updateChannel === "nightly" ? "prerelease" : "release",
-    ...(updateChannel === "nightly" ? { channel: "nightly" as const } : {}),
+    releaseType: updateChannel === "latest" ? "release" : "prerelease",
+    ...(updateChannel === "latest" ? {} : { channel: updateChannel }),
   };
 });
 
 export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
   return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
+}
+
+export function resolveDesktopPublishChannel(version: string): DesktopPublishChannel {
+  return /-f8y\.\d{8}\.\d+$/.test(version) ? "f8y" : resolveDesktopUpdateChannel(version);
 }
 
 function isDesktopPreviewVersion(version: string): boolean {
@@ -2114,7 +2120,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     ],
     ...(platform === "mac" && (signed || adHocSignMac) ? { forceCodeSigning: true } : {}),
   };
-  const updateChannel = resolveDesktopUpdateChannel(version);
+  const updateChannel = resolveDesktopPublishChannel(version);
   if (!isDesktopPreviewVersion(version)) {
     const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
     if (publishConfig) {
