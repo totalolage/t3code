@@ -252,7 +252,7 @@ function makeDispatcher(
             }
           }
           if (createdThread) {
-            yield* serverCommandId("bootstrap-thread-delete").pipe(
+            return yield* serverCommandId("bootstrap-thread-delete").pipe(
               Effect.flatMap((commandId) =>
                 dispatchCommand({
                   type: "thread.delete",
@@ -260,9 +260,16 @@ function makeDispatcher(
                   threadId: command.threadId,
                 }),
               ),
-              Effect.ignoreCause({ log: true }),
+              Effect.as(true),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("bootstrap thread cleanup failed", {
+                  threadId: command.threadId,
+                  detail: Cause.pretty(cause),
+                }).pipe(Effect.as(false)),
+              ),
             );
           }
+          return false;
         });
 
       const appendSetupScriptActivity = (input: {
@@ -498,7 +505,9 @@ function makeDispatcher(
 
       return yield* bootstrapProgram.pipe(
         Effect.onInterrupt(() =>
-          finalCommandAccepted ? Effect.void : Effect.uninterruptible(cleanupCreatedResources()),
+          finalCommandAccepted
+            ? Effect.void
+            : Effect.uninterruptible(cleanupCreatedResources()).pipe(Effect.asVoid),
         ),
         Effect.catchCause((cause) => {
           const squashed = Cause.squash(cause);
@@ -510,7 +519,19 @@ function makeDispatcher(
           if (Cause.hasInterruptsOnly(cause)) {
             return Effect.interrupt;
           }
-          return cleanup.pipe(Effect.flatMap(() => Effect.fail(dispatchError)));
+          return cleanup.pipe(
+            Effect.flatMap((threadDeleted) =>
+              Effect.fail(
+                threadDeleted
+                  ? new OrchestrationDispatchCommandError({
+                      message: dispatchError.message,
+                      ...(dispatchError.cause === undefined ? {} : { cause: dispatchError.cause }),
+                      bootstrapThreadDisposition: "deleted",
+                    })
+                  : dispatchError,
+              ),
+            ),
+          );
         }),
       );
     },
