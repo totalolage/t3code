@@ -9,6 +9,8 @@ import serverPackageJson from "../apps/server/package.json" with { type: "json" 
 const repoRoot = NodePath.resolve(import.meta.dirname, "..");
 const workflowPath = NodePath.join(repoRoot, ".github/workflows/f8y-release.yml");
 const workflow = NodeFS.readFileSync(workflowPath, "utf8");
+const f8yPkgbuildPath = NodePath.join(repoRoot, "packaging/aur/t3code-f8y-bin/PKGBUILD");
+const f8yPkgbuild = NodeFS.readFileSync(f8yPkgbuildPath, "utf8");
 
 it("publishes the desktop, mobile, and standalone CLI artifacts for every main push", () => {
   assert.match(workflow, /push:\n\s+branches:\n\s+- main/u);
@@ -91,6 +93,13 @@ it("builds and verifies the Linux desktop AppImage", () => {
   assert.include(workflow, "appimages=(release/*.AppImage)");
   assert.include(workflow, '"$appimage" --appimage-extract');
   assert.include(workflow, "release-publish/*.AppImage");
+});
+
+it("packages the f8y Linux release as a desktop application", () => {
+  assert.include(f8yPkgbuild, '_appimage="T3-Code-${_upstream_version}-${CARCH}.AppImage"');
+  assert.include(f8yPkgbuild, '"$pkgdir/usr/bin/t3code"');
+  assert.include(f8yPkgbuild, '"$pkgdir/usr/share/applications/t3code.desktop"');
+  assert.notInclude(f8yPkgbuild, '"$pkgdir/usr/bin/t3"');
 });
 
 it("ad-hoc-signs and integrity-checks the account-free macOS release", () => {

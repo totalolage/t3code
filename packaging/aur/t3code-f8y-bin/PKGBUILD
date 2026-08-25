@@ -1,7 +1,7 @@
 # Maintainer: Filip Kalny <filip@kalny.net>
 
 pkgname=t3code-f8y-bin
-pkgver=0.0.33_f8y.20260815.55
+pkgver=0.0.33_f8y.20260824.57
 pkgrel=1
 pkgdesc='Desktop control surface for local coding agents from the totalolage f8y releases'
 arch=('x86_64')
@@ -51,7 +51,7 @@ source=(
   "${pkgname}-${pkgver}-LICENSE::https://raw.githubusercontent.com/totalolage/t3code/v${_upstream_version}/LICENSE"
 )
 sha256sums=(
-  '0000000000000000000000000000000000000000000000000000000000000000' # AppImage
+  '93c2642d08cf1e17c4bc4e18a1aad9e0b8253e277982257437c2041820717dde' # AppImage
   '403e874556ffbecee8d1b2b5d612a874303fac791212a261bb3bd1b71d83e78d' # icon
   '935d8f2af0c703f9c39517ee57cc4930b19d02d533be930b63f0e82f93614b43' # upstream license
 )
