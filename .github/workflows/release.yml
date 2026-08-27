@@ -718,9 +718,8 @@ jobs:
       - name: Align package versions to release version
         run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
 
-      - name: Build web package
-        run: vp run --filter @t3tools/web build
-
+      # The t3 build task depends on @t3tools/web#build, so the web client is
+      # built once as part of this step.
       - name: Build CLI package
         run: vp run --filter t3 build
 
