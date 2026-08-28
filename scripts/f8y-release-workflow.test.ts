@@ -93,7 +93,7 @@ it("builds and verifies the Linux desktop AppImage", () => {
   assert.include(workflow, "name: Build Linux x86_64 artifacts");
   assert.include(workflow, "dtolnay/rust-toolchain@stable");
   assert.include(workflow, "vp run --filter @t3tools/desktop ensure:electron");
-  assert.include(workflow, "T3CODE_DESKTOP_APP_ID: com.f8y.t3code");
+  assert.include(workflow, "T3CODE_DESKTOP_APP_ID: dev.f8y.t3code");
   assert.include(linuxJob, "T3CODE_DESKTOP_UPDATE_REPOSITORY: totalolage/t3code");
   assert.notInclude(linuxJob, "T3CODE_DESKTOP_DISABLE_UPDATE_CONFIG");
   assert.include(workflow, "--platform linux");
@@ -119,7 +119,7 @@ it("ad-hoc-signs and integrity-checks the account-free macOS release", () => {
   assert.include(workflow, 'codesign --verify --deep --strict --verbose=2 "$app"');
   assert.include(workflow, "Signature=adhoc");
   assert.include(workflow, 'shasum -a 256 "$(basename "$dmg")"');
-  assert.include(workflow, 'bundle_id" != "com.f8y.t3code"');
+  assert.include(workflow, 'bundle_id" != "dev.f8y.t3code"');
   assert.include(workflow, "Privacy & Security → Open Anyway");
   assert.notInclude(workflow, "notarytool");
   assert.notInclude(workflow, "stapler");
@@ -151,7 +151,7 @@ it("uses a stable f8y keystore and validates Android package metadata", () => {
   assert.include(workflow, "F8Y_ANDROID_KEYSTORE_BASE64");
   assert.include(workflow, "F8Y_ANDROID_STORE_PASSWORD");
   assert.include(workflow, "F8Y_ANDROID_KEY_PASSWORD");
-  assert.include(workflow, "name='com.f8y.t3code'");
+  assert.include(workflow, "name='dev.f8y.t3code'");
   assert.include(
     workflow,
     "versionCode='${{ needs.metadata_and_checks.outputs.android_version_code }}'",

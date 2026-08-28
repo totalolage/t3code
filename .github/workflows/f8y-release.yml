@@ -120,7 +120,7 @@ jobs:
       - name: Build ad-hoc-signed DMG
         env:
           T3CODE_DESKTOP_AD_HOC_SIGN: "true"
-          T3CODE_DESKTOP_APP_ID: com.f8y.t3code
+          T3CODE_DESKTOP_APP_ID: dev.f8y.t3code
           T3CODE_DESKTOP_DISABLE_UPDATE_CONFIG: "true"
         run: |
           vp run dist:desktop:artifact \
@@ -157,7 +157,7 @@ jobs:
           fi
           app="${apps[0]}"
           bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")"
-          if [[ "$bundle_id" != "com.f8y.t3code" ]]; then
+          if [[ "$bundle_id" != "dev.f8y.t3code" ]]; then
             echo "Unexpected macOS bundle ID: $bundle_id" >&2
             exit 1
           fi
@@ -261,7 +261,7 @@ jobs:
 
       - name: Build Linux AppImage
         env:
-          T3CODE_DESKTOP_APP_ID: com.f8y.t3code
+          T3CODE_DESKTOP_APP_ID: dev.f8y.t3code
           T3CODE_DESKTOP_UPDATE_REPOSITORY: totalolage/t3code
         run: |
           vp run dist:desktop:artifact \
@@ -409,7 +409,7 @@ jobs:
           printf '%s\n' "$current_verification"
 
           badging="$("$build_tools/aapt" dump badging "${apks[0]}" | head -n 1)"
-          expected_package="name='com.f8y.t3code'"
+          expected_package="name='dev.f8y.t3code'"
           expected_version_code="versionCode='${{ needs.metadata_and_checks.outputs.android_version_code }}'"
           expected_version_name="versionName='${{ needs.metadata_and_checks.outputs.version }}'"
           for expected in "$expected_package" "$expected_version_code" "$expected_version_name"; do

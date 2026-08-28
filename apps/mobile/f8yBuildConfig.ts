@@ -1,6 +1,6 @@
 export type AppVariant = "development" | "preview" | "production" | "f8y";
 
-export const F8Y_APP_ID = "com.f8y.t3code";
+export const F8Y_APP_ID = "dev.f8y.t3code";
 export const F8Y_APP_IDENTITY = {
   appName: "T3 Code",
   scheme: "t3code",
