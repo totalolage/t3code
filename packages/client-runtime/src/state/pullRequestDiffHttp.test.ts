@@ -20,7 +20,7 @@ const PREPARED: PreparedConnection = {
   httpBaseUrl: TARGET.httpBaseUrl,
   socketUrl: "wss://environment.example.test/ws",
   httpAuthorization: null,
-  queryParameters: [],
+  queryParameters: [{ key: "proxy", value: "fork route" }],
   target: TARGET,
 };
 
@@ -57,7 +57,9 @@ describe("fetchEnvironmentPullRequestDiff", () => {
       });
       expect(calls).toHaveLength(1);
       const [request, init] = calls[0]!;
-      expect(String(request)).toBe("https://environment.example.test/api/pull-requests/diff");
+      expect(String(request)).toBe(
+        "https://environment.example.test/api/pull-requests/diff?proxy=fork+route",
+      );
       expect(init.method).toBe("POST");
       expect(init.credentials).toBe("include");
 
