@@ -304,7 +304,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       );
 
       assert.equal(publishConfig, undefined);
-      assert.equal(buildConfig.appId, "com.f8y.t3code");
+      assert.equal(buildConfig.appId, "dev.f8y.t3code");
       assert.notProperty(buildConfig, "publish");
       assert.equal(buildConfig.forceCodeSigning, true);
       const mac = buildConfig.mac as Record<string, unknown>;
@@ -317,7 +317,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             env: {
               GITHUB_REPOSITORY: "totalolage/t3code",
               T3CODE_DESKTOP_AD_HOC_SIGN: "true",
-              T3CODE_DESKTOP_APP_ID: "com.f8y.t3code",
+              T3CODE_DESKTOP_APP_ID: "dev.f8y.t3code",
               T3CODE_DESKTOP_DISABLE_UPDATE_CONFIG: "true",
             },
           }),
@@ -1205,16 +1205,16 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("uses the configured desktop app ID in macOS signing entitlements", () => {
     const configuration = resolveMacPasskeySigningConfiguration({
-      T3CODE_DESKTOP_APP_ID: " com.f8y.t3code ",
+      T3CODE_DESKTOP_APP_ID: " dev.f8y.t3code ",
       T3CODE_APPLE_TEAM_ID: "ABC1234567",
       T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code-f8y.provisionprofile",
       T3CODE_CLERK_PASSKEY_RP_DOMAINS: "clerk.example.com",
     });
 
-    assert.equal(configuration.appId, "com.f8y.t3code");
+    assert.equal(configuration.appId, "dev.f8y.t3code");
     assert.include(
       renderMacPasskeyEntitlements(configuration),
-      "<string>ABC1234567.com.f8y.t3code</string>",
+      "<string>ABC1234567.dev.f8y.t3code</string>",
     );
   });
 

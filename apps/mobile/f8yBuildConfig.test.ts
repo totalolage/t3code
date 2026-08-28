@@ -11,8 +11,8 @@ it("defines a standalone f8y identity without changing the display name", () => 
   assert.deepStrictEqual(F8Y_APP_IDENTITY, {
     appName: "T3 Code",
     scheme: "t3code",
-    iosBundleIdentifier: "com.f8y.t3code",
-    androidPackage: "com.f8y.t3code",
+    iosBundleIdentifier: "dev.f8y.t3code",
+    androidPackage: "dev.f8y.t3code",
     relyingParty: "clerk.t3.codes",
   });
   assert.equal(resolveAppVariant("f8y"), "f8y");

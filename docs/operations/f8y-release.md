@@ -49,7 +49,7 @@ base64 -i t3code-f8y.jks | tr -d '\n'
 
 Never commit the keystore. Losing it means existing installations cannot be updated by a newly keyed
 APK; uninstall the old application before installing the replacement. Do not install an APK for
-`com.f8y.t3code` from another signing source because Android will reject an update signed by a
+`dev.f8y.t3code` from another signing source because Android will reject an update signed by a
 different key.
 
 ## macOS integrity and Gatekeeper
@@ -93,11 +93,13 @@ settings.
 
 Obtainium detects and downloads new APKs, but a stock Android device still shows the system update
 confirmation. After installation, application data is preserved because the package ID remains
-`com.f8y.t3code`, the signing key stays constant, and each release has a higher `versionCode`.
+`dev.f8y.t3code`, the signing key stays constant, and each release has a higher `versionCode`.
+The first `dev.f8y.t3code` release installs separately from an existing `com.f8y.t3code` app;
+Android does not migrate application data between package IDs.
 
 ## macOS installation and updates
 
-The macOS build uses app ID `com.f8y.t3code` and intentionally contains no Electron update-feed
+The macOS build uses app ID `dev.f8y.t3code` and intentionally contains no Electron update-feed
 configuration. Install new versions manually from GitHub Releases. A normal warning-free first launch
 is not possible without Developer ID signing and Apple notarization.
 
@@ -161,7 +163,7 @@ For the first release:
 1. Confirm the GitHub prerelease targets the expected `main` commit and contains the DMG, AppImage,
    `f8y-linux.yml`, APK, both CLI binaries, and their checksums.
 2. Install the APK through Obtainium.
-3. Verify the installed package is `com.f8y.t3code` and its version matches the release.
+3. Verify the installed package is `dev.f8y.t3code` and its version matches the release.
 4. Download the DMG and checksum in a browser and confirm `shasum -a 256 -c` reports `OK`.
 5. Install the app on a separate Mac and confirm the documented **Open Anyway** flow works.
 6. Publish a later `main` build and confirm Obtainium detects it.
