@@ -81,6 +81,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       cliApiVersion: Schema.optionalKey(Schema.Int),
       serverAuthoritativeCreate: Schema.optionalKey(Schema.Boolean),
       watchResume: Schema.optionalKey(Schema.Boolean),
+      manualThreadCompaction: Schema.optionalKey(Schema.Boolean),
     }),
   ),
   /** Server can stream self-update progress before acknowledging the

@@ -99,7 +99,11 @@ export interface OrchestrationCommandDispatcherShape {
   readonly dispatch: (
     command: OrchestrationCommand,
     options?: { readonly origin?: OrchestrationClientOrigin },
-  ) => Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError, never>;
+  ) => Effect.Effect<
+    { readonly sequence: number; readonly replayed?: boolean },
+    OrchestrationDispatchCommandError,
+    never
+  >;
 }
 
 interface OrchestrationCommandDispatcherDependencies {
@@ -136,7 +140,11 @@ function makeDispatcher(
     function* (
       command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
       options?: { readonly origin?: OrchestrationClientOrigin },
-    ): Effect.fn.Return<{ readonly sequence: number }, OrchestrationDispatchCommandError, never> {
+    ): Effect.fn.Return<
+      { readonly sequence: number; readonly replayed?: boolean },
+      OrchestrationDispatchCommandError,
+      never
+    > {
       const dispatchCommand = (command: OrchestrationCommand) =>
         orchestrationEngine.dispatch(command, options);
       const existingReceipt = yield* orchestrationEngine
@@ -148,7 +156,7 @@ function makeDispatcher(
         );
       if (Option.isSome(existingReceipt)) {
         if (existingReceipt.value.status === "accepted") {
-          return { sequence: existingReceipt.value.resultSequence };
+          return { sequence: existingReceipt.value.resultSequence, replayed: true };
         }
         return yield* toDispatchCommandError(
           new OrchestrationCommandPreviouslyRejectedError({
@@ -540,7 +548,11 @@ function makeDispatcher(
   const dispatch = Effect.fn("OrchestrationCommandDispatcher.dispatch")(function* (
     command: OrchestrationCommand,
     options?: { readonly origin?: OrchestrationClientOrigin },
-  ): Effect.fn.Return<{ readonly sequence: number }, OrchestrationDispatchCommandError, never> {
+  ): Effect.fn.Return<
+    { readonly sequence: number; readonly replayed?: boolean },
+    OrchestrationDispatchCommandError,
+    never
+  > {
     const dispatchEffect =
       command.type === "thread.turn.start" && command.bootstrap
         ? orchestrationEngine.withBootstrapDispatchLock(

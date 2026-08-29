@@ -95,6 +95,14 @@ rl.on("line", (line) => {
     }
     return;
   }
+  if (method === "thread/compact/start") {
+    NodeFS.appendFileSync(
+      `${process.env.T3_CODEX_COLLAB_SCRIPT}.compactions`,
+      `${JSON.stringify(message.params)}\n`,
+    );
+    write({ id, result: {} });
+    return;
+  }
   if (method === "turn/interrupt") {
     // Record which thread/turn was interrupted (append-only sidecar file the
     // test reads) so Stop coverage can assert every live child was reached.

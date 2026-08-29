@@ -245,8 +245,8 @@ t3 remote shell --host https://backend.example.com
 t3 remote pending --host https://backend.example.com
 ```
 
-The top-level `create`, `send`, `watch`, `pending`, `answer`, `approve`, `reject`, `thread`,
-`shell`, `session`, and `snapshot` commands discover a live local server from its runtime state.
+The top-level `create`, `send`, `compact`, `watch`, `pending`, `answer`, `approve`, `reject`,
+`thread`, `shell`, `session`, and `snapshot` commands discover a live local server from its runtime state.
 Discovery verifies the process, environment identity, and orchestration CLI API version before
 loading or issuing the stable local CLI bearer session. They never fall back to offline project
 mutation. `snapshot` is an advanced/debug view; prefer `shell`, `thread`, or `pending` for normal
@@ -272,6 +272,19 @@ Use `--branch`, `--base-branch`, `--runtime-mode`, `--interaction-mode`, or
 `--start-from-origin` only when overriding server defaults. A path must already identify a
 registered project; create never enrolls a project automatically. Reusing the same idempotency key
 with the same authenticated CLI principal safely replays the accepted result.
+
+Compact an idle Codex thread after a completed automation run without creating a message or turn:
+
+```bash
+t3 compact thread-123 \
+  --yes \
+  --idempotency-key dispatcher-run-42 \
+  --base-dir /path/to/t3-state
+```
+
+Use `t3 remote compact ... --host https://backend.example.com` for an explicit remote server.
+The command returns after Codex accepts native compaction. Reusing the same idempotency key does
+not request compaction twice. Active threads and providers without manual compaction fail clearly.
 
 The standalone remote CLI can read and respond to provider interactions without exposing provider
 activity envelopes. A compatible server advertises

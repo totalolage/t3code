@@ -5,6 +5,8 @@ import {
   type OrchestrationReadModel,
   type OrchestrationCliCreateRequest,
   type OrchestrationCliCreateResult,
+  type OrchestrationCliCompactRequest,
+  type OrchestrationCliCompactResult,
   type OrchestrationShellSnapshot,
   type OrchestrationThreadDetailSnapshot,
   type ThreadId,
@@ -137,6 +139,30 @@ export const createRemoteOrchestrationThread = Effect.fn(
     requestUrl,
     input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,
     client.orchestration.create({
+      headers: bearerHeaders(input.authorization),
+      payload: input.payload,
+    }),
+  );
+});
+
+export const compactRemoteOrchestrationThread = Effect.fn(
+  "clientRuntime.operations.compactRemoteOrchestrationThread",
+)(function* (input: {
+  readonly httpBaseUrl: string;
+  readonly authorization: RemoteBearerAuthorization;
+  readonly payload: OrchestrationCliCompactRequest;
+  readonly timeoutMs?: number;
+}): Effect.fn.Return<
+  OrchestrationCliCompactResult,
+  RemoteEnvironmentRequestError,
+  HttpClient.HttpClient
+> {
+  const requestUrl = environmentEndpointUrl(input.httpBaseUrl, "/api/orchestration/compact");
+  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl);
+  return yield* executeEnvironmentHttpRequest(
+    requestUrl,
+    input.timeoutMs ?? 30_000,
+    client.orchestration.compact({
       headers: bearerHeaders(input.authorization),
       payload: input.payload,
     }),

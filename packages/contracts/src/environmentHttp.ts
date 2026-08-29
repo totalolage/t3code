@@ -29,6 +29,8 @@ import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import {
   ClientOrchestrationCommand,
   DispatchResult,
+  OrchestrationCliCompactRequest,
+  OrchestrationCliCompactResult,
   OrchestrationCliCreateRequest,
   OrchestrationCliCreateResult,
   OrchestrationReadModel,
@@ -73,6 +75,10 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "scope_not_granted",
   "invalid_command",
   "invalid_interaction",
+  "thread_active",
+  "provider_unsupported",
+  "provider_request_failed",
+  "request_interrupted",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -577,6 +583,14 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
       headers: OptionalBearerHeaders,
       payload: OrchestrationCliCreateRequest,
       success: OrchestrationCliCreateResult,
+      error: EnvironmentOrchestrationDispatchErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("compact", "/api/orchestration/compact", {
+      headers: OptionalBearerHeaders,
+      payload: OrchestrationCliCompactRequest,
+      success: OrchestrationCliCompactResult,
       error: EnvironmentOrchestrationDispatchErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )

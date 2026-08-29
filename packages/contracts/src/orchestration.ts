@@ -561,6 +561,20 @@ export const OrchestrationCliCreateResult = Schema.Struct({
 });
 export type OrchestrationCliCreateResult = typeof OrchestrationCliCreateResult.Type;
 
+export const OrchestrationCliCompactRequest = Schema.Struct({
+  threadId: ThreadId,
+  idempotencyKey: OrchestrationCliCreateIdempotencyKey,
+});
+export type OrchestrationCliCompactRequest = typeof OrchestrationCliCompactRequest.Type;
+
+export const OrchestrationCliCompactResult = Schema.Struct({
+  threadId: ThreadId,
+  commandId: CommandId,
+  sequence: NonNegativeInt,
+  replayed: Schema.Boolean,
+});
+export type OrchestrationCliCompactResult = typeof OrchestrationCliCompactResult.Type;
+
 export const OrchestrationShellStreamEvent = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("project-upserted"),
@@ -927,6 +941,13 @@ const ThreadTurnInterruptCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadCompactCommand = Schema.Struct({
+  type: Schema.Literal("thread.compact"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
 const ThreadApprovalRespondCommand = Schema.Struct({
   type: Schema.Literal("thread.approval.respond"),
   commandId: CommandId,
@@ -986,6 +1007,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadInteractionModeSetCommand,
   ThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
+  ThreadCompactCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
@@ -1014,6 +1036,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadInteractionModeSetCommand,
   ClientThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
+  ThreadCompactCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
@@ -1094,6 +1117,24 @@ const ThreadTitleRegenerationCompleteCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
 });
 
+export const ThreadCompactCompletionReason = Schema.Literals([
+  "active-thread",
+  "unsupported-provider",
+  "provider-rejected",
+  "request-interrupted",
+]);
+export type ThreadCompactCompletionReason = typeof ThreadCompactCompletionReason.Type;
+
+const ThreadCompactCompleteCommand = Schema.Struct({
+  type: Schema.Literal("thread.compact.complete"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  requestCommandId: CommandId,
+  status: Schema.Literals(["accepted", "rejected"]),
+  reason: Schema.optional(ThreadCompactCompletionReason),
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -1103,6 +1144,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadActivityAppendCommand,
   ThreadRevertCompleteCommand,
   ThreadTitleRegenerationCompleteCommand,
+  ThreadCompactCompleteCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1133,6 +1175,8 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.message-sent",
   "thread.turn-start-requested",
   "thread.turn-interrupt-requested",
+  "thread.compact-requested",
+  "thread.compact-request-completed",
   "thread.approval-response-requested",
   "thread.user-input-response-requested",
   "thread.checkpoint-revert-requested",
@@ -1318,6 +1362,19 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
 export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
+  createdAt: IsoDateTime,
+});
+
+export const ThreadCompactRequestedPayload = Schema.Struct({
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
+export const ThreadCompactRequestCompletedPayload = Schema.Struct({
+  threadId: ThreadId,
+  requestCommandId: CommandId,
+  status: Schema.Literals(["accepted", "rejected"]),
+  reason: Schema.optional(ThreadCompactCompletionReason),
   createdAt: IsoDateTime,
 });
 
@@ -1511,6 +1568,16 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.turn-interrupt-requested"),
     payload: ThreadTurnInterruptRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.compact-requested"),
+    payload: ThreadCompactRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.compact-request-completed"),
+    payload: ThreadCompactRequestCompletedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

@@ -8,6 +8,7 @@ import {
   EnvironmentHttpApi,
   GitCommandError,
   MessageId,
+  type OrchestrationEvent,
   ProjectId,
   ThreadId,
   type EnvironmentInternalError,
@@ -18,8 +19,11 @@ import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import * as NodeCrypto from "node:crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
@@ -144,6 +148,18 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
     const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
+    const inFlightCompactions = yield* Ref.make(new Map<CommandId, ThreadId>());
+    const clearInFlightCompaction = (commandId: CommandId) =>
+      Ref.update(inFlightCompactions, (inFlight) => {
+        const next = new Map(inFlight);
+        next.delete(commandId);
+        return next;
+      });
+    yield* orchestrationEngine.streamDomainEvents.pipe(
+      Stream.filter((event) => event.type === "thread.compact-request-completed"),
+      Stream.runForEach((event) => clearInFlightCompaction(event.payload.requestCommandId)),
+      Effect.forkScoped({ startImmediately: true }),
+    );
 
     return handlers
       .handle(
@@ -345,13 +361,124 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
         }),
       )
       .handle(
+        "compact",
+        Effect.fn("environment.orchestration.compact")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const principal = yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          const identity = NodeCrypto.createHash("sha256")
+            .update(`${principal.sessionId}\0${args.payload.idempotencyKey}`, "utf8")
+            .digest("hex");
+          const commandId = CommandId.make(`cli-compact:${identity}`);
+          const existingReceipt = yield* orchestrationEngine
+            .getCommandReceipt(commandId)
+            .pipe(
+              Effect.catch((cause) =>
+                failEnvironmentInternal("orchestration_dispatch_failed", cause),
+              ),
+            );
+          if (
+            Option.isSome(existingReceipt) &&
+            existingReceipt.value.aggregateId !== args.payload.threadId
+          ) {
+            return yield* failEnvironmentInvalidRequest("invalid_command");
+          }
+          const inFlightThreadId = yield* Ref.modify(inFlightCompactions, (inFlight) => {
+            const existingThreadId = inFlight.get(commandId);
+            if (existingThreadId !== undefined) {
+              return [existingThreadId, inFlight];
+            }
+            const next = new Map(inFlight);
+            next.set(commandId, args.payload.threadId);
+            return [undefined, next];
+          });
+          if (inFlightThreadId !== undefined && inFlightThreadId !== args.payload.threadId) {
+            return yield* failEnvironmentInvalidRequest("invalid_command");
+          }
+          const alreadyInFlight = inFlightThreadId !== undefined;
+          return yield* Effect.gen(function* () {
+            const isCompletion = (
+              event: OrchestrationEvent,
+            ): event is Extract<OrchestrationEvent, { type: "thread.compact-request-completed" }> =>
+              event.type === "thread.compact-request-completed" &&
+              event.payload.threadId === args.payload.threadId &&
+              event.payload.requestCommandId === commandId;
+            const liveCompletion = yield* orchestrationEngine.streamDomainEvents.pipe(
+              Stream.filter(isCompletion),
+              Stream.runHead,
+              Effect.forkScoped({ startImmediately: true }),
+            );
+            const result = yield* orchestrationCommandDispatcher
+              .dispatch({
+                type: "thread.compact",
+                commandId,
+                threadId: args.payload.threadId,
+                createdAt: DateTime.formatIso(yield* DateTime.now),
+              })
+              .pipe(
+                Effect.tapError(() =>
+                  alreadyInFlight ? Effect.void : clearInFlightCompaction(commandId),
+                ),
+                Effect.catch(failEnvironmentDispatch),
+              );
+            const persistedCompletion = yield* orchestrationEngine
+              .readEvents(result.sequence, Number.MAX_SAFE_INTEGER)
+              .pipe(
+                Stream.filter(isCompletion),
+                Stream.runHead,
+                Effect.catch((cause) =>
+                  failEnvironmentInternal("orchestration_dispatch_failed", cause),
+                ),
+              );
+            if (
+              Option.isNone(persistedCompletion) &&
+              result.replayed === true &&
+              !alreadyInFlight
+            ) {
+              yield* orchestrationEngine
+                .dispatch({
+                  type: "thread.compact.complete",
+                  commandId: CommandId.make(`server:thread-compact-complete:${commandId}`),
+                  threadId: args.payload.threadId,
+                  requestCommandId: commandId,
+                  status: "rejected",
+                  reason: "request-interrupted",
+                  createdAt: DateTime.formatIso(yield* DateTime.now),
+                })
+                .pipe(Effect.catch(failEnvironmentDispatch));
+            }
+            const completion = Option.isSome(persistedCompletion)
+              ? persistedCompletion.value
+              : Option.getOrThrow(yield* Fiber.join(liveCompletion));
+            if (completion.payload.status === "rejected") {
+              const reason = completion.payload.reason;
+              return yield* failEnvironmentInvalidRequest(
+                reason === "active-thread"
+                  ? "thread_active"
+                  : reason === "unsupported-provider"
+                    ? "provider_unsupported"
+                    : reason === "request-interrupted"
+                      ? "request_interrupted"
+                      : "provider_request_failed",
+              );
+            }
+            return {
+              threadId: completion.payload.threadId,
+              commandId,
+              sequence: completion.sequence,
+              replayed: result.replayed === true,
+            };
+          });
+        }),
+      )
+      .handle(
         "dispatch",
         Effect.fn("environment.orchestration.dispatch")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
           if (
             args.payload.type === "thread.approval.respond" ||
-            args.payload.type === "thread.user-input.respond"
+            args.payload.type === "thread.user-input.respond" ||
+            args.payload.type === "thread.compact"
           ) {
             return yield* failEnvironmentInvalidRequest("invalid_command");
           }

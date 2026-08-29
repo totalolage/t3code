@@ -155,6 +155,7 @@ describe("ProviderCommandReactor", () => {
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
     readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
+    readonly compactThreadEffect?: () => ReturnType<ProviderServiceShape["compactThread"]>;
     readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly startSessionEffect?: (
       session: ProviderSession,
@@ -245,6 +246,7 @@ describe("ProviderCommandReactor", () => {
         }),
     );
     const interruptTurn = vi.fn((_: unknown) => input?.interruptTurnEffect?.() ?? Effect.void);
+    const compactThread = vi.fn((_: unknown) => input?.compactThreadEffect?.() ?? Effect.void);
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
     const respondToUserInput = vi.fn<ProviderServiceShape["respondToUserInput"]>(() => Effect.void);
     const stopSession = vi.fn((stopInput: unknown) =>
@@ -330,6 +332,7 @@ describe("ProviderCommandReactor", () => {
       startSession: startSession as ProviderServiceShape["startSession"],
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
+      compactThread: compactThread as ProviderServiceShape["compactThread"],
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
       stopSession: stopSession as ProviderServiceShape["stopSession"],
@@ -519,6 +522,7 @@ describe("ProviderCommandReactor", () => {
       startSession,
       sendTurn,
       interruptTurn,
+      compactThread,
       respondToRequest,
       respondToUserInput,
       stopSession,
@@ -2620,6 +2624,133 @@ describe("ProviderCommandReactor", () => {
         detail: expect.stringContaining("cannot switch to 'claudeAgent'"),
       },
     });
+  });
+
+  it("compacts once for a replayed command without creating a message or turn", async () => {
+    const harness = await createHarness();
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-idle-before-compact"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    const command = {
+      type: "thread.compact" as const,
+      commandId: CommandId.make("cmd-thread-compact"),
+      threadId: ThreadId.make("thread-1"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    const first = await harness.runEffect(harness.engine.dispatch(command));
+    const replay = await harness.runEffect(harness.engine.dispatch(command));
+    await harness.drain();
+
+    expect(first.replayed).toBe(false);
+    expect(replay).toEqual({ sequence: first.sequence, replayed: true });
+    expect(harness.compactThread.mock.calls).toEqual([[{ threadId: "thread-1" }]]);
+    expect(harness.sendTurn.mock.calls.length).toBe(0);
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    expect(thread?.messages).toEqual([]);
+    const events = Array.from(
+      await harness.runEffect(Stream.runCollect(harness.engine.readEvents(first.sequence - 1))),
+    );
+    expect(events.map((event) => event.type)).toEqual([
+      "thread.compact-requested",
+      "thread.compact-request-completed",
+    ]);
+    expect(events[1]?.payload).toMatchObject({
+      requestCommandId: command.commandId,
+      status: "accepted",
+    });
+  });
+
+  it("serializes distinct compaction requests", async () => {
+    const firstStarted = Effect.runSync(Deferred.make<void>());
+    const releaseFirst = Effect.runSync(Deferred.make<void>());
+    let callCount = 0;
+    const harness = await createHarness({
+      compactThreadEffect: () =>
+        Effect.gen(function* () {
+          callCount += 1;
+          if (callCount === 1) {
+            yield* Deferred.succeed(firstStarted, undefined);
+            yield* Deferred.await(releaseFirst);
+          }
+        }),
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.compact",
+        commandId: CommandId.make("cmd-thread-compact-first"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.compact",
+        commandId: CommandId.make("cmd-thread-compact-second"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(Deferred.await(firstStarted));
+
+    expect(harness.compactThread.mock.calls.length).toBe(1);
+    await harness.runEffect(Deferred.succeed(releaseFirst, undefined));
+    await harness.drain();
+    expect(harness.compactThread.mock.calls.length).toBe(2);
+  });
+
+  it("rejects compaction while the thread is active", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-before-compact"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-1"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    const result = await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.compact",
+        commandId: CommandId.make("cmd-thread-compact-active"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+
+    expect(harness.compactThread.mock.calls.length).toBe(0);
+    const events = Array.from(
+      await harness.runEffect(Stream.runCollect(harness.engine.readEvents(result.sequence - 1))),
+    );
+    expect(events[1]?.type).toBe("thread.compact-request-completed");
+    expect(events[1]?.payload).toMatchObject({ status: "rejected", reason: "active-thread" });
   });
 
   it("reacts to thread.turn.interrupt-requested by calling provider interrupt", async () => {

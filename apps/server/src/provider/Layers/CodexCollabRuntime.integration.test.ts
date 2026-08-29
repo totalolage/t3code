@@ -85,6 +85,44 @@ const scriptPath = NodePath.join(import.meta.dirname, "../testFixtures/.collab-s
 const peerPath = NodePath.join(import.meta.dirname, "../testFixtures/codexCollabMockPeer.sh");
 
 describe("CodexSessionRuntime collab integration", () => {
+  it.effect("compacts the native Codex thread without starting a turn", () =>
+    Effect.gen(function* () {
+      const compactionsPath = `${scriptPath}.compactions`;
+      NodeFS.writeFileSync(
+        scriptPath,
+        // @effect-diagnostics-next-line preferSchemaOverJson:off - mock peer script fixture.
+        JSON.stringify({ rootThreadId: ROOT, notifications: [] }),
+        "utf8",
+      );
+      NodeFS.rmSync(compactionsPath, { force: true });
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          NodeFS.rmSync(scriptPath, { force: true });
+          NodeFS.rmSync(compactionsPath, { force: true });
+        }),
+      );
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("t3-thread-compact"),
+        binaryPath: peerPath,
+        cwd: "/tmp",
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+
+      yield* runtime.start();
+      yield* runtime.compactThread;
+
+      const requests = NodeFS.readFileSync(compactionsPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as unknown);
+      assert.deepEqual(requests, [{ threadId: ROOT }]);
+
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("replays the captured fan-out into synthetic agent events without child leaks", () =>
     Effect.gen(function* () {
       // @effect-diagnostics-next-line preferSchemaOverJson:off

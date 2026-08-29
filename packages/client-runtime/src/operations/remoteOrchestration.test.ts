@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 
 import { remoteHttpClientLayer } from "../rpc/http.ts";
 import {
+  compactRemoteOrchestrationThread,
   createRemoteOrchestrationThread,
   dispatchRemoteOrchestrationCommand,
   fetchRemoteOrchestrationShell,
@@ -39,6 +40,41 @@ const emptySnapshot = {
 };
 
 describe("remote orchestration HTTP operations", () => {
+  it.effect("forwards the compact thread id and idempotency key", () =>
+    Effect.gen(function* () {
+      const fetch = recordedFetch(
+        Response.json({
+          threadId: "thread-compact",
+          commandId: "command-compact",
+          sequence: 2,
+          replayed: false,
+        }),
+      );
+      yield* compactRemoteOrchestrationThread({
+        httpBaseUrl: "https://remote.example",
+        authorization: { accessToken: "secret-token" },
+        payload: {
+          threadId: ThreadId.make("thread-compact"),
+          idempotencyKey: "compact-run-42",
+        },
+      }).pipe(Effect.provide(remoteHttpClientLayer(fetch.fetchFn)));
+
+      expect(String(fetch.calls[0]?.[0])).toBe("https://remote.example/api/orchestration/compact");
+      const body = fetch.calls[0]?.[1].body;
+      const decodedBody =
+        typeof body === "string"
+          ? body
+          : body instanceof Uint8Array
+            ? new TextDecoder().decode(body)
+            : "";
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - verifies the raw request body.
+      expect(JSON.parse(decodedBody)).toEqual({
+        threadId: "thread-compact",
+        idempotencyKey: "compact-run-42",
+      });
+    }),
+  );
+
   it.effect(
     "decodes declared worktree conflicts from create and dispatch instead of replacing them with status",
     () =>

@@ -207,8 +207,8 @@ CLI create is a dedicated server-authoritative operation. Clients send project i
 message, optional overrides, and a session-scoped idempotency key. The server resolves only active
 registered projects and owns defaults, branch/worktree preparation, setup, first-turn dispatch,
 deduplication, and compensation. It never enrolls a project from a client-supplied path. The
-environment descriptor advertises the CLI API version plus create and resumable-watch capabilities,
-and clients fail closed on missing or incompatible capability versions.
+environment descriptor advertises the CLI API version plus create, resumable-watch, and manual
+thread-compaction capabilities, and clients fail closed on missing or incompatible capabilities.
 
 ### Pending interactions
 

@@ -308,6 +308,24 @@ it.effect("accepts both inline and uploaded image attachments from clients", () 
   }),
 );
 
+it.effect("decodes a manual thread compaction command", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeClientOrchestrationCommand({
+      type: "thread.compact",
+      commandId: "cmd-compact-1",
+      threadId: "thread-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    if (command.type !== "thread.compact") {
+      assert.fail(`Expected thread.compact, received ${command.type}.`);
+    }
+    assert.strictEqual(command.commandId, "cmd-compact-1");
+    assert.strictEqual(command.threadId, "thread-1");
+    assert.strictEqual(command.createdAt, "2026-01-01T00:00:00.000Z");
+  }),
+);
+
 it.effect("preserves explicit provider and runtime mode in thread.turn.start", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeThreadTurnStartCommand({

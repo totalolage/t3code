@@ -10,12 +10,14 @@ import {
   ThreadId,
   type ProviderSession,
   type RuntimeMode,
+  type ThreadCompactCompletionReason,
   type TurnId,
 } from "@t3tools/contracts";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -32,7 +34,7 @@ import { serviceUpdateCoordinator } from "../../cloud/serviceUpdateCoordinator.t
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { QueuedProviderTurnStartRepositoryLive } from "../../persistence/Layers/QueuedProviderTurnStarts.ts";
 import { QueuedProviderTurnStartRepository } from "../../persistence/Services/QueuedProviderTurnStarts.ts";
-import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import { ProviderAdapterRequestError, ProviderUnsupportedError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -52,6 +54,7 @@ import {
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
+const isProviderUnsupportedError = Schema.is(ProviderUnsupportedError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
 type ProviderIntentEvent = Extract<
@@ -62,6 +65,7 @@ type ProviderIntentEvent = Extract<
       | "thread.runtime-mode-set"
       | "thread.turn-start-requested"
       | "thread.turn-interrupt-requested"
+      | "thread.compact-requested"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
       | "thread.session-stop-requested";
@@ -1359,6 +1363,40 @@ const make = Effect.gen(function* () {
       .pipe(Effect.catchCause(recoverInterruptFailure));
   });
 
+  const processCompactRequested = Effect.fn("processCompactRequested")(function* (
+    event: Extract<ProviderIntentEvent, { type: "thread.compact-requested" }>,
+  ) {
+    const requestCommandId = event.commandId;
+    if (requestCommandId === null) {
+      return yield* Effect.die(new Error("Thread compaction request is missing its command id."));
+    }
+    const thread = yield* resolveThread(event.payload.threadId);
+    const activeTurnId = thread?.session?.activeTurnId;
+    const reason: ThreadCompactCompletionReason | undefined =
+      thread?.session?.status === "starting" ||
+      (activeTurnId !== null && activeTurnId !== undefined)
+        ? "active-thread"
+        : yield* providerService.compactThread({ threadId: event.payload.threadId }).pipe(
+            Effect.as(undefined),
+            Effect.catch((error) =>
+              Effect.succeed(
+                isProviderUnsupportedError(error)
+                  ? ("unsupported-provider" as const)
+                  : ("provider-rejected" as const),
+              ),
+            ),
+          );
+    yield* orchestrationEngine.dispatch({
+      type: "thread.compact.complete",
+      commandId: CommandId.make(`server:thread-compact-complete:${requestCommandId}`),
+      threadId: event.payload.threadId,
+      requestCommandId,
+      status: reason === undefined ? "accepted" : "rejected",
+      ...(reason === undefined ? {} : { reason }),
+      createdAt: DateTime.formatIso(yield* DateTime.now),
+    });
+  });
+
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.approval-response-requested" }>,
   ) {
@@ -1523,6 +1561,9 @@ const make = Effect.gen(function* () {
       case "thread.turn-interrupt-requested":
         yield* processTurnInterruptRequested(event);
         return;
+      case "thread.compact-requested":
+        yield* processCompactRequested(event);
+        return;
       case "thread.approval-response-requested":
         yield* processApprovalResponseRequested(event);
         return;
@@ -1621,6 +1662,7 @@ const make = Effect.gen(function* () {
         event.type === "thread.runtime-mode-set" ||
         event.type === "thread.turn-start-requested" ||
         event.type === "thread.turn-interrupt-requested" ||
+        event.type === "thread.compact-requested" ||
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||
         event.type === "thread.session-stop-requested"
