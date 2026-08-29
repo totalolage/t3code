@@ -61,8 +61,21 @@ it.effect("exposes additive pending commands without changing watch availability
       yield* Command.runWith(cli, { version: "1.2.3" })(["remote", "--help"]);
       const output = (yield* TestConsole.logLines).join("\n");
 
-      for (const command of ["pending", "answer", "approve", "reject", "watch"]) {
+      for (const command of ["compact", "pending", "answer", "approve", "reject", "watch"]) {
         assert.include(output, command);
+      }
+    }),
+  ).pipe(Effect.provide(CliTestLayer)),
+);
+
+it.effect("documents manual compaction arguments and connection flags", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* Command.runWith(cli, { version: "1.2.3" })(["compact", "--help"]);
+      const output = (yield* TestConsole.logLines).join("\n");
+
+      for (const value of ["thread-id", "--yes", "--idempotency-key", "--base-dir"]) {
+        assert.include(output, value);
       }
     }),
   ).pipe(Effect.provide(CliTestLayer)),

@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - CLI integration exercises Node HTTP and filesystem boundaries.
 import * as NodeHttp from "node:http";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -23,8 +24,10 @@ import {
 } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import { assert, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Runtime from "effect/Runtime";
 import * as Stream from "effect/Stream";
@@ -179,6 +182,7 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
                 cliApiVersion: ORCHESTRATION_CLI_API_VERSION,
                 serverAuthoritativeCreate: true,
                 watchResume: true,
+                manualThreadCompaction: true,
               },
             },
           }),
@@ -260,6 +264,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       const { output } = yield* captureStdout(runCli(["--help"]));
       for (const command of [
         "create",
+        "compact",
         "send",
         "watch",
         "pending",
@@ -368,6 +373,183 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
           assert.equal(firstDto.auth.principal.sessionId, secondDto.auth.principal.sessionId);
           assert.equal(firstDto.auth.principal.subject, "local-cli:bin-test-local-environment");
         }),
+      );
+    }),
+  );
+
+  it.effect("forwards compact arguments, replays once, and exits nonzero on rejection", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-local-compact-test-"),
+      );
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-local-compact-workspace-"),
+      );
+      yield* runCliWithRuntime(["project", "add", workspaceRoot, "--base-dir", baseDir]);
+      const project = (yield* readPersistedSnapshot(baseDir)).projects.find(
+        (candidate) => candidate.workspaceRoot === workspaceRoot,
+      );
+      assert.isDefined(project);
+      const acceptedThreadId = ThreadId.make("thread-cli-compact-accepted");
+      const rejectedThreadId = ThreadId.make("thread-cli-compact-rejected");
+      const interruptedThreadId = ThreadId.make("thread-cli-compact-interrupted");
+      const conflictThreadIds = [
+        ThreadId.make("thread-cli-compact-conflict-a"),
+        ThreadId.make("thread-cli-compact-conflict-b"),
+      ] as const;
+      const createdAt = "2026-08-29T00:00:00.000Z";
+      const config = yield* makeCliTestServerConfig(baseDir);
+      yield* Effect.gen(function* () {
+        const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+        for (const threadId of [
+          acceptedThreadId,
+          rejectedThreadId,
+          interruptedThreadId,
+          ...conflictThreadIds,
+        ]) {
+          yield* engine.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`cmd-create-${threadId}`),
+            threadId,
+            projectId: project!.id,
+            title: "CLI compact",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            interactionMode: "default",
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: workspaceRoot,
+            createdAt,
+          });
+        }
+      }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
+
+      const interruptedIdempotencyKey = "compact-cli-interrupted";
+      const runCompact = (threadId: ThreadId, idempotencyKey: string) =>
+        Effect.callback<
+          {
+            readonly code: number | null;
+            readonly stdout: string;
+            readonly stderr: string;
+          },
+          Error
+        >((resume) => {
+          const child = NodeChildProcess.spawn(
+            "bun",
+            [
+              NodePath.join(import.meta.dirname, "bin.ts"),
+              "compact",
+              threadId,
+              "--yes",
+              "--idempotency-key",
+              idempotencyKey,
+              "--base-dir",
+              baseDir,
+            ],
+            { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] },
+          );
+          let stdout = "";
+          let stderr = "";
+          child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+            stdout += chunk;
+          });
+          child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+            stderr += chunk;
+          });
+          child.once("error", (cause) => resume(Effect.fail(cause)));
+          child.once("close", (code) => resume(Effect.succeed({ code, stdout, stderr })));
+          return Effect.sync(() => child.kill("SIGTERM")).pipe(Effect.asVoid);
+        });
+
+      yield* withLiveProjectCliServer(baseDir, () =>
+        Effect.gen(function* () {
+          const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+          const requested = yield* Deferred.make<void>();
+          yield* engine.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "thread.compact-requested" &&
+                event.payload.threadId === interruptedThreadId,
+            ),
+            Stream.runForEach(() => Deferred.succeed(requested, undefined)),
+            Effect.forkScoped({ startImmediately: true }),
+          );
+          const interrupted = yield* runCompact(
+            interruptedThreadId,
+            interruptedIdempotencyKey,
+          ).pipe(Effect.forkScoped);
+          yield* Deferred.await(requested);
+          yield* Fiber.interrupt(interrupted);
+        }),
+      );
+
+      yield* withLiveProjectCliServer(baseDir, () =>
+        Effect.gen(function* () {
+          const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+          const requests: Array<{ readonly threadId: ThreadId; readonly commandId: CommandId }> =
+            [];
+          yield* engine.streamDomainEvents.pipe(
+            Stream.filter((event) => event.type === "thread.compact-requested"),
+            Stream.runForEach((event) => {
+              const requestCommandId = event.commandId;
+              assert.isNotNull(requestCommandId);
+              requests.push({ threadId: event.payload.threadId, commandId: requestCommandId });
+              const rejected = event.payload.threadId === rejectedThreadId;
+              return engine.dispatch({
+                type: "thread.compact.complete",
+                commandId: CommandId.make(`test:compact-complete:${requestCommandId}`),
+                threadId: event.payload.threadId,
+                requestCommandId,
+                status: rejected ? "rejected" : "accepted",
+                ...(rejected ? { reason: "provider-rejected" as const } : {}),
+                createdAt,
+              });
+            }),
+            Effect.forkScoped({ startImmediately: true }),
+          );
+
+          const idempotencyKey = "compact-cli-run-1";
+          const first = yield* runCompact(acceptedThreadId, idempotencyKey);
+          const replay = yield* runCompact(acceptedThreadId, idempotencyKey);
+          assert.equal(first.code, 0, first.stderr);
+          assert.equal(replay.code, 0, replay.stderr);
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - CLI output DTO assertion.
+          const firstResult = JSON.parse(first.stdout) as { commandId: string; replayed: boolean };
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - CLI output DTO assertion.
+          const replayResult = JSON.parse(replay.stdout) as typeof firstResult;
+          assert.isFalse(firstResult.replayed);
+          assert.isTrue(replayResult.replayed);
+          assert.deepEqual(requests, [
+            { threadId: acceptedThreadId, commandId: firstResult.commandId },
+          ]);
+
+          const rejected = yield* runCompact(rejectedThreadId, "compact-cli-rejected");
+          assert.notEqual(rejected.code, 0);
+          assert.include(rejected.stderr, "provider_request_failed");
+
+          const interrupted = yield* runCompact(interruptedThreadId, interruptedIdempotencyKey);
+          assert.notEqual(interrupted.code, 0, interrupted.stdout);
+          assert.include(interrupted.stderr, "request_interrupted");
+          assert.isFalse(requests.some(({ threadId }) => threadId === interruptedThreadId));
+
+          const conflicting = yield* Effect.all(
+            conflictThreadIds.map((threadId) =>
+              runCompact(threadId, "compact-cli-concurrent-conflict"),
+            ),
+            { concurrency: "unbounded" },
+          );
+          assert.equal(conflicting.filter((result) => result.code === 0).length, 1);
+          assert.equal(
+            conflicting.filter((result) => result.stderr.includes("invalid_command")).length,
+            1,
+          );
+          assert.equal(
+            requests.filter(({ threadId }) => conflictThreadIds.includes(threadId)).length,
+            1,
+          );
+        }).pipe(Effect.provide(Layer.mergeAll(CliRuntimeLayer, TestConsole.layer))),
       );
     }),
   );

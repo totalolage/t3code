@@ -164,6 +164,7 @@ export const make = Effect.gen(function* () {
         cliApiVersion: ORCHESTRATION_CLI_API_VERSION,
         serverAuthoritativeCreate: true,
         watchResume: true,
+        manualThreadCompaction: true,
       },
       ...(serverSelfUpdate === "boot-service" ? { serverSelfUpdateProgress: true } : {}),
     },

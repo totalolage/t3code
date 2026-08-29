@@ -1359,6 +1359,8 @@ describe("OrchestrationEngine", () => {
 
     const first = await system.run(engine.dispatch(turnStart));
     const second = await system.run(engine.dispatch(turnStart));
+    expect(first.replayed).toBe(false);
+    expect(second.replayed).toBe(true);
     expect(second.sequence).toBe(first.sequence);
 
     const readModel = await system.readModel();

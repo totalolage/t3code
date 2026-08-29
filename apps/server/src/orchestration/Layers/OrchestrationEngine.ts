@@ -59,7 +59,7 @@ const isOrchestrationCommandInvariantError = Schema.is(OrchestrationCommandInvar
 interface CommandEnvelope {
   command: OrchestrationCommand;
   origin: OrchestrationClientOrigin | undefined;
-  result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
+  result: Deferred.Deferred<{ sequence: number; replayed?: boolean }, OrchestrationDispatchError>;
   startedAtMs: number;
 }
 
@@ -166,6 +166,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           if (existingReceipt.value.status === "accepted") {
             return {
               sequence: existingReceipt.value.resultSequence,
+              replayed: true,
             };
           }
           return yield* new OrchestrationCommandPreviouslyRejectedError({
@@ -268,7 +269,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             );
           }
         }
-        return { sequence: committedCommand.lastSequence };
+        return { sequence: committedCommand.lastSequence, replayed: false };
       }).pipe(Effect.withSpan(`orchestration.command.${envelope.command.type}`)),
     ).pipe(
       Effect.flatMap((exit) =>
@@ -354,7 +355,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
   const dispatch: OrchestrationEngineShape["dispatch"] = (command, options) =>
     Effect.gen(function* () {
-      const result = yield* Deferred.make<{ sequence: number }, OrchestrationDispatchError>();
+      const result = yield* Deferred.make<
+        { sequence: number; replayed?: boolean },
+        OrchestrationDispatchError
+      >();
       yield* Queue.offer(commandQueue, {
         command,
         origin: options?.origin,

@@ -76,6 +76,9 @@ export interface ProviderAdapterShape<TError> {
    */
   readonly interruptTurn: (threadId: ThreadId, turnId?: TurnId) => Effect.Effect<void, TError>;
 
+  /** Compact provider context without creating a turn. */
+  readonly compactThread?: (threadId: ThreadId) => Effect.Effect<void, TError>;
+
   /**
    * Respond to an interactive approval request.
    */

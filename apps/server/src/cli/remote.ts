@@ -6,9 +6,11 @@ import {
   EnvironmentConflictError,
   EnvironmentId,
   EnvironmentInternalError,
+  EnvironmentRequestInvalidError,
   type ExecutionEnvironmentDescriptor,
   ORCHESTRATION_CLI_API_VERSION,
   OrchestrationCliCreateIdempotencyKey,
+  OrchestrationCliCompactRequest,
   type AuthEnvironmentScope,
   ProviderInteractionMode,
   RemoteInteractionAnswer,
@@ -32,6 +34,7 @@ import {
 import { fetchRemoteEnvironmentDescriptor } from "@t3tools/client-runtime/environment";
 import {
   createRemoteOrchestrationThread,
+  compactRemoteOrchestrationThread,
   dispatchRemoteOrchestrationCommand,
   answerRemotePendingInteraction,
   approveRemotePendingInteraction,
@@ -143,6 +146,7 @@ export class RemoteCliError extends Schema.TaggedErrorClass<RemoteCliError>()("R
 const isRemoteCliError = Schema.is(RemoteCliError);
 const isEnvironmentConflictError = Schema.is(EnvironmentConflictError);
 const isEnvironmentInternalError = Schema.is(EnvironmentInternalError);
+const isEnvironmentRequestInvalidError = Schema.is(EnvironmentRequestInvalidError);
 
 const REMOTE_DIAGNOSTIC_MAX_CHARS = 512;
 const REMOTE_DIAGNOSTIC_CONTROL_PATTERN =
@@ -181,6 +185,9 @@ export function formatRemoteCliDiagnostic(error: unknown): string {
   if (isEnvironmentInternalError(error)) {
     return `Remote dispatch failed because the server reported an internal error. No success was assumed. (trace: ${formatRemoteTraceId(error.traceId)})`;
   }
+  if (isEnvironmentRequestInvalidError(error)) {
+    return `Remote dispatch failed: ${error.message}`;
+  }
   if (
     typeof error === "object" &&
     error !== null &&
@@ -197,6 +204,7 @@ export function formatRemoteCliDiagnostic(error: unknown): string {
 
 export const ORCHESTRATION_CLI_COMMAND_NAMES = new Set([
   "create",
+  "compact",
   "send",
   "watch",
   "pending",
@@ -360,6 +368,14 @@ export const requireCliApiCompatibility = (
       }),
     );
   }
+  if (operation === "compact" && capabilities.manualThreadCompaction !== true) {
+    return Effect.fail(
+      new RemoteCliError({
+        reason: "capability-required",
+        detail: "The target environment does not support manual thread compaction.",
+      }),
+    );
+  }
   if (
     ["pending", "answer", "approve", "reject"].includes(operation) &&
     capabilities.pendingInteractions !== true
@@ -507,6 +523,7 @@ const decodeCliValue = <S extends Schema.Decoder<unknown>>(
 const decodeRemoteAnswersJson = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Array(RemoteInteractionAnswer)),
 );
+const decodeCompactRequest = Schema.decodeUnknownEffect(OrchestrationCliCompactRequest);
 
 const decodeAnswersJson = (value: string) =>
   Option.match(decodeRemoteAnswersJson(value, { onExcessProperty: "error" }), {
@@ -1028,6 +1045,57 @@ const makeCreateCommand = (kind: CliTargetKind) =>
     ),
   );
 
+const makeCompactCommand = (kind: CliTargetKind) =>
+  Command.make("compact", {
+    ...targetLocationFlags(kind),
+    yes: yesFlag,
+    idempotencyKey: idempotencyKeyFlag,
+    threadId: Argument.string("thread-id"),
+  }).pipe(
+    Command.withDescription(
+      "Request native provider context compaction without creating a message or turn.",
+    ),
+    Command.withHandler((flags) =>
+      runRemote(
+        Effect.gen(function* () {
+          if (!flags.yes) {
+            return yield* new RemoteCliError({
+              reason: "confirmation-required",
+              detail: "Compact requires --yes.",
+            });
+          }
+          const payload = yield* decodeCompactRequest({
+            threadId: flags.threadId,
+            idempotencyKey: flags.idempotencyKey,
+          }).pipe(
+            Effect.mapError(
+              () =>
+                new RemoteCliError({
+                  reason: "invalid-input",
+                  detail: "Thread id or idempotency key is invalid.",
+                }),
+            ),
+          );
+          const target = yield* resolveCommandTarget(
+            kind,
+            flags as CliAuthLocationFlags & { readonly host?: string },
+            "compact",
+          );
+          const authorization = yield* loadRemoteAuthorization({
+            ...target,
+            requiredScopes: [AuthOrchestrationOperateScope],
+          });
+          const result = yield* compactRemoteOrchestrationThread({
+            httpBaseUrl: target.httpBaseUrl,
+            authorization,
+            payload,
+          });
+          yield* Console.log(formatJson(result));
+        }),
+      ),
+    ),
+  );
+
 const makeWatchCommand = (kind: CliTargetKind) =>
   Command.make("watch", {
     ...targetLocationFlags(kind),
@@ -1272,6 +1340,7 @@ const remoteSnapshotCommand = makeSnapshotCommand("remote");
 const remoteThreadCommand = makeThreadCommand("remote");
 const remoteSendCommand = makeSendCommand("remote");
 const remoteCreateCommand = makeCreateCommand("remote");
+const remoteCompactCommand = makeCompactCommand("remote");
 const remoteWatchCommand = makeWatchCommand("remote");
 const remotePendingCommand = makePendingCommand("remote");
 const remoteAnswerCommand = makeAnswerCommand("remote");
@@ -1280,6 +1349,7 @@ const remoteRejectCommand = makeRejectCommand("remote");
 
 export const localOrchestrationCommands = [
   makeCreateCommand("local"),
+  makeCompactCommand("local"),
   makeSendCommand("local"),
   makeWatchCommand("local"),
   makePendingCommand("local"),
@@ -1303,6 +1373,7 @@ export const remoteCommand = Command.make("remote").pipe(
     remoteThreadCommand,
     remoteSendCommand,
     remoteCreateCommand,
+    remoteCompactCommand,
     remoteWatchCommand,
     remotePendingCommand,
     remoteAnswerCommand,

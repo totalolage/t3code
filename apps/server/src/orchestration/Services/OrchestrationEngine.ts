@@ -53,7 +53,7 @@ export interface OrchestrationEngineShape {
    * @param command - Valid orchestration command.
    * @param options - Optional client origin (surface/app version) stamped into
    *   the metadata of every event the command produces.
-   * @returns Effect containing the sequence of the persisted event.
+   * @returns Effect containing the persisted sequence and whether an existing receipt was replayed.
    *
    * Dispatch is serialized through an internal queue and deduplicated via
    * command receipts.
@@ -61,7 +61,7 @@ export interface OrchestrationEngineShape {
   readonly dispatch: (
     command: OrchestrationCommand,
     options?: { readonly origin?: OrchestrationClientOrigin },
-  ) => Effect.Effect<{ sequence: number }, OrchestrationDispatchError, never>;
+  ) => Effect.Effect<{ sequence: number; replayed?: boolean }, OrchestrationDispatchError, never>;
 
   /** Read a command receipt without dispatching or running external side effects. */
   readonly getCommandReceipt: (
