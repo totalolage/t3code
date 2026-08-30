@@ -3360,7 +3360,7 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
       assert.isTrue(Option.isNone(yield* snapshotQuery.getThreadShellById(threadId)));
 
       // Retry from the same draft reuses the thread id.
-      yield* createThread("cmd-retry-create-2", "Second attempt");
+      yield* createThread("server:bootstrap-thread-create:retry", "Second attempt");
 
       const shell = Option.getOrThrow(yield* snapshotQuery.getThreadShellById(threadId));
       assert.strictEqual(shell.title, "Second attempt");
