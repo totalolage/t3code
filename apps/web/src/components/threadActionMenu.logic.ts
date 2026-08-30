@@ -23,6 +23,8 @@ export type ThreadActionMenuId =
   | "copy-branch"
   | "copy-thread-id"
   | "archive"
+  | "hide"
+  | "unhide"
   | "delete";
 
 export interface ThreadActionMenuState {
@@ -32,6 +34,7 @@ export interface ThreadActionMenuState {
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
   readonly isRegeneratingTitle: boolean;
+  readonly isHidden: boolean;
   /** Archive rejects a thread with an active turn, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
   readonly supports: {
@@ -39,6 +42,7 @@ export interface ThreadActionMenuState {
     readonly snooze: boolean;
     readonly pinning: boolean;
     readonly titleRegeneration: boolean;
+    readonly hiding: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
 }
@@ -119,6 +123,23 @@ export function buildThreadActionMenuItems(
         { id: "copy-thread-id", label: "Thread ID", icon: "hash" },
       ],
     },
+    ...(state.supports.hiding
+      ? [
+          state.isHidden
+            ? {
+                id: "unhide" as const,
+                label: "Unhide from sidebar",
+                icon: "eye",
+                separatorBefore: true,
+              }
+            : {
+                id: "hide" as const,
+                label: "Hide from sidebar",
+                icon: "eye-off",
+                separatorBefore: true,
+              },
+        ]
+      : []),
     // Archive removes the thread from the sidebar while keeping its
     // conversation under Settings > Archived threads — distinct from Settle
     // (stays visible in the Settled shelf) and Delete (clears history for
@@ -129,7 +150,7 @@ export function buildThreadActionMenuItems(
       label: "Archive thread",
       icon: "archive",
       disabled: state.isRunning,
-      separatorBefore: true,
+      separatorBefore: !state.supports.hiding,
     },
     {
       id: "delete",

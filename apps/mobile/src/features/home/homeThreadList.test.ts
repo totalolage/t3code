@@ -72,6 +72,32 @@ function buildGroups(
 }
 
 describe("buildHomeThreadGroups", () => {
+  it("omits hidden threads", () => {
+    const environmentId = EnvironmentId.make("environment-local");
+    const project = makeProject({
+      environmentId,
+      id: ProjectId.make("project-1"),
+      title: "Project",
+    });
+    const visible = makeThread({
+      environmentId,
+      id: ThreadId.make("visible"),
+      projectId: project.id,
+      title: "Visible",
+    });
+    const hidden = makeThread({
+      environmentId,
+      id: ThreadId.make("hidden"),
+      projectId: project.id,
+      title: "Hidden",
+      hiddenAt: "2026-06-02T00:00:00.000Z",
+    });
+
+    expect(
+      buildGroups([project], [visible, hidden])[0]?.threads.map((thread) => thread.id),
+    ).toEqual([visible.id]);
+  });
+
   it("builds one v2 scope for the same repository across environments", () => {
     const localEnvironmentId = EnvironmentId.make("environment-local");
     const remoteEnvironmentId = EnvironmentId.make("environment-remote");
@@ -440,6 +466,51 @@ describe("buildHomeThreadGroups", () => {
       "thread-new",
       "thread-old",
     ]);
+  });
+
+  it("includes a hidden thread when its title matches an active search", () => {
+    const environmentId = EnvironmentId.make("environment-local");
+    const project = makeProject({
+      environmentId,
+      id: ProjectId.make("project-1"),
+      title: "Project",
+    });
+    const hidden = makeThread({
+      environmentId,
+      id: ThreadId.make("hidden"),
+      projectId: project.id,
+      title: "Release automation",
+      hiddenAt: "2026-06-02T00:00:00.000Z",
+    });
+
+    expect(
+      buildGroups([project], [hidden], { searchQuery: "automation" })[0]?.threads.map(
+        (thread) => thread.id,
+      ),
+    ).toEqual([hidden.id]);
+  });
+
+  it("includes a hidden thread when its content matches an active search", () => {
+    const environmentId = EnvironmentId.make("environment-local");
+    const project = makeProject({
+      environmentId,
+      id: ProjectId.make("project-1"),
+      title: "Project",
+    });
+    const hidden = makeThread({
+      environmentId,
+      id: ThreadId.make("hidden"),
+      projectId: project.id,
+      title: "Unrelated title",
+      hiddenAt: "2026-06-02T00:00:00.000Z",
+    });
+
+    expect(
+      buildGroups([project], [hidden], {
+        searchQuery: "automation",
+        matchedThreadKeys: new Set([threadSearchMatchKey({ environmentId, threadId: hidden.id })]),
+      })[0]?.threads.map((thread) => thread.id),
+    ).toEqual([hidden.id]);
   });
 
   it("supports independent project and thread creation-time sorting", () => {

@@ -1756,6 +1756,8 @@ export default function Sidebar() {
     confirmAndUnpinThread,
     reorderPinnedThread,
     archiveThread,
+    hideThread,
+    unhideThread,
     deleteThread,
   } = useThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
@@ -2091,6 +2093,7 @@ export default function Sidebar() {
     const visible = threads.filter(
       (thread) =>
         thread.archivedAt === null &&
+        thread.hiddenAt == null &&
         (scopedProjectKeys === null ||
           scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
     );
@@ -3125,6 +3128,8 @@ export default function Sidebar() {
         const supportsTitleRegeneration =
           serverConfigs.get(thread.environmentId)?.environment.capabilities
             .threadTitleRegeneration === true;
+        const supportsHiding =
+          serverConfigs.get(thread.environmentId)?.environment.capabilities.threadHiding === true;
         const isRegeneratingTitle = thread.titleRegeneration != null;
         const isSettled = settledThreadKeysRef.current.has(threadKey);
         const isSnoozed = snoozedThreadKeysRef.current.has(threadKey);
@@ -3140,6 +3145,7 @@ export default function Sidebar() {
               isSnoozed,
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
               isRegeneratingTitle,
+              isHidden: thread.hiddenAt != null,
               isRunning:
                 thread.session?.status === "running" && thread.session.activeTurnId != null,
               supports: {
@@ -3147,6 +3153,7 @@ export default function Sidebar() {
                 snooze: supportsSnooze,
                 pinning: supportsPinning,
                 titleRegeneration: supportsTitleRegeneration,
+                hiding: supportsHiding,
               },
               snoozePresets,
             }),
@@ -3273,6 +3280,34 @@ export default function Sidebar() {
             }
             return;
           }
+          case "hide": {
+            const result = await hideThread(threadRef, { navigateAway: true });
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Failed to hide thread",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return;
+          }
+          case "unhide": {
+            const result = await unhideThread(threadRef);
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Failed to unhide thread",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return;
+          }
           case "delete": {
             if (confirmThreadDelete) {
               const confirmed = await settlePromise(() =>
@@ -3320,12 +3355,14 @@ export default function Sidebar() {
       copyThreadIdToClipboard,
       deleteThread,
       handleMultiSelectContextMenu,
+      hideThread,
       markThreadUnread,
       projectCwdByKey,
       serverConfigs,
       startThreadRename,
       updateThreadMetadata,
       timestampFormat,
+      unhideThread,
     ],
   );
 

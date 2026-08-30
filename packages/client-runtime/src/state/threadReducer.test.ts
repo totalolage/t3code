@@ -175,6 +175,45 @@ describe("applyThreadDetailEvent", () => {
     });
   });
 
+  describe("thread.hidden / thread.unhidden", () => {
+    it("sets and clears hiddenAt", () => {
+      const hiddenAt = "2026-04-01T04:00:00.000Z";
+      const hidden = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 5,
+        occurredAt: hiddenAt,
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.hidden",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          hiddenAt,
+          updatedAt: hiddenAt,
+        },
+      });
+
+      expect(hidden.kind).toBe("updated");
+      if (hidden.kind !== "updated") return;
+      expect(hidden.thread.hiddenAt).toBe(hiddenAt);
+
+      const unhidden = applyThreadDetailEvent(hidden.thread, {
+        ...baseEventFields,
+        sequence: 6,
+        occurredAt: "2026-04-01T05:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.unhidden",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          updatedAt: "2026-04-01T05:00:00.000Z",
+        },
+      });
+
+      expect(unhidden.kind).toBe("updated");
+      if (unhidden.kind === "updated") expect(unhidden.thread.hiddenAt).toBeNull();
+    });
+  });
+
   describe("thread.settled / thread.unsettled", () => {
     it("sets the settled override and timestamp", () => {
       const settledAt = "2026-04-01T05:00:00.000Z";

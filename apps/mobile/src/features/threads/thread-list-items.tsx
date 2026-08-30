@@ -408,6 +408,7 @@ export const PendingTaskListRow = memo(function PendingTaskListRow(props: {
 /* ─── Thread row ─────────────────────────────────────────────────────── */
 
 const THREAD_ROW_MENU_ACTIONS: MenuAction[] = [
+  { id: "hide", title: "Hide from sidebar", image: "eye.slash" },
   { id: "archive", title: "Archive", image: "archivebox" },
   { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
 ];
@@ -426,9 +427,11 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   readonly fullSwipeWidth?: number;
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
   readonly onArchiveThread: (thread: EnvironmentThreadShell) => void;
+  readonly onHideThread: (thread: EnvironmentThreadShell) => void;
   readonly onDeleteThread: (thread: EnvironmentThreadShell) => void;
   readonly onRegenerateThreadTitle: (thread: EnvironmentThreadShell) => void;
   readonly titleRegenerationSupported: boolean;
+  readonly hidingSupported: boolean;
   readonly onSwipeableWillOpen: (methods: SwipeableMethods) => void;
   readonly onSwipeableClose: (methods: SwipeableMethods) => void;
   readonly simultaneousSwipeGesture?: ComponentProps<
@@ -451,8 +454,14 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   const selectedBackgroundColor = theme["--color-user-bubble"];
   const selectedForegroundColor = theme["--color-user-bubble-foreground"];
 
-  const { thread, onSelectThread, onArchiveThread, onDeleteThread, onRegenerateThreadTitle } =
-    props;
+  const {
+    thread,
+    onSelectThread,
+    onArchiveThread,
+    onHideThread,
+    onDeleteThread,
+    onRegenerateThreadTitle,
+  } = props;
   const status = resolveThreadStatus(thread);
   const pr = useThreadPr(thread, props.projectCwd);
   const timestamp = relativeTime(
@@ -478,37 +487,49 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
 
   const handleDelete = useCallback(() => onDeleteThread(thread), [onDeleteThread, thread]);
   const handleArchive = useCallback(() => onArchiveThread(thread), [onArchiveThread, thread]);
+  const handleHide = useCallback(() => onHideThread(thread), [onHideThread, thread]);
   const handleRegenerateTitle = useCallback(
     () => onRegenerateThreadTitle(thread),
     [onRegenerateThreadTitle, thread],
   );
   const menuActions = useMemo<MenuAction[]>(
     () => [
-      THREAD_ROW_MENU_ACTIONS[0]!,
+      ...(props.hidingSupported
+        ? THREAD_ROW_MENU_ACTIONS.slice(0, 2)
+        : [THREAD_ROW_MENU_ACTIONS[1]!]),
       ...buildThreadTitleRegenerationMenuItems({
         supported: props.titleRegenerationSupported,
         isRegenerating: thread.titleRegeneration != null,
       }),
-      THREAD_ROW_MENU_ACTIONS[1]!,
+      THREAD_ROW_MENU_ACTIONS[2]!,
     ],
-    [props.titleRegenerationSupported, thread.titleRegeneration],
+    [props.hidingSupported, props.titleRegenerationSupported, thread.titleRegeneration],
   );
   const primaryAction = useMemo(
-    () => ({
-      accessibilityLabel: `Archive ${thread.title}`,
-      icon: "archivebox" as const,
-      label: "Archive",
-      onPress: handleArchive,
-    }),
-    [handleArchive, thread.title],
+    () =>
+      props.hidingSupported
+        ? {
+            accessibilityLabel: `Hide ${thread.title} from sidebar`,
+            icon: "eye.slash" as const,
+            label: "Hide",
+            onPress: handleHide,
+          }
+        : {
+            accessibilityLabel: `Archive ${thread.title}`,
+            icon: "archivebox" as const,
+            label: "Archive",
+            onPress: handleArchive,
+          },
+    [handleArchive, handleHide, props.hidingSupported, thread.title],
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
       if (nativeEvent.event === "archive") handleArchive();
+      if (nativeEvent.event === "hide") handleHide();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
       if (nativeEvent.event === "delete") handleDelete();
     },
-    [handleArchive, handleDelete, handleRegenerateTitle],
+    [handleArchive, handleDelete, handleHide, handleRegenerateTitle],
   );
 
   const statusPill = effectiveStatus ? (
@@ -562,7 +583,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   const rowContent = (close: () => void) =>
     compact ? (
       <Pressable
-        accessibilityHint="Swipe left for archive and delete actions"
+        accessibilityHint={`Swipe left for ${props.hidingSupported ? "hide" : "archive"} and delete actions`}
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
         className="bg-screen"

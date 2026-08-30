@@ -1631,6 +1631,28 @@ describe("sortProjectsForSidebar", () => {
 });
 
 describe("sortScopedProjectsForSidebar", () => {
+  it("does not let hidden thread activity reorder projects", () => {
+    const projects = [
+      makeProject({ id: ProjectId.make("project-1"), title: "Visible activity" }),
+      makeProject({ id: ProjectId.make("project-2"), title: "Hidden activity" }),
+    ];
+    const threads = [
+      makeThread({
+        projectId: ProjectId.make("project-1"),
+        updatedAt: "2026-03-09T10:02:00.000Z",
+      }),
+      makeThread({
+        projectId: ProjectId.make("project-2"),
+        updatedAt: "2026-03-09T10:10:00.000Z",
+        hiddenAt: "2026-03-09T10:11:00.000Z",
+      }),
+    ];
+
+    const sorted = sortScopedProjectsForSidebar(projects, threads, "updated_at");
+
+    expect(sorted.map((project) => project.title)).toEqual(["Visible activity", "Hidden activity"]);
+  });
+
   it("keeps identical project ids in different environments separate", () => {
     const remoteEnvironmentId = EnvironmentId.make("environment-remote");
     const sharedProjectId = ProjectId.make("shared-project");

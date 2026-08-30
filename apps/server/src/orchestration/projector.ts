@@ -25,6 +25,8 @@ import {
   ThreadSettledPayload,
   ThreadPinnedPayload,
   ThreadPinReorderedPayload,
+  ThreadHiddenPayload,
+  ThreadUnhiddenPayload,
   ThreadSnoozedPayload,
   ThreadUnpinnedPayload,
   ThreadUnarchivedPayload,
@@ -301,6 +303,7 @@ export function projectEvent(
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
             archivedAt: null,
+            hiddenAt: null,
             settledOverride: null,
             settledAt: null,
             unsettledAt: null,
@@ -449,6 +452,28 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             pinOrderKey: payload.orderKey,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.hidden":
+      return decodeForEvent(ThreadHiddenPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            hiddenAt: payload.hiddenAt,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.unhidden":
+      return decodeForEvent(ThreadUnhiddenPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            hiddenAt: null,
             updatedAt: payload.updatedAt,
           }),
         })),

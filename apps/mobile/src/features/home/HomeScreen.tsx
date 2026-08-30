@@ -70,6 +70,7 @@ import {
 import {
   buildHomeProjectScopes,
   buildHomeThreadGroups,
+  isThreadVisibleInHomeList,
   sortHomeProjectScopes,
   type HomeProjectSortOrder,
 } from "./homeThreadList";
@@ -102,6 +103,7 @@ interface HomeScreenProps {
   readonly onStartNewTask: () => void;
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
   readonly onArchiveThread: (thread: EnvironmentThreadShell) => void;
+  readonly onHideThread: (thread: EnvironmentThreadShell) => void;
   readonly onDeleteThread: (thread: EnvironmentThreadShell) => void;
   /** Resolves true iff the settle was dispatched and succeeded. */
   readonly onSettleThread: (thread: EnvironmentThreadShell) => Promise<boolean>;
@@ -646,6 +648,15 @@ export function HomeScreen(props: HomeScreenProps) {
     }
     return supported;
   }, [serverConfigs]);
+  const hidingEnvironmentIds = useMemo(() => {
+    const supported = new Set<EnvironmentId>();
+    for (const [environmentId, config] of serverConfigs) {
+      if (config.environment.capabilities.threadHiding === true) {
+        supported.add(environmentId);
+      }
+    }
+    return supported;
+  }, [serverConfigs]);
   // Canonical arranged pinned order (reorder-capable threads only) for the
   // Move up/down position flags. Computed from all shells, not the rendered
   // list, so search/scope filtering never disables or misdirects a move.
@@ -655,6 +666,7 @@ export function HomeScreen(props: HomeScreenProps) {
         (thread) =>
           thread.pinnedAt != null &&
           thread.archivedAt === null &&
+          thread.hiddenAt == null &&
           pinReorderEnvironmentIds.has(thread.environmentId),
       ),
     );
@@ -674,7 +686,12 @@ export function HomeScreen(props: HomeScreenProps) {
     // Settled threads are live shells; archived threads keep their original
     // "hidden from lists" meaning.
     return buildThreadListV2Items({
-      threads: props.threads.filter((thread) => thread.archivedAt === null),
+      threads: props.threads.filter((thread) =>
+        isThreadVisibleInHomeList(thread, {
+          searchQuery: props.searchQuery,
+          matchedThreadKeys,
+        }),
+      ),
       environmentId: props.selectedEnvironmentId,
       projectRefs: v2ScopedProjectGroup === null ? null : v2ScopedProjectGroup.projectRefs,
       searchQuery: props.searchQuery,
@@ -846,6 +863,8 @@ export function HomeScreen(props: HomeScreenProps) {
           onSelectThread={props.onSelectThread}
           onDeleteThread={handleDeleteThread}
           onArchiveThread={props.onArchiveThread}
+          onHideThread={props.onHideThread}
+          hidingSupported={hidingEnvironmentIds.has(thread.environmentId)}
           onRegenerateThreadTitle={handleRegenerateThreadTitle}
           titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
           settlementSupported={settlementEnvironmentIds.has(thread.environmentId)}
@@ -887,11 +906,13 @@ export function HomeScreen(props: HomeScreenProps) {
       handleSwipeableClose,
       handleSwipeableWillOpen,
       handleUnsettleThread,
+      hidingEnvironmentIds,
       pinningEnvironmentIds,
       pinReorderEnvironmentIds,
       projectByKey,
       projectCwdByKey,
       props.onArchiveThread,
+      props.onHideThread,
       props.onDeletePendingTask,
       props.onSelectPendingTask,
       props.onSelectThread,
@@ -1006,6 +1027,8 @@ export function HomeScreen(props: HomeScreenProps) {
               )}
               searchQuery={props.searchQuery}
               onArchiveThread={props.onArchiveThread}
+              onHideThread={props.onHideThread}
+              hidingSupported={hidingEnvironmentIds.has(thread.environmentId)}
               onDeleteThread={props.onDeleteThread}
               onRegenerateThreadTitle={handleRegenerateThreadTitle}
               titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
@@ -1031,8 +1054,10 @@ export function HomeScreen(props: HomeScreenProps) {
       handleSwipeableClose,
       handleSwipeableWillOpen,
       handleRegenerateThreadTitle,
+      hidingEnvironmentIds,
       projectCwdByKey,
       props.onArchiveThread,
+      props.onHideThread,
       props.onDeletePendingTask,
       props.onDeleteThread,
       props.onNewThreadInProject,
@@ -1054,7 +1079,11 @@ export function HomeScreen(props: HomeScreenProps) {
   // full-page "No threads yet". Settled threads are unarchived live shells,
   // so the v1 check already covers v2.
   const hasAnyThreads =
-    props.threads.some((thread) => thread.archivedAt === null) || props.pendingTasks.length > 0;
+    props.threads.some(
+      (thread) =>
+        thread.archivedAt === null &&
+        (thread.hiddenAt == null || props.searchQuery.trim().length > 0),
+    ) || props.pendingTasks.length > 0;
   const hasResults = projectGroups.length > 0;
   const selectedEnvironmentLabel =
     props.selectedEnvironmentId === null

@@ -1,4 +1,12 @@
-import { ArchiveIcon, ArchiveX, ChevronRightIcon, LoaderIcon, SettingsIcon } from "lucide-react";
+import {
+  ArchiveIcon,
+  ArchiveX,
+  ChevronRightIcon,
+  EyeIcon,
+  EyeOffIcon,
+  LoaderIcon,
+  SettingsIcon,
+} from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -80,7 +88,11 @@ import {
 import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { isMacPlatform } from "../../lib/utils";
 import { primaryServerObservabilityAtom, primaryServerProvidersAtom } from "../../state/server";
-import { useProjects } from "../../state/entities";
+import {
+  useAllEnvironmentShellsBootstrapped,
+  useProjects,
+  useThreadShells,
+} from "../../state/entities";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
@@ -2557,6 +2569,131 @@ export function GeneralSettingsPanel() {
       </SettingsSection>
 
       <LegacyFeaturesSection />
+    </SettingsPageContainer>
+  );
+}
+
+export function HiddenThreadsPanel() {
+  const projects = useProjects();
+  const threads = useThreadShells();
+  const bootstrapped = useAllEnvironmentShellsBootstrapped();
+  const { unhideThread } = useThreadActions();
+
+  const hiddenGroups = useMemo(() => {
+    const hiddenThreads = threads
+      .filter((thread) => thread.archivedAt === null && thread.hiddenAt != null)
+      .toSorted((left, right) => {
+        const leftKey = left.hiddenAt ?? left.createdAt;
+        const rightKey = right.hiddenAt ?? right.createdAt;
+        return rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id);
+      });
+    return projects.flatMap((project) => {
+      const projectThreads = hiddenThreads.filter(
+        (thread) =>
+          thread.environmentId === project.environmentId && thread.projectId === project.id,
+      );
+      return projectThreads.length === 0 ? [] : [{ project, threads: projectThreads }];
+    });
+  }, [projects, threads]);
+
+  const handleUnhide = useCallback(
+    async (threadRef: ScopedThreadRef) => {
+      const result = await unhideThread(threadRef);
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to unhide thread",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      }
+    },
+    [unhideThread],
+  );
+
+  return (
+    <SettingsPageContainer>
+      {hiddenGroups.length === 0 ? (
+        <SettingsSection
+          id={bootstrapped ? searchableSetting("hidden-threads").id : undefined}
+          title={searchableSetting("hidden-threads").title}
+        >
+          <SettingsRow
+            title={
+              <span className="inline-flex items-center gap-2">
+                {bootstrapped ? (
+                  <EyeOffIcon className="size-3.5 text-muted-foreground" />
+                ) : (
+                  <LoaderIcon className="size-3.5 animate-spin text-muted-foreground" />
+                )}
+                {bootstrapped ? "No hidden threads" : "Loading hidden threads"}
+              </span>
+            }
+            description={
+              bootstrapped
+                ? "Threads you hide from the sidebar will appear here."
+                : "Checking connected environments."
+            }
+          />
+        </SettingsSection>
+      ) : (
+        hiddenGroups.map(({ project, threads: projectThreads }, index) => (
+          <SettingsSection
+            key={`${project.environmentId}:${project.id}`}
+            id={index === 0 ? searchableSetting("hidden-threads").id : undefined}
+            title={project.title}
+            icon={
+              <ProjectFavicon
+                environmentId={project.environmentId}
+                cwd={project.workspaceRoot}
+                faviconPath={project.faviconPath}
+              />
+            }
+          >
+            {projectThreads.map((thread) => {
+              const threadRef = scopeThreadRef(thread.environmentId, thread.id);
+              return (
+                <SettingsRow
+                  key={thread.id}
+                  title={
+                    <Link
+                      to="/$environmentId/$threadId"
+                      params={{
+                        environmentId: thread.environmentId,
+                        threadId: thread.id,
+                      }}
+                      className="hover:underline"
+                    >
+                      {thread.title}
+                    </Link>
+                  }
+                  description={
+                    <>
+                      Hidden {formatRelativeTimeLabel(thread.hiddenAt ?? thread.createdAt)}
+                      {" \u00b7 Created "}
+                      {formatRelativeTimeLabel(thread.createdAt)}
+                    </>
+                  }
+                  control={
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0 cursor-pointer gap-1.5 px-2.5"
+                      onClick={() => void handleUnhide(threadRef)}
+                    >
+                      <EyeIcon className="size-3.5" />
+                      <span>Unhide</span>
+                    </Button>
+                  }
+                />
+              );
+            })}
+          </SettingsSection>
+        ))
+      )}
     </SettingsPageContainer>
   );
 }

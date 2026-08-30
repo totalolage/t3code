@@ -25,6 +25,7 @@ import { readLocalApi } from "../localApi";
 import {
   readEnvironmentSupportsPinning,
   readEnvironmentSupportsPinReorder,
+  readEnvironmentSupportsHiding,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
   readEnvironmentThreadRefs,
@@ -136,6 +137,18 @@ export class ThreadPinReorderUnsupportedError extends Schema.TaggedErrorClass<Th
   }
 }
 
+export class ThreadHidingUnsupportedError extends Schema.TaggedErrorClass<ThreadHidingUnsupportedError>()(
+  "ThreadHidingUnsupportedError",
+  {
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+  },
+) {
+  override get message(): string {
+    return "This environment's server does not support hiding threads yet. Update the server to use Hide from sidebar.";
+  }
+}
+
 export async function requestThreadUnpinConfirmation(input: {
   enabled: boolean;
   title: string;
@@ -162,6 +175,12 @@ export function useThreadActions() {
     reportFailure: false,
   });
   const unarchiveThreadMutation = useAtomCommand(threadEnvironment.unarchive, {
+    reportFailure: false,
+  });
+  const hideThreadMutation = useAtomCommand(threadEnvironment.hide, {
+    reportFailure: false,
+  });
+  const unhideThreadMutation = useAtomCommand(threadEnvironment.unhide, {
     reportFailure: false,
   });
   const deleteThreadMutation = useAtomCommand(threadEnvironment.delete, {
@@ -289,6 +308,66 @@ export function useThreadActions() {
       return result;
     },
     [unarchiveThreadMutation],
+  );
+
+  const hideThread = useCallback(
+    async (
+      target: ScopedThreadRef,
+      opts: { onHidden?: () => void; navigateAway?: boolean } = {},
+    ) => {
+      const resolved = resolveThreadTarget(target);
+      if (!resolved) return AsyncResult.success(undefined);
+      const { thread, threadRef } = resolved;
+      if (!readEnvironmentSupportsHiding(threadRef.environmentId)) {
+        return AsyncResult.failure(
+          Cause.fail(
+            new ThreadHidingUnsupportedError({
+              environmentId: threadRef.environmentId,
+              threadId: threadRef.threadId,
+            }),
+          ),
+        );
+      }
+      const result = await hideThreadMutation({
+        environmentId: threadRef.environmentId,
+        input: { threadId: threadRef.threadId },
+      });
+      if (result._tag === "Failure") return result;
+      opts.onHidden?.();
+
+      const currentRouteThreadRef = getCurrentRouteThreadRef();
+      const shouldNavigate =
+        opts.navigateAway === true &&
+        currentRouteThreadRef?.threadId === threadRef.threadId &&
+        currentRouteThreadRef.environmentId === threadRef.environmentId;
+      if (!shouldNavigate) return result;
+
+      const navigationResult = await settlePromise(() =>
+        handleNewThreadRef.current(scopeProjectRef(thread.environmentId, thread.projectId)),
+      );
+      return navigationResult._tag === "Failure" ? navigationResult : result;
+    },
+    [getCurrentRouteThreadRef, hideThreadMutation, resolveThreadTarget],
+  );
+
+  const unhideThread = useCallback(
+    async (target: ScopedThreadRef) => {
+      if (!readEnvironmentSupportsHiding(target.environmentId)) {
+        return AsyncResult.failure(
+          Cause.fail(
+            new ThreadHidingUnsupportedError({
+              environmentId: target.environmentId,
+              threadId: target.threadId,
+            }),
+          ),
+        );
+      }
+      return unhideThreadMutation({
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId },
+      });
+    },
+    [unhideThreadMutation],
   );
 
   const deleteThread = useCallback(
@@ -742,6 +821,8 @@ export function useThreadActions() {
     () => ({
       archiveThread,
       unarchiveThread,
+      hideThread,
+      unhideThread,
       deleteThread,
       confirmAndDeleteThread,
       settleThread,
@@ -755,6 +836,7 @@ export function useThreadActions() {
     }),
     [
       archiveThread,
+      hideThread,
       confirmAndDeleteThread,
       confirmAndUnpinThread,
       deleteThread,
@@ -763,6 +845,7 @@ export function useThreadActions() {
       settleThread,
       snoozeThread,
       unarchiveThread,
+      unhideThread,
       unpinThread,
       unsettleThread,
       unsnoozeThread,

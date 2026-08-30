@@ -24,9 +24,11 @@ import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import {
   archiveThread,
   createProject,
+  hideThread,
   settleThread,
   stopThreadSession,
   unsettleThread,
+  unhideThread,
 } from "./commands.ts";
 
 const TEST_CRYPTO_LAYER = Layer.succeed(
@@ -137,6 +139,27 @@ describe("environment commands", () => {
           commandId: "archive-command",
           threadId: "thread-1",
         },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("dispatches hide and unhide commands without timestamps", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+
+      yield* hideThread({
+        commandId: CommandId.make("hide-command"),
+        threadId: ThreadId.make("thread-1"),
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      yield* unhideThread({
+        commandId: CommandId.make("unhide-command"),
+        threadId: ThreadId.make("thread-1"),
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      expect(dispatched).toEqual([
+        { type: "thread.hide", commandId: "hide-command", threadId: "thread-1" },
+        { type: "thread.unhide", commandId: "unhide-command", threadId: "thread-1" },
       ]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );

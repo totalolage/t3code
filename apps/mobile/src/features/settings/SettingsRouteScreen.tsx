@@ -132,7 +132,7 @@ function LocalSettingsRouteScreen() {
 
         <LegacySettingsSection />
 
-        <ArchivedThreadsSettingsSection />
+        <ThreadSettingsSection />
 
         <AppSettingsSection />
       </ScrollView>
@@ -518,7 +518,7 @@ function ConfiguredSettingsRouteScreen() {
 
         <LegacySettingsSection />
 
-        <ArchivedThreadsSettingsSection />
+        <ThreadSettingsSection />
 
         <AppSettingsSection />
       </ScrollView>
@@ -691,9 +691,10 @@ function capitalize(value: string): string {
   return value.length > 0 ? value.charAt(0).toUpperCase() + value.slice(1) : value;
 }
 
-function ArchivedThreadsSettingsSection() {
+function ThreadSettingsSection() {
   return (
     <SettingsSection title="Threads">
+      <SettingsRow icon="eye.slash" label="Hidden Threads" target="SettingsHiddenThreads" />
       <SettingsRow icon="archivebox" label="Archived Threads" target="SettingsArchive" />
     </SettingsSection>
   );

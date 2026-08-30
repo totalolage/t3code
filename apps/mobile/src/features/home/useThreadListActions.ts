@@ -57,11 +57,27 @@ function environmentSupportsTitleRegeneration(
   );
 }
 
-type ThreadListAction = "archive" | "unarchive" | "delete" | "settle" | "unsettle";
+function environmentSupportsHiding(environmentId: EnvironmentThreadShell["environmentId"]) {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadHiding === true
+  );
+}
+
+type ThreadListAction =
+  | "archive"
+  | "unarchive"
+  | "hide"
+  | "unhide"
+  | "delete"
+  | "settle"
+  | "unsettle";
 
 const ACTION_VERBS: Record<ThreadListAction, string> = {
   archive: "archived",
   unarchive: "unarchived",
+  hide: "hidden",
+  unhide: "unhidden",
   delete: "deleted",
   settle: "settled",
   unsettle: "un-settled",
@@ -82,6 +98,8 @@ function selectionHaptic(): void {
 function actionFailureTitle(action: ThreadListAction): string {
   if (action === "archive") return "Could not archive thread";
   if (action === "unarchive") return "Could not unarchive thread";
+  if (action === "hide") return "Could not hide thread";
+  if (action === "unhide") return "Could not unhide thread";
   if (action === "settle") return "Could not settle thread";
   if (action === "unsettle") return "Could not un-settle thread";
   return "Could not delete thread";
@@ -93,6 +111,8 @@ function useThreadActionExecutor(
 ) {
   const archiveMutation = useAtomCommand(threadEnvironment.archive, { reportFailure: false });
   const unarchiveMutation = useAtomCommand(threadEnvironment.unarchive, { reportFailure: false });
+  const hideMutation = useAtomCommand(threadEnvironment.hide, { reportFailure: false });
+  const unhideMutation = useAtomCommand(threadEnvironment.unhide, { reportFailure: false });
   const deleteMutation = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
   const settleMutation = useAtomCommand(threadEnvironment.settle, { reportFailure: false });
   const unsettleMutation = useAtomCommand(threadEnvironment.unsettle, { reportFailure: false });
@@ -115,6 +135,16 @@ function useThreadActionExecutor(
           Alert.alert(
             actionFailureTitle(action),
             "This environment's server does not support settling yet. Update the server to use Settle.",
+          );
+          return false;
+        }
+        if (
+          (action === "hide" || action === "unhide") &&
+          !environmentSupportsHiding(thread.environmentId)
+        ) {
+          Alert.alert(
+            actionFailureTitle(action),
+            "This environment's server does not support hiding threads yet. Update the server to use Hide from sidebar.",
           );
           return false;
         }
@@ -156,7 +186,11 @@ function useThreadActionExecutor(
                     ? archiveMutation
                     : action === "unarchive"
                       ? unarchiveMutation
-                      : deleteMutation
+                      : action === "hide"
+                        ? hideMutation
+                        : action === "unhide"
+                          ? unhideMutation
+                          : deleteMutation
               )({
                 environmentId: thread.environmentId,
                 input: { threadId: thread.id },
@@ -179,9 +213,11 @@ function useThreadActionExecutor(
     [
       archiveMutation,
       deleteMutation,
+      hideMutation,
       onCompleted,
       settleMutation,
       unarchiveMutation,
+      unhideMutation,
       unsettleMutation,
     ],
   );
@@ -225,6 +261,8 @@ function useConfirmDeleteThread(
 
 export function useThreadListActions(): {
   readonly archiveThread: (thread: EnvironmentThreadShell) => void;
+  readonly hideThread: (thread: EnvironmentThreadShell) => void;
+  readonly unhideThread: (thread: EnvironmentThreadShell) => Promise<boolean>;
   readonly confirmDeleteThread: (thread: EnvironmentThreadShell) => void;
   readonly settleThread: (thread: EnvironmentThreadShell) => Promise<boolean>;
   readonly snoozeThread: (thread: EnvironmentThreadShell, snoozedUntil: string) => Promise<boolean>;
@@ -253,6 +291,16 @@ export function useThreadListActions(): {
     (thread: EnvironmentThreadShell) => {
       void executeAction("archive", thread);
     },
+    [executeAction],
+  );
+  const hideThread = useCallback(
+    (thread: EnvironmentThreadShell) => {
+      void executeAction("hide", thread);
+    },
+    [executeAction],
+  );
+  const unhideThread = useCallback(
+    async (thread: EnvironmentThreadShell) => (await executeAction("unhide", thread)) === true,
     [executeAction],
   );
   const settleThread = useCallback(
@@ -489,6 +537,7 @@ export function useThreadListActions(): {
           (shell) =>
             shell.pinnedAt != null &&
             shell.archivedAt === null &&
+            shell.hiddenAt == null &&
             environmentSupportsPinReorder(shell.environmentId),
         ),
       );
@@ -544,6 +593,8 @@ export function useThreadListActions(): {
 
   return {
     archiveThread,
+    hideThread,
+    unhideThread,
     confirmDeleteThread,
     settleThread,
     snoozeThread,
