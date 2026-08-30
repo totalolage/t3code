@@ -5103,7 +5103,11 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         toolPartEvent(
           makeToolPart("part-task", "task", "call-task", {
             status: "completed",
-            input: { description: "Review the auth flow", prompt: "Read every file" },
+            input: {
+              description: "Review the auth flow",
+              prompt: "Read every file",
+              command: "Continue implementation",
+            },
             output: "<task_result>raw subagent transcript</task_result>",
             title: "Review the auth flow",
             metadata: {},
@@ -5140,15 +5144,35 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
             time: { start: 11, end: 12 },
           }),
         ),
+        toolPartEvent(
+          makeToolPart("part-todowrite", "todowrite", "call-todowrite", {
+            status: "completed",
+            input: {
+              todos: [
+                {
+                  content: "Inspect bar header implementation",
+                  status: "in_progress",
+                  priority: "high",
+                },
+                { content: "Adjust hero contrast", status: "pending", priority: "high" },
+              ],
+            },
+            output:
+              '[{"content":"Inspect bar header implementation","status":"in_progress","priority":"high"}]',
+            title: "2 todos",
+            metadata: {},
+            time: { start: 13, end: 14 },
+          }),
+        ),
       ];
 
-      const events = yield* collectItemEvents(threadId, 6);
+      const events = yield* collectItemEvents(threadId, 7);
       const payloads = events.flatMap((event) =>
         event.type === "item.completed" ? [event.payload] : [],
       );
-      NodeAssert.equal(payloads.length, 6);
+      NodeAssert.equal(payloads.length, 7);
 
-      const [read, skill, task, boundedTask, bash, mcp] = payloads;
+      const [read, skill, task, boundedTask, bash, mcp, todoWrite] = payloads;
 
       NodeAssert.equal(read?.itemType, "dynamic_tool_call");
       NodeAssert.equal(read?.status, "completed");
@@ -5172,6 +5196,10 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
 
       NodeAssert.equal(mcp?.itemType, "mcp_tool_call");
       NodeAssert.equal(mcp?.detail, "12 rows");
+
+      NodeAssert.equal(todoWrite?.itemType, "dynamic_tool_call");
+      NodeAssert.equal(todoWrite?.title, "Update task list");
+      NodeAssert.equal(todoWrite?.detail, "Inspect bar header implementation");
     }),
   );
 

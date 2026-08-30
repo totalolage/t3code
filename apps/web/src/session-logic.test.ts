@@ -1568,6 +1568,71 @@ describe("deriveWorkLogEntries", () => {
     expect(entry?.detail).toBeUndefined();
   });
 
+  it("replaces legacy OpenCode todowrite JSON with the active task", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "legacy-opencode-todowrite",
+        kind: "tool.completed",
+        summary: "todowrite",
+        payload: {
+          // Legacy servers classified todowrite as a file change and titled
+          // the row with the raw tool name.
+          itemType: "file_change",
+          title: "todowrite",
+          detail:
+            '[{"content":"Inspect bar header implementation","status":"in_progress","priority":"high"}]',
+          data: {
+            tool: "todowrite",
+            state: {
+              status: "completed",
+              input: {
+                todos: [
+                  {
+                    content: "Inspect bar header implementation",
+                    status: "in_progress",
+                    priority: "high",
+                  },
+                ],
+              },
+            },
+          },
+        },
+      }),
+    ]);
+
+    expect(entry).toMatchObject({
+      label: "Update task list",
+      toolTitle: "Update task list",
+      detail: "Inspect bar header implementation",
+      itemType: "dynamic_tool_call",
+    });
+    expect(entry?.command).toBeUndefined();
+    expect(entry?.changedFiles).toBeUndefined();
+  });
+
+  it("does not treat a subagent command hint as a shell command", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "legacy-opencode-task-command-hint",
+        kind: "tool.updated",
+        summary: "Subagent task",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          status: "inProgress",
+          detail: "Continue implementation of server-synced Hide from sidebar",
+          data: { command: "Continue implementation of server-synced Hide from sidebar" },
+        },
+      }),
+    ]);
+
+    expect(entry).toMatchObject({
+      label: "Subagent task",
+      detail: "Continue implementation of server-synced Hide from sidebar",
+      itemType: "collab_agent_tool_call",
+    });
+    expect(entry?.command).toBeUndefined();
+  });
+
   it("uses grep raw output summaries instead of repeating the generic tool label", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

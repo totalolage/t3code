@@ -3,6 +3,10 @@ import type {
   OrchestrationThreadActivity,
   OrchestrationThreadDetailSnapshot,
 } from "@t3tools/contracts";
+import {
+  resolveLegacyOpenCodeToolDetail,
+  resolveLegacyOpenCodeTodoWritePresentation,
+} from "@t3tools/shared/toolActivity";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -330,6 +334,46 @@ function projectAcpContent(value: unknown): Record<string, unknown> | undefined 
 }
 
 /**
+ * Legacy OpenCode TodoWrite rows persist with the raw tool name as summary, a
+ * `file_change` classification, and the full todo JSON as detail. Rewrite that
+ * narrow shape to what the current adapter emits — dynamic-tool presentation
+ * with a bounded active-task detail — before slimming drops `data.tool` and
+ * `data.state`, so old rows survive the wire without the raw provider state.
+ * Rows the repair cannot improve pass through untouched.
+ */
+function repairLegacyOpenCodeTodoWriteActivity(
+  activity: OrchestrationThreadActivity,
+): OrchestrationThreadActivity {
+  const payload = asRecord(activity.payload);
+  if (!payload) {
+    return activity;
+  }
+  const presentation = resolveLegacyOpenCodeTodoWritePresentation({
+    summary: activity.summary,
+    itemType: payload.itemType,
+    data: payload.data,
+  });
+  if (!presentation) {
+    return activity;
+  }
+  const detail = asTrimmedString(payload.detail);
+  const repairedDetail = resolveLegacyOpenCodeToolDetail({ detail, data: payload.data });
+  if (!repairedDetail || repairedDetail === detail) {
+    return activity;
+  }
+  return {
+    ...activity,
+    summary: presentation.title,
+    payload: {
+      ...payload,
+      itemType: presentation.itemType,
+      title: presentation.title,
+      detail: repairedDetail,
+    },
+  };
+}
+
+/**
  * Removes activity payload fields that no current client reads while retaining
  * the full payload in persistence and the event store.
  */
@@ -342,15 +386,17 @@ export function projectActivityPayload(
     return activity;
   }
 
+  const repaired = repairLegacyOpenCodeTodoWriteActivity(activity);
+  const repairedPayload = asRecord(repaired.payload) ?? payload;
   const itemStatus = asRecord(data.item)?.status;
   const projectedPayload =
-    payload.status === "completed" && (itemStatus === "failed" || itemStatus === "declined")
-      ? { ...payload, status: itemStatus }
-      : payload;
+    repairedPayload.status === "completed" && (itemStatus === "failed" || itemStatus === "declined")
+      ? { ...repairedPayload, status: itemStatus }
+      : repairedPayload;
 
   if (payload.itemType === "mcp_tool_call") {
     return {
-      ...activity,
+      ...repaired,
       payload: {
         ...projectedPayload,
         data: projectMcpToolCallData(data),
@@ -388,7 +434,7 @@ export function projectActivityPayload(
   }
 
   return {
-    ...activity,
+    ...repaired,
     payload: {
       ...projectedPayload,
       data: projectedData,

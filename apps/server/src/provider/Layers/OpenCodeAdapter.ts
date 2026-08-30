@@ -29,7 +29,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import type { OpencodeClient, Part, PermissionRequest, QuestionRequest } from "@opencode-ai/sdk/v2";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
-import { summarizeToolActivityInput } from "@t3tools/shared/toolActivity";
+import { summarizeOpenCodeToolInput } from "@t3tools/shared/toolActivity";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -414,6 +414,9 @@ type EventBaseInput = {
 
 function toToolLifecycleItemType(toolName: string): ToolLifecycleItemType {
   const normalized = toolName.toLowerCase();
+  if (normalized === "todowrite") {
+    return "dynamic_tool_call";
+  }
   if (normalized.includes("bash") || normalized.includes("command")) {
     return "command_execution";
   }
@@ -617,6 +620,8 @@ function toolTitleFamily(toolName: string): string {
       return "Skill";
     case "task":
       return "Subagent task";
+    case "todowrite":
+      return "Update task list";
     default:
       return toolName;
   }
@@ -627,6 +632,7 @@ function hidesCompletedToolOutput(toolName: string): boolean {
     case "read":
     case "skill":
     case "task":
+    case "todowrite":
       return true;
     default:
       return false;
@@ -2049,7 +2055,7 @@ export function makeOpenCodeAdapter(
               if (part.state.status === "error") {
                 return part.state.error;
               }
-              const inputDetail = summarizeToolActivityInput(part.state.input);
+              const inputDetail = summarizeOpenCodeToolInput(part.tool, part.state.input);
               if (part.state.status !== "completed") {
                 return inputDetail ?? nativeRunningTitle;
               }
