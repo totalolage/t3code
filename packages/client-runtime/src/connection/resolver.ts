@@ -56,7 +56,7 @@ function primarySocketUrl(
   if (url.pathname === "" || url.pathname === "/") {
     url.pathname = "/ws";
   }
-  appendClientConnectionParams(url, clientMetadata);
+  appendClientConnectionParams(url, clientMetadata, "direct");
   return url.toString();
 }
 
@@ -87,6 +87,7 @@ const makePrimaryBroker = Effect.fn("clientRuntime.connection.broker.makePrimary
       wsBaseUrl: target.wsBaseUrl,
       bearerToken: bearerToken.value,
       queryParameters: [],
+      connectionMethod: "direct",
     });
     return {
       ...authorized,
@@ -137,6 +138,7 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
       wsBaseUrl: profile.wsBaseUrl,
       bearerToken: credential.token,
       queryParameters: profile.queryParameters,
+      connectionMethod: "direct",
     });
     return {
       environmentId: authorized.environmentId,
@@ -243,6 +245,7 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
       wsBaseUrl: prepared.bootstrap.wsBaseUrl,
       bearerToken: prepared.bearerToken,
       queryParameters: [],
+      connectionMethod: "ssh",
     });
     return {
       environmentId: authorized.environmentId,

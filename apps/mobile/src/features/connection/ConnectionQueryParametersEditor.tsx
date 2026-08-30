@@ -3,7 +3,6 @@ import { Pressable, View } from "react-native";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
-import { useThemeColor } from "../../lib/useThemeColor";
 
 export interface QueryParameterRow extends RemoteQueryParameter {
   readonly id: string;
@@ -47,8 +46,6 @@ export function ConnectionQueryParametersEditor({
   onOpenChange,
   onRowsChange,
 }: ConnectionQueryParametersEditorProps) {
-  const iconColor = useThemeColor("--color-icon-subtle");
-
   const updateRow = (id: string, field: "key" | "value", value: string) => {
     onRowsChange(rows.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
   };
@@ -72,7 +69,7 @@ export function ConnectionQueryParametersEditor({
         <SymbolView
           name="chevron.down"
           size={11}
-          tintColor={iconColor}
+          tintColorClassName="accent-icon-subtle"
           type="monochrome"
           style={{ transform: [{ rotate: open ? "180deg" : "0deg" }] }}
         />
@@ -109,7 +106,12 @@ export function ConnectionQueryParametersEditor({
                 className="h-9 w-9 items-center justify-center rounded-[12px] active:opacity-70 disabled:opacity-50"
                 onPress={() => onRowsChange(rows.filter((item) => item.id !== row.id))}
               >
-                <SymbolView name="xmark" size={12} tintColor={iconColor} type="monochrome" />
+                <SymbolView
+                  name="xmark"
+                  size={12}
+                  tintColorClassName="accent-icon-subtle"
+                  type="monochrome"
+                />
               </Pressable>
             </View>
           ))}
@@ -120,7 +122,12 @@ export function ConnectionQueryParametersEditor({
             className="h-9 w-9 items-center justify-center rounded-[12px] active:opacity-70 disabled:opacity-50"
             onPress={() => onRowsChange([...rows, makeQueryParameterRow()])}
           >
-            <SymbolView name="plus" size={13} tintColor={iconColor} type="monochrome" />
+            <SymbolView
+              name="plus"
+              size={13}
+              tintColorClassName="accent-icon-subtle"
+              type="monochrome"
+            />
           </Pressable>
         </View>
       ) : null}
