@@ -1446,4 +1446,215 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.deepEqual(closeCallsDuringRun, []);
     }),
   );
+
+  const OPENCODE_TEST_SESSION_ID = "http://127.0.0.1:9999/session";
+
+  const toolPartEvent = (part: Record<string, unknown>) => ({
+    type: "message.part.updated" as const,
+    properties: {
+      sessionID: OPENCODE_TEST_SESSION_ID,
+      part,
+    },
+  });
+
+  const makeToolPart = (
+    id: string,
+    tool: string,
+    callID: string,
+    state: Record<string, unknown>,
+  ) => ({
+    id,
+    sessionID: OPENCODE_TEST_SESSION_ID,
+    messageID: `msg-${id}`,
+    type: "tool",
+    callID,
+    tool,
+    state,
+  });
+
+  const collectItemEvents = (threadId: ThreadId, count: number) =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type === "item.started" ||
+              event.type === "item.updated" ||
+              event.type === "item.completed"),
+        ),
+        Stream.take(count),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      return Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("5 seconds")));
+    });
+
+  it.effect("emits concise input-derived titles for completed OpenCode tool rows", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-opencode-tool-titles");
+      runtimeMock.state.subscribedEvents = [
+        toolPartEvent(
+          makeToolPart("part-read", "read", "call-read", {
+            status: "completed",
+            input: { filePath: "/repo/src/auth.ts" },
+            output:
+              "<path>/repo/src/auth.ts</path>\n<skill_content>huge raw xml payload</skill_content>",
+            title: "auth.ts",
+            metadata: {},
+            time: { start: 1, end: 2 },
+          }),
+        ),
+        toolPartEvent(
+          makeToolPart("part-skill", "skill", "call-skill", {
+            status: "completed",
+            input: { name: "release-notes" },
+            output: "<skill_content>entire skill markdown body</skill_content>",
+            title: "release-notes",
+            metadata: {},
+            time: { start: 3, end: 4 },
+          }),
+        ),
+        toolPartEvent(
+          makeToolPart("part-task", "task", "call-task", {
+            status: "completed",
+            input: { description: "Review the auth flow", prompt: "Read every file" },
+            output: "<task_result>raw subagent transcript</task_result>",
+            title: "Review the auth flow",
+            metadata: {},
+            time: { start: 5, end: 6 },
+          }),
+        ),
+        toolPartEvent(
+          makeToolPart("part-task-prompt", "task", "call-task-prompt", {
+            status: "completed",
+            input: { prompt: `${"p".repeat(100)}\n${"q".repeat(100)}` },
+            output: "<task_result>raw subagent transcript</task_result>",
+            title: "x".repeat(400),
+            metadata: {},
+            time: { start: 7, end: 8 },
+          }),
+        ),
+        toolPartEvent(
+          makeToolPart("part-bash", "bash", "call-bash", {
+            status: "completed",
+            input: { command: "pnpm vitest run auth" },
+            output: "raw stdout noise",
+            title: "pnpm vitest run auth",
+            metadata: {},
+            time: { start: 9, end: 10 },
+          }),
+        ),
+        toolPartEvent(
+          makeToolPart("part-mcp", "mcp_database", "call-mcp", {
+            status: "completed",
+            input: { sql: "select * from users" },
+            output: "12 rows",
+            title: "Query database",
+            metadata: {},
+            time: { start: 11, end: 12 },
+          }),
+        ),
+      ];
+
+      const events = yield* collectItemEvents(threadId, 6);
+      const payloads = events.flatMap((event) =>
+        event.type === "item.completed" ? [event.payload] : [],
+      );
+      NodeAssert.equal(payloads.length, 6);
+
+      const [read, skill, task, boundedTask, bash, mcp] = payloads;
+
+      NodeAssert.equal(read?.itemType, "dynamic_tool_call");
+      NodeAssert.equal(read?.status, "completed");
+      NodeAssert.equal(read?.title, "Read File");
+      NodeAssert.equal(read?.detail, "/repo/src/auth.ts");
+      const readData = read?.data as { state?: { output?: string } } | undefined;
+      NodeAssert.equal(readData?.state?.output?.startsWith("<path>"), true);
+
+      NodeAssert.equal(skill?.title, "Skill");
+      NodeAssert.equal(skill?.detail, "release-notes");
+
+      NodeAssert.equal(task?.itemType, "collab_agent_tool_call");
+      NodeAssert.equal(task?.title, "Subagent task");
+      NodeAssert.equal(task?.detail, "Review the auth flow");
+
+      NodeAssert.equal(boundedTask?.detail, `${"p".repeat(100)} ${"q".repeat(58)}…`);
+
+      NodeAssert.equal(bash?.itemType, "command_execution");
+      NodeAssert.equal(bash?.title, "bash");
+      NodeAssert.equal(bash?.detail, "pnpm vitest run auth");
+
+      NodeAssert.equal(mcp?.itemType, "mcp_tool_call");
+      NodeAssert.equal(mcp?.detail, "12 rows");
+    }),
+  );
+
+  it.effect("derives running and failed OpenCode tool rows from inputs and errors", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-opencode-tool-running");
+      runtimeMock.state.subscribedEvents = [
+        toolPartEvent(
+          makeToolPart("part-read-run", "read", "call-read-run", {
+            status: "running",
+            input: { filePath: "/repo/src/main.ts" },
+            title: "Reading /repo/src/main.ts",
+            metadata: {},
+            time: { start: 1 },
+          }),
+        ),
+        toolPartEvent(
+          makeToolPart("part-task-run", "task", "call-task-run", {
+            status: "running",
+            input: {},
+            title: "Exploring repository structure",
+            metadata: {},
+            time: { start: 2 },
+          }),
+        ),
+        toolPartEvent(
+          makeToolPart("part-bash-err", "bash", "call-bash-err", {
+            status: "error",
+            input: { command: "pnpm build" },
+            error: "exit code 1",
+            metadata: {},
+            time: { start: 3, end: 4 },
+          }),
+        ),
+      ];
+
+      const events = yield* collectItemEvents(threadId, 3);
+
+      NodeAssert.equal(events[0]?.type, "item.updated");
+      const readRunning = events[0];
+      if (readRunning?.type !== "item.updated") {
+        throw new Error("expected item.updated");
+      }
+      NodeAssert.equal(readRunning.payload.status, "inProgress");
+      NodeAssert.equal(readRunning.payload.title, "Read File");
+      NodeAssert.equal(readRunning.payload.detail, "/repo/src/main.ts");
+
+      const taskRunning = events[1];
+      if (taskRunning?.type !== "item.updated") {
+        throw new Error("expected item.updated");
+      }
+      NodeAssert.equal(taskRunning.payload.title, "Subagent task");
+      // No input summary available: the native running title still surfaces.
+      NodeAssert.equal(taskRunning.payload.detail, "Exploring repository structure");
+
+      NodeAssert.equal(events[2]?.type, "item.completed");
+      const bashFailed = events[2];
+      if (bashFailed?.type !== "item.completed") {
+        throw new Error("expected item.completed");
+      }
+      NodeAssert.equal(bashFailed.payload.status, "failed");
+      NodeAssert.equal(bashFailed.payload.title, "bash");
+      NodeAssert.equal(bashFailed.payload.detail, "exit code 1");
+    }),
+  );
 });

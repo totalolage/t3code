@@ -492,17 +492,75 @@ function messageRoleForPart(
   return part.type === "tool" ? "assistant" : undefined;
 }
 
-function detailFromToolPart(part: Extract<Part, { type: "tool" }>): string | undefined {
-  switch (part.state.status) {
-    case "completed":
-      return part.state.output;
-    case "error":
-      return part.state.error;
-    case "running":
-      return part.state.title;
+/**
+ * Title family for a live tool row. Covers the tools whose rows previously
+ * leaked raw native output (`<path>…`, `<skill_content>…`, `<task_result>…`)
+ * as their detail; unknown tools keep the native tool name.
+ */
+function toolTitleFamily(toolName: string): string {
+  switch (toolName.toLowerCase()) {
+    case "read":
+      return "Read File";
+    case "skill":
+      return "Skill";
+    case "task":
+      return "Subagent task";
     default:
-      return undefined;
+      return toolName;
   }
+}
+
+function hidesCompletedToolOutput(toolName: string): boolean {
+  switch (toolName.toLowerCase()) {
+    case "read":
+    case "skill":
+    case "task":
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Priority-ordered input fields a tool row's detail can summarize. One list
+// serves every tool: the first present field wins (e.g. a task prefers its
+// `description` over its `prompt`).
+const TOOL_DETAIL_INPUT_KEYS = [
+  "command",
+  "filePath",
+  "path",
+  "pattern",
+  "query",
+  "url",
+  "name",
+  "description",
+  "prompt",
+] as const;
+
+const TOOL_DETAIL_MAX_LENGTH = 160;
+
+/**
+ * One-line detail for a live tool row, derived from the call's input rather
+ * than its output — completed output is raw tool-native text unfit for a
+ * status row. The full native state (output included) stays under
+ * `payload.data.state` for persistence and diagnostics.
+ */
+function toolDetailFromInput(
+  input: { readonly [key: string]: unknown } | undefined,
+): string | undefined {
+  for (const key of TOOL_DETAIL_INPUT_KEYS) {
+    const value = input?.[key];
+    if (typeof value !== "string") {
+      continue;
+    }
+    const normalized = value.replace(/\s+/gu, " ").trim();
+    if (!normalized) {
+      continue;
+    }
+    return normalized.length > TOOL_DETAIL_MAX_LENGTH
+      ? `${normalized.slice(0, TOOL_DETAIL_MAX_LENGTH - 1)}…`
+      : normalized;
+  }
+  return undefined;
 }
 
 function toolStateCreatedAt(part: Extract<Part, { type: "tool" }>): string | undefined {
@@ -916,9 +974,24 @@ export function makeOpenCodeAdapter(
 
           if (part.type === "tool") {
             const itemType = toToolLifecycleItemType(part.tool);
+            const familyTitle = toolTitleFamily(part.tool);
+            const nativeRunningTitle =
+              part.state.status === "running" ? trimText(part.state.title) : undefined;
             const title =
-              part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool;
-            const detail = detailFromToolPart(part);
+              familyTitle === part.tool ? (nativeRunningTitle ?? part.tool) : familyTitle;
+            const detail = (() => {
+              if (part.state.status === "error") {
+                return part.state.error;
+              }
+              const inputDetail = toolDetailFromInput(part.state.input);
+              if (part.state.status !== "completed") {
+                return inputDetail ?? nativeRunningTitle;
+              }
+              return (
+                inputDetail ??
+                (hidesCompletedToolOutput(part.tool) ? undefined : trimText(part.state.output))
+              );
+            })();
             const payload = {
               itemType,
               ...(part.state.status === "error"
