@@ -27,7 +27,13 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import type { OpencodeClient, Part, PermissionRequest, QuestionRequest } from "@opencode-ai/sdk/v2";
+import type {
+  Message,
+  OpencodeClient,
+  Part,
+  PermissionRequest,
+  QuestionRequest,
+} from "@opencode-ai/sdk/v2";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { summarizeOpenCodeToolInput } from "@t3tools/shared/toolActivity";
 
@@ -332,6 +338,7 @@ interface OpenCodeSessionContext {
   readonly pendingPermissions: Map<string, PermissionRequest>;
   readonly pendingQuestions: Map<string, QuestionRequest>;
   readonly messageRoleById: Map<string, "user" | "assistant">;
+  readonly compactionMessageIds: Set<string>;
   readonly partById: Map<string, Part>;
   readonly emittedTextByPartId: Map<string, string>;
   readonly completedAssistantPartIds: Set<string>;
@@ -605,6 +612,10 @@ function messageRoleForPart(
     return known;
   }
   return part.type === "tool" ? "assistant" : undefined;
+}
+
+function isOpenCodeCompactionMessage(message: Message): boolean {
+  return message.role === "assistant" && message.agent === "compaction" && message.summary === true;
 }
 
 /**
@@ -1499,6 +1510,24 @@ export function makeOpenCodeAdapter(
       }
     });
 
+    const recordCompactionText = (context: OpenCodeSessionContext, part: Part) => {
+      const text = textFromPart(part);
+      if (text === undefined) {
+        return;
+      }
+      const previousText = context.emittedTextByPartId.get(part.id);
+      const { latestText } = mergeOpenCodeAssistantText(previousText, text);
+      context.emittedTextByPartId.set(part.id, latestText);
+      if (latestText !== text) {
+        context.partById.set(
+          part.id,
+          (part.type === "text" || part.type === "reasoning"
+            ? { ...part, text: latestText }
+            : part) satisfies Part,
+        );
+      }
+    };
+
     const isRelatedOpenCodeSession = Effect.fn("isRelatedOpenCodeSession")(function* (
       context: OpenCodeSessionContext,
       candidateSessionId: string,
@@ -1954,12 +1983,35 @@ export function makeOpenCodeAdapter(
           break;
         }
 
+        case "session.compacted": {
+          const detail = Array.from(context.partById.values())
+            .filter(
+              (part): part is Extract<Part, { type: "text" }> =>
+                part.type === "text" && context.compactionMessageIds.has(part.messageID),
+            )
+            .map((part) => trimText(context.emittedTextByPartId.get(part.id) ?? part.text))
+            .filter((text): text is string => text !== undefined)
+            .join("\n\n");
+          context.compactionMessageIds.clear();
+          yield* emit({
+            ...(yield* buildEventBase({
+              threadId: context.session.threadId,
+              turnId,
+              raw: event,
+            })),
+            type: "thread.state.changed",
+            payload: {
+              state: "compacted",
+              ...(detail.length > 0 ? { detail } : {}),
+            },
+          });
+          break;
+        }
+
         case "message.updated": {
+          const message = event.properties.info;
           const promptAdmission = context.promptAdmission;
-          if (
-            event.properties.info.role === "user" &&
-            promptAdmission?.messageId === event.properties.info.id
-          ) {
+          if (message.role === "user" && promptAdmission?.messageId === message.id) {
             promptAdmission.messageObserved = true;
             if (promptAdmission.accepted) {
               const idle = promptAdmission.idleDuringAdmission;
@@ -1973,13 +2025,24 @@ export function makeOpenCodeAdapter(
               }
             }
           }
-          context.messageRoleById.set(event.properties.info.id, event.properties.info.role);
-          if (event.properties.info.role === "assistant") {
+          context.messageRoleById.set(message.id, message.role);
+          const isCompaction = isOpenCodeCompactionMessage(message);
+          if (isCompaction) {
+            if (!context.compactionMessageIds.has(message.id)) {
+              context.compactionMessageIds.clear();
+            }
+            context.compactionMessageIds.add(message.id);
+          }
+          if (message.role === "assistant") {
             for (const part of context.partById.values()) {
-              if (part.messageID !== event.properties.info.id) {
+              if (part.messageID !== message.id) {
                 continue;
               }
-              yield* emitAssistantTextDelta(context, part, turnId, event);
+              if (isCompaction) {
+                recordCompactionText(context, part);
+              } else {
+                yield* emitAssistantTextDelta(context, part, turnId, event);
+              }
             }
           }
           break;
@@ -1987,6 +2050,7 @@ export function makeOpenCodeAdapter(
 
         case "message.removed": {
           context.messageRoleById.delete(event.properties.messageID);
+          context.compactionMessageIds.delete(event.properties.messageID);
           break;
         }
 
@@ -1995,15 +2059,28 @@ export function makeOpenCodeAdapter(
           if (!existingPart) {
             break;
           }
-          const role = messageRoleForPart(context, existingPart);
-          if (role !== "assistant") {
-            break;
-          }
-          const streamKind = resolveTextStreamKind(existingPart);
           const delta = event.properties.delta;
           if (delta.length === 0) {
             break;
           }
+          const role = messageRoleForPart(context, existingPart);
+          if (role === undefined) {
+            const previousText = textFromPart(existingPart);
+            if (
+              previousText !== undefined &&
+              (existingPart.type === "text" || existingPart.type === "reasoning")
+            ) {
+              context.partById.set(event.properties.partID, {
+                ...existingPart,
+                text: appendOpenCodeAssistantTextDelta(previousText, delta).nextText,
+              });
+            }
+            break;
+          }
+          if (role !== "assistant") {
+            break;
+          }
+          const streamKind = resolveTextStreamKind(existingPart);
           const previousText =
             context.emittedTextByPartId.get(event.properties.partID) ??
             textFromPart(existingPart) ??
@@ -2018,6 +2095,9 @@ export function makeOpenCodeAdapter(
               ...existingPart,
               text: nextText,
             });
+          }
+          if (context.compactionMessageIds.has(existingPart.messageID)) {
+            break;
           }
           yield* emit({
             ...(yield* buildEventBase({
@@ -2041,7 +2121,11 @@ export function makeOpenCodeAdapter(
           const messageRole = messageRoleForPart(context, part);
 
           if (messageRole === "assistant") {
-            yield* emitAssistantTextDelta(context, part, turnId, event);
+            if (context.compactionMessageIds.has(part.messageID)) {
+              recordCompactionText(context, part);
+            } else {
+              yield* emitAssistantTextDelta(context, part, turnId, event);
+            }
           }
 
           if (part.type === "tool") {
@@ -2507,6 +2591,7 @@ export function makeOpenCodeAdapter(
           partById: new Map(),
           emittedTextByPartId: new Map(),
           messageRoleById: new Map(),
+          compactionMessageIds: new Set(),
           completedAssistantPartIds: new Set(),
           turns: [],
           activeTurnId: undefined,

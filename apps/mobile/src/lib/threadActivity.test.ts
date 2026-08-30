@@ -356,6 +356,36 @@ describe("buildThreadFeed", () => {
     ]);
   });
 
+  it("keeps context compaction summaries behind the mobile work-row disclosure", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-compaction"),
+      projectId: ProjectId.make("project-1"),
+      title: "Compacted thread",
+      activities: [
+        makeActivity({
+          id: EventId.make("activity-compaction"),
+          kind: "context-compaction",
+          summary: "Context compacted",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: { detail: "Compacted conversation summary" },
+        }),
+      ],
+    });
+
+    const group = buildThreadFeed(thread)[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (!group || group.type !== "activity-group") {
+      return;
+    }
+
+    expect(group.activities[0]).toMatchObject({
+      summary: "Context compacted",
+      detail: null,
+      canExpand: true,
+    });
+    expect(group.activities[0]?.getFullDetail()).toBe("Compacted conversation summary");
+  });
+
   it("collapses matching tool lifecycle rows like desktop", () => {
     const thread = makeThread({
       id: ThreadId.make("thread-2"),

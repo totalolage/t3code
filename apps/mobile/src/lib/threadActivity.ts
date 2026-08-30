@@ -730,9 +730,10 @@ function memoizeValue<T>(build: () => T): () => T {
 }
 
 function workEntryPreview(
-  workEntry: Pick<WorkLogEntry, "detail" | "command" | "changedFiles">,
+  workEntry: Pick<DerivedWorkLogEntry, "detail" | "command" | "changedFiles" | "activityKind">,
 ): string | null {
   if (workEntry.command) return workEntry.command;
+  if (workEntry.activityKind === "context-compaction") return null;
   if (workEntry.detail) return workEntry.detail;
   if ((workEntry.changedFiles?.length ?? 0) === 0) return null;
   const [firstPath] = workEntry.changedFiles ?? [];
