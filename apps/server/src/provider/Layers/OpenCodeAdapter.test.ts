@@ -4702,6 +4702,230 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect(
+    "projects OpenCode compaction summaries without emitting them as assistant messages",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-compaction-summary");
+        const sessionID = "http://127.0.0.1:9999/session";
+        const assistantInfo = (input: {
+          id: string;
+          agent: string;
+          mode: string;
+          created: number;
+          completed?: number;
+          summary?: boolean;
+        }) => ({
+          id: input.id,
+          sessionID,
+          role: "assistant" as const,
+          parentID: `${input.id}-parent`,
+          modelID: "kimi-k3",
+          providerID: "opencode",
+          mode: input.mode,
+          agent: input.agent,
+          path: { cwd: "/repo", root: "/repo" },
+          ...(input.summary ? { summary: true } : {}),
+          cost: 0,
+          tokens: {
+            input: 0,
+            output: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+          time: {
+            created: input.created,
+            ...(input.completed !== undefined ? { completed: input.completed } : {}),
+          },
+        });
+        runtimeMock.state.subscribedEvents = [
+          {
+            id: "evt-failed-compaction-message",
+            type: "message.updated",
+            properties: {
+              sessionID,
+              info: assistantInfo({
+                id: "msg-failed-compaction",
+                agent: "compaction",
+                mode: "compaction",
+                created: 0,
+                summary: true,
+              }),
+            },
+          },
+          {
+            id: "evt-failed-compaction-part",
+            type: "message.part.updated",
+            properties: {
+              sessionID,
+              part: {
+                id: "part-failed-compaction",
+                sessionID,
+                messageID: "msg-failed-compaction",
+                type: "text",
+                text: "Stale failed summary",
+                time: { start: 0, end: 1 },
+              },
+              time: 1,
+            },
+          },
+          {
+            id: "evt-compaction-part-before-message",
+            type: "message.part.updated",
+            properties: {
+              sessionID,
+              part: {
+                id: "part-compaction",
+                sessionID,
+                messageID: "msg-compaction",
+                type: "text",
+                text: "Compacted",
+                time: { start: 1 },
+              },
+              time: 1,
+            },
+          },
+          {
+            id: "evt-compaction-delta-before-message",
+            type: "message.part.delta",
+            properties: {
+              sessionID,
+              messageID: "msg-compaction",
+              partID: "part-compaction",
+              field: "text",
+              delta: " context",
+            },
+          },
+          {
+            id: "evt-compaction-message",
+            type: "message.updated",
+            properties: {
+              sessionID,
+              info: assistantInfo({
+                id: "msg-compaction",
+                agent: "compaction",
+                mode: "compaction",
+                created: 1,
+                summary: true,
+              }),
+            },
+          },
+          {
+            id: "evt-compaction-part-started",
+            type: "message.part.updated",
+            properties: {
+              sessionID,
+              part: {
+                id: "part-compaction",
+                sessionID,
+                messageID: "msg-compaction",
+                type: "text",
+                text: "Compacted context",
+                time: { start: 1 },
+              },
+              time: 1,
+            },
+          },
+          {
+            id: "evt-compaction-part-delta",
+            type: "message.part.delta",
+            properties: {
+              sessionID,
+              messageID: "msg-compaction",
+              partID: "part-compaction",
+              field: "text",
+              delta: " summary",
+            },
+          },
+          {
+            id: "evt-compaction-part-completed",
+            type: "message.part.updated",
+            properties: {
+              sessionID,
+              part: {
+                id: "part-compaction",
+                sessionID,
+                messageID: "msg-compaction",
+                type: "text",
+                text: "Compacted context summary",
+                time: { start: 1, end: 2 },
+              },
+              time: 2,
+            },
+          },
+          {
+            id: "evt-session-compacted",
+            type: "session.compacted",
+            properties: { sessionID },
+          },
+          {
+            id: "evt-assistant-message",
+            type: "message.updated",
+            properties: {
+              sessionID,
+              info: assistantInfo({
+                id: "msg-assistant",
+                agent: "build",
+                mode: "build",
+                created: 3,
+                completed: 4,
+              }),
+            },
+          },
+          {
+            id: "evt-assistant-part-completed",
+            type: "message.part.updated",
+            properties: {
+              sessionID,
+              part: {
+                id: "part-assistant",
+                sessionID,
+                messageID: "msg-assistant",
+                type: "text",
+                text: "Normal reply",
+                time: { start: 3, end: 4 },
+              },
+              time: 4,
+            },
+          },
+        ];
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.take(5),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+
+        const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+        const compactionEvents = events.filter((event) => event.type === "thread.state.changed");
+        NodeAssert.equal(compactionEvents.length, 1);
+        const compactionEvent = compactionEvents[0];
+        if (compactionEvent?.type === "thread.state.changed") {
+          NodeAssert.equal(compactionEvent.payload.state, "compacted");
+          NodeAssert.equal(compactionEvent.payload.detail, "Compacted context summary");
+        }
+        NodeAssert.deepEqual(
+          events
+            .filter((event) => event.type === "content.delta")
+            .map((event) => (event.type === "content.delta" ? event.payload.delta : "")),
+          ["Normal reply"],
+        );
+        NodeAssert.deepEqual(
+          events
+            .filter((event) => event.type === "item.completed")
+            .map((event) => (event.type === "item.completed" ? event.payload.detail : undefined)),
+          ["Normal reply"],
+        );
+      }),
+  );
+
   it.effect("lets OpenCode own session title generation and emits title metadata updates", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;

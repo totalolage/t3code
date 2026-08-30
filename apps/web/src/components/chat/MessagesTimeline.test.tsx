@@ -1,6 +1,6 @@
 import { CheckpointRef, EnvironmentId, MessageId, TurnId } from "@t3tools/contracts";
 import { codexFeedbackMessage } from "@t3tools/client-runtime/state/threads";
-import { createRef, type ReactNode, type Ref } from "react";
+import { act, createRef, type ReactNode, type Ref } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
@@ -132,6 +132,186 @@ function matchMedia() {
     addEventListener: () => {},
     removeEventListener: () => {},
   };
+}
+
+type MountedTestEvent = {
+  type: string;
+  target?: MountedTestNode;
+  button?: number;
+  defaultPrevented?: boolean;
+  cancelBubble?: boolean;
+  preventDefault?: () => void;
+  stopPropagation?: () => void;
+};
+
+class MountedTestNode {
+  parentNode: MountedTestNode | null = null;
+  childNodes: MountedTestNode[] = [];
+  ownerDocument: MountedTestDocument;
+  readonly nodeName: string;
+  readonly tagName: string;
+  readonly namespaceURI = "http://www.w3.org/1999/xhtml";
+  readonly attributes = new Map<string, string>();
+  readonly dataset: Record<string, string> = {};
+  readonly style = { setProperty: () => {}, removeProperty: () => {} };
+  nodeValue = "";
+  private readonly listeners = new Map<string, Set<(event: MountedTestEvent) => void>>();
+
+  constructor(
+    name: string,
+    ownerDocument: MountedTestDocument,
+    readonly nodeType = 1,
+  ) {
+    this.ownerDocument = ownerDocument;
+    this.nodeName = name.toUpperCase();
+    this.tagName = this.nodeName;
+  }
+
+  get firstChild() {
+    return this.childNodes[0] ?? null;
+  }
+
+  get lastChild() {
+    return this.childNodes.at(-1) ?? null;
+  }
+
+  get textContent(): string {
+    return this.nodeType === 3
+      ? this.nodeValue
+      : this.childNodes.map((child) => child.textContent).join("");
+  }
+
+  set textContent(value: string) {
+    if (this.nodeType === 3) {
+      this.nodeValue = value;
+      return;
+    }
+    this.childNodes = [];
+    if (value.length > 0) {
+      this.appendChild(this.ownerDocument.createTextNode(value));
+    }
+  }
+
+  appendChild(child: MountedTestNode) {
+    child.parentNode = this;
+    this.childNodes.push(child);
+    return child;
+  }
+
+  insertBefore(child: MountedTestNode, before: MountedTestNode | null) {
+    child.parentNode = this;
+    const index = before ? this.childNodes.indexOf(before) : -1;
+    if (index < 0) this.childNodes.push(child);
+    else this.childNodes.splice(index, 0, child);
+    return child;
+  }
+
+  removeChild(child: MountedTestNode) {
+    const index = this.childNodes.indexOf(child);
+    if (index >= 0) this.childNodes.splice(index, 1);
+    child.parentNode = null;
+    return child;
+  }
+
+  setAttribute(name: string, value: string) {
+    this.attributes.set(name, String(value));
+  }
+
+  getAttribute(name: string) {
+    return this.attributes.get(name) ?? null;
+  }
+
+  removeAttribute(name: string) {
+    this.attributes.delete(name);
+  }
+
+  addEventListener(type: string, listener: (event: MountedTestEvent) => void, capture = false) {
+    const key = `${type}:${capture ? "capture" : "bubble"}`;
+    const listeners = this.listeners.get(key) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(key, listeners);
+  }
+
+  removeEventListener(type: string, listener: (event: MountedTestEvent) => void, capture = false) {
+    this.listeners.get(`${type}:${capture ? "capture" : "bubble"}`)?.delete(listener);
+  }
+
+  dispatchEvent(event: MountedTestEvent) {
+    event.target ??= this;
+    event.preventDefault ??= () => {
+      event.defaultPrevented = true;
+    };
+    event.stopPropagation ??= () => {
+      event.cancelBubble = true;
+    };
+    const path: MountedTestNode[] = [this];
+    for (let node = this.parentNode; node; node = node.parentNode) {
+      path.push(node);
+    }
+    for (const node of path.toReversed()) {
+      for (const listener of node.listeners.get(`${event.type}:capture`) ?? []) listener(event);
+      if (event.cancelBubble) return !event.defaultPrevented;
+    }
+    for (const node of path) {
+      for (const listener of node.listeners.get(`${event.type}:bubble`) ?? []) listener(event);
+      if (event.cancelBubble) break;
+    }
+    return !event.defaultPrevented;
+  }
+
+  getBoundingClientRect() {
+    return { x: 0, y: 0, top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0 };
+  }
+
+  contains(candidate: MountedTestNode | null): boolean {
+    for (let node = candidate; node; node = node.parentNode) {
+      if (node === this) return true;
+    }
+    return false;
+  }
+
+  focus() {}
+}
+
+class MountedTestDocument extends MountedTestNode {
+  readonly documentElement: MountedTestNode;
+  readonly body: MountedTestNode;
+  activeElement: MountedTestNode | null = null;
+
+  constructor() {
+    super("#document", undefined as never, 9);
+    this.ownerDocument = this;
+    this.documentElement = this.createElement("html");
+    this.body = this.createElement("body");
+    this.documentElement.appendChild(this.body);
+    this.appendChild(this.documentElement);
+  }
+
+  createElement(name: string) {
+    return new MountedTestNode(name, this);
+  }
+
+  createElementNS(_namespace: string, name: string) {
+    return this.createElement(name);
+  }
+
+  createTextNode(value: string) {
+    const node = new MountedTestNode("#text", this, 3);
+    node.nodeValue = value;
+    return node;
+  }
+}
+
+function findMountedTestNode(
+  root: MountedTestNode,
+  predicate: (node: MountedTestNode) => boolean,
+): MountedTestNode | null {
+  if (predicate(root)) return root;
+  for (const child of root.childNodes) {
+    const match = findMountedTestNode(child, predicate);
+    if (match) return match;
+  }
+  return null;
 }
 
 let MessagesTimeline: typeof import("./MessagesTimeline").MessagesTimeline;
@@ -1008,28 +1188,114 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('data-user-message-footer="true"');
   });
 
-  it("renders context compaction entries in the normal work log", () => {
-    const markup = renderToStaticMarkup(
-      <MessagesTimeline
-        {...buildProps()}
-        timelineEntries={[
-          {
-            id: "entry-1",
-            kind: "work",
-            createdAt: "2026-03-17T19:12:28.000Z",
-            entry: {
-              id: "work-1",
-              createdAt: "2026-03-17T19:12:28.000Z",
-              label: "Context compacted",
-              tone: "info",
-            },
-          },
-        ]}
-      />,
-    );
+  it("reveals context compaction summaries only after expanding the work row", async () => {
+    const testGlobals = globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT?: boolean;
+    };
+    const previousDocument = globalThis.document;
+    const previousWindow = globalThis.window;
+    const previousResizeObserver = globalThis.ResizeObserver;
+    const previousActEnvironment = testGlobals.IS_REACT_ACT_ENVIRONMENT;
+    const previousRequestAnimationFrame = globalThis.requestAnimationFrame;
+    const previousCancelAnimationFrame = globalThis.cancelAnimationFrame;
+    const mountedDocument = new MountedTestDocument();
+    const mountedWindow = {
+      document: mountedDocument,
+      HTMLIFrameElement: MountedTestNode,
+      matchMedia,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      requestAnimationFrame: (callback: FrameRequestCallback) => {
+        callback(0);
+        return 0;
+      },
+      cancelAnimationFrame: () => {},
+      getComputedStyle: () => ({}),
+      setTimeout: globalThis.setTimeout,
+      clearTimeout: globalThis.clearTimeout,
+    };
+    class MountedResizeObserver {
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal("document", mountedDocument);
+    vi.stubGlobal("window", mountedWindow);
+    vi.stubGlobal("HTMLIFrameElement", MountedTestNode);
+    vi.stubGlobal("ResizeObserver", MountedResizeObserver);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("requestAnimationFrame", mountedWindow.requestAnimationFrame);
+    vi.stubGlobal("cancelAnimationFrame", mountedWindow.cancelAnimationFrame);
 
-    expect(markup).toContain("Context compacted");
-    expect(markup).toContain("Work Log");
+    const { createRoot } = await import("react-dom/client");
+    const container = mountedDocument.createElement("div");
+    mountedDocument.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+
+    try {
+      await act(() => {
+        root.render(
+          <MessagesTimeline
+            {...buildProps()}
+            timelineEntries={[
+              {
+                id: "entry-1",
+                kind: "work",
+                createdAt: "2026-03-17T19:12:28.000Z",
+                entry: {
+                  id: "work-1",
+                  createdAt: "2026-03-17T19:12:28.000Z",
+                  label: "Context compacted",
+                  detail: "Compacted conversation summary",
+                  tone: "info",
+                  sourceActivityKind: "context-compaction",
+                },
+              },
+            ]}
+          />,
+        );
+      });
+
+      const disclosure = findMountedTestNode(
+        container,
+        (node) => node.getAttribute("role") === "button",
+      );
+      expect(disclosure).not.toBeNull();
+      expect(container.textContent).toContain("Context compacted");
+      expect(container.textContent).not.toContain("Compacted conversation summary");
+      expect(disclosure?.getAttribute("aria-expanded")).toBe("false");
+
+      await act(() => {
+        disclosure?.dispatchEvent({ type: "click", button: 0 });
+      });
+
+      expect(disclosure?.getAttribute("aria-expanded")).toBe("true");
+      expect(container.textContent).toContain("Compacted conversation summary");
+    } finally {
+      await act(() => root.unmount());
+      vi.stubGlobal("document", previousDocument);
+      vi.stubGlobal("window", previousWindow);
+      if (previousResizeObserver === undefined) {
+        Reflect.deleteProperty(globalThis, "ResizeObserver");
+      } else {
+        vi.stubGlobal("ResizeObserver", previousResizeObserver);
+      }
+      if (previousActEnvironment === undefined) {
+        Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+      } else {
+        vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", previousActEnvironment);
+      }
+      if (previousRequestAnimationFrame === undefined) {
+        Reflect.deleteProperty(globalThis, "requestAnimationFrame");
+      } else {
+        vi.stubGlobal("requestAnimationFrame", previousRequestAnimationFrame);
+      }
+      if (previousCancelAnimationFrame === undefined) {
+        Reflect.deleteProperty(globalThis, "cancelAnimationFrame");
+      } else {
+        vi.stubGlobal("cancelAnimationFrame", previousCancelAnimationFrame);
+      }
+    }
   });
 
   it("summarizes changed files in one line", () => {

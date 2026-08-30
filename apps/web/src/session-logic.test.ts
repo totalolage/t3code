@@ -2038,11 +2038,13 @@ describe("deriveWorkLogEntries context window handling", () => {
         kind: "context-compaction",
         summary: "Context compacted",
         tone: "info",
+        payload: { detail: "Compacted conversation summary" },
       }),
     ]);
 
     expect(entries).toHaveLength(1);
     expect(entries[0]?.label).toBe("Context compacted");
+    expect(entries[0]?.detail).toBe("Compacted conversation summary");
   });
 });
 
