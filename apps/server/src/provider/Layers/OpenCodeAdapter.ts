@@ -25,6 +25,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import type { OpencodeClient, Part, PermissionRequest, QuestionRequest } from "@opencode-ai/sdk/v2";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { summarizeToolActivityInput } from "@t3tools/shared/toolActivity";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -521,48 +522,6 @@ function hidesCompletedToolOutput(toolName: string): boolean {
   }
 }
 
-// Priority-ordered input fields a tool row's detail can summarize. One list
-// serves every tool: the first present field wins (e.g. a task prefers its
-// `description` over its `prompt`).
-const TOOL_DETAIL_INPUT_KEYS = [
-  "command",
-  "filePath",
-  "path",
-  "pattern",
-  "query",
-  "url",
-  "name",
-  "description",
-  "prompt",
-] as const;
-
-const TOOL_DETAIL_MAX_LENGTH = 160;
-
-/**
- * One-line detail for a live tool row, derived from the call's input rather
- * than its output — completed output is raw tool-native text unfit for a
- * status row. The full native state (output included) stays under
- * `payload.data.state` for persistence and diagnostics.
- */
-function toolDetailFromInput(
-  input: { readonly [key: string]: unknown } | undefined,
-): string | undefined {
-  for (const key of TOOL_DETAIL_INPUT_KEYS) {
-    const value = input?.[key];
-    if (typeof value !== "string") {
-      continue;
-    }
-    const normalized = value.replace(/\s+/gu, " ").trim();
-    if (!normalized) {
-      continue;
-    }
-    return normalized.length > TOOL_DETAIL_MAX_LENGTH
-      ? `${normalized.slice(0, TOOL_DETAIL_MAX_LENGTH - 1)}…`
-      : normalized;
-  }
-  return undefined;
-}
-
 function toolStateCreatedAt(part: Extract<Part, { type: "tool" }>): string | undefined {
   switch (part.state.status) {
     case "running":
@@ -983,7 +942,7 @@ export function makeOpenCodeAdapter(
               if (part.state.status === "error") {
                 return part.state.error;
               }
-              const inputDetail = toolDetailFromInput(part.state.input);
+              const inputDetail = summarizeToolActivityInput(part.state.input);
               if (part.state.status !== "completed") {
                 return inputDetail ?? nativeRunningTitle;
               }
