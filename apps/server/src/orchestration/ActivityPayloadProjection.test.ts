@@ -2,12 +2,12 @@ import { describe, expect, it } from "vite-plus/test";
 import type { OrchestrationThreadActivity } from "@t3tools/contracts";
 import { projectActivityPayload } from "./ActivityPayloadProjection.ts";
 
-function activity(payload: Record<string, unknown>): OrchestrationThreadActivity {
+function activity(payload: Record<string, unknown>, summary = "Tool"): OrchestrationThreadActivity {
   return {
     id: "activity-1",
     tone: "tool",
     kind: "tool.completed",
-    summary: "Tool",
+    summary,
     payload,
     turnId: null,
     createdAt: "2026-08-01T10:00:00.000Z",
@@ -187,6 +187,53 @@ describe("projectActivityPayload", () => {
     expect(data.toolName).toBe("mcp__github__fetch_pr");
     expect(data.input).toEqual({ pr: 42 });
     expect(data.result).toEqual({ content: "first line of output" });
+    expect(JSON.stringify(projected.payload).length).toBeLessThan(500);
+  });
+
+  it("repairs legacy persisted OpenCode TodoWrite rows before slimming", () => {
+    // Persisted by servers before dynamic-tool classification: the raw tool
+    // name as summary/title, a file_change classification (the tool name
+    // contains "write"), the full todo JSON as detail, and the raw provider
+    // state under data.
+    const todos = [
+      {
+        content: "Inspect bar header implementation",
+        status: "in_progress",
+        priority: "high",
+      },
+      { content: "Adjust hero contrast", status: "pending", priority: "high" },
+    ];
+    const todoJson = JSON.stringify(todos);
+    const projected = projectActivityPayload(
+      activity(
+        {
+          itemType: "file_change",
+          title: "todowrite",
+          detail: todoJson,
+          data: {
+            tool: "todowrite",
+            state: {
+              status: "completed",
+              input: { todos },
+              output: `${todoJson}${"x".repeat(5000)}`,
+              metadata: { huge: "y".repeat(5000) },
+            },
+          },
+        },
+        "todowrite",
+      ),
+    );
+
+    expect(projected.summary).toBe("Update task list");
+    expect(projected.payload).toMatchObject({
+      itemType: "dynamic_tool_call",
+      title: "Update task list",
+      detail: "Inspect bar header implementation",
+    });
+    // Slimming still drops the bulky raw provider state after the repair.
+    const data = (projected.payload as Record<string, unknown>).data as Record<string, unknown>;
+    expect(data.tool).toBeUndefined();
+    expect(data.state).toBeUndefined();
     expect(JSON.stringify(projected.payload).length).toBeLessThan(500);
   });
 

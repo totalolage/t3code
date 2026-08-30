@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { deriveToolActivityPresentation, resolveLegacyOpenCodeToolDetail } from "./toolActivity.ts";
+import {
+  deriveToolActivityPresentation,
+  resolveLegacyOpenCodeTodoWritePresentation,
+  resolveLegacyOpenCodeToolDetail,
+  summarizeOpenCodeToolInput,
+} from "./toolActivity.ts";
 
 describe("toolActivity", () => {
   it("normalizes command tools to a stable ran-command label", () => {
@@ -112,11 +117,40 @@ describe("resolveLegacyOpenCodeToolDetail", () => {
           tool: "task",
           state: {
             status: "completed",
-            input: { description: "Review the auth flow", prompt: "Read every file" },
+            input: {
+              description: "Review the auth flow",
+              prompt: "Read every file",
+              command: "Continue implementation",
+            },
           },
         },
       }),
     ).toBe("Review the auth flow");
+  });
+
+  it("rewrites legacy todowrite JSON to the active task", () => {
+    expect(
+      resolveLegacyOpenCodeToolDetail({
+        detail:
+          '[{"content":"Inspect bar header implementation","status":"in_progress","priority":"high"}]',
+        data: {
+          tool: "todowrite",
+          state: {
+            status: "completed",
+            input: {
+              todos: [
+                { content: "Adjust hero contrast", status: "pending", priority: "high" },
+                {
+                  content: "Inspect bar header implementation",
+                  status: "in_progress",
+                  priority: "high",
+                },
+              ],
+            },
+          },
+        },
+      }),
+    ).toBe("Inspect bar header implementation");
   });
 
   it("matches the task markup family for bare <task prefixes", () => {
@@ -162,7 +196,7 @@ describe("resolveLegacyOpenCodeToolDetail", () => {
           tool: "task",
           state: {
             status: "completed",
-            input: { command: 42, filePath: null, query: "  hello\n  world  " },
+            input: { command: 42, description: null, prompt: "  hello\n  world  " },
           },
         },
       }),
@@ -219,5 +253,119 @@ describe("resolveLegacyOpenCodeToolDetail", () => {
         data: { tool: "toString" },
       }),
     ).toBe("<task_result>legitimate custom output</task_result>");
+    expect(
+      resolveLegacyOpenCodeToolDetail({
+        detail: '[{"content":"legitimate custom output"}]',
+        data: { tool: "mcp_database" },
+      }),
+    ).toBe('[{"content":"legitimate custom output"}]');
+    expect(
+      resolveLegacyOpenCodeToolDetail({
+        detail: '[{"content":"unrecognized todowrite output"}]',
+        data: { tool: "todowrite", state: { input: {} } },
+      }),
+    ).toBe('[{"content":"unrecognized todowrite output"}]');
+  });
+});
+
+describe("summarizeOpenCodeToolInput", () => {
+  it("falls back to the first pending todo when none is in progress", () => {
+    expect(
+      summarizeOpenCodeToolInput("todowrite", {
+        todos: [
+          { content: "Write the migration", status: "completed" },
+          { content: "Run the test suite", status: "pending" },
+        ],
+      }),
+    ).toBe("Run the test suite");
+  });
+
+  it("falls back to the most recent completed todo when all are complete", () => {
+    expect(
+      summarizeOpenCodeToolInput("todowrite", {
+        todos: [
+          { content: "Write the migration", status: "completed" },
+          { content: "Run the test suite", status: "completed" },
+        ],
+      }),
+    ).toBe("Run the test suite");
+  });
+
+  it("bounds long todo details to 160 chars with an ellipsis", () => {
+    const content = "z".repeat(200);
+    expect(
+      summarizeOpenCodeToolInput("todowrite", {
+        todos: [{ content, status: "in_progress" }],
+      }),
+    ).toBe(`${"z".repeat(159)}…`);
+  });
+
+  it("falls back to a task command only after description and prompt", () => {
+    expect(
+      summarizeOpenCodeToolInput("task", {
+        description: "Review the auth flow",
+        prompt: "Read every file",
+        command: "Continue implementation",
+      }),
+    ).toBe("Review the auth flow");
+    expect(
+      summarizeOpenCodeToolInput("task", {
+        prompt: "Read every file",
+        command: "Continue implementation",
+      }),
+    ).toBe("Read every file");
+    expect(summarizeOpenCodeToolInput("task", { command: "Continue implementation" })).toBe(
+      "Continue implementation",
+    );
+  });
+});
+
+describe("resolveLegacyOpenCodeTodoWritePresentation", () => {
+  it("matches the exact legacy persisted todowrite shape", () => {
+    expect(
+      resolveLegacyOpenCodeTodoWritePresentation({
+        summary: "todowrite",
+        itemType: "file_change",
+        data: {
+          tool: "todowrite",
+          state: {
+            status: "completed",
+            input: { todos: [{ content: "Inspect bar header", status: "in_progress" }] },
+          },
+        },
+      }),
+    ).toEqual({ title: "Update task list", itemType: "dynamic_tool_call" });
+  });
+
+  it("leaves current-server rows, other classifications, and unrelated tools untouched", () => {
+    const todos = { todos: [{ content: "Inspect bar header", status: "pending" }] };
+    expect(
+      resolveLegacyOpenCodeTodoWritePresentation({
+        summary: "Update task list",
+        itemType: "dynamic_tool_call",
+        data: { tool: "todowrite", state: { input: todos } },
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveLegacyOpenCodeTodoWritePresentation({
+        summary: "todowrite",
+        itemType: "dynamic_tool_call",
+        data: { tool: "todowrite", state: { input: todos } },
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveLegacyOpenCodeTodoWritePresentation({
+        summary: "todowrite",
+        itemType: "file_change",
+        data: { tool: "write", state: { input: todos } },
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveLegacyOpenCodeTodoWritePresentation({
+        summary: "todowrite",
+        itemType: "file_change",
+        data: { tool: "todowrite", state: { input: {} } },
+      }),
+    ).toBeUndefined();
   });
 });
