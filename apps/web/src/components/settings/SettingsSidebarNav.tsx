@@ -12,6 +12,7 @@ import {
   BlocksIcon,
   BotIcon,
   GitBranchIcon,
+  EyeOffIcon,
   KeyboardIcon,
   Link2Icon,
   PaletteIcon,
@@ -53,6 +54,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/integrations": BlocksIcon,
   "/settings/source-control": GitBranchIcon,
   "/settings/connections": Link2Icon,
+  "/settings/hidden": EyeOffIcon,
   "/settings/archived": ArchiveIcon,
 };
 

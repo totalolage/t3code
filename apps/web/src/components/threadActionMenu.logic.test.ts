@@ -9,8 +9,15 @@ const baseState: ThreadActionMenuState = {
   isSnoozed: false,
   canSnoozeNow: true,
   isRegeneratingTitle: false,
+  isHidden: false,
   isRunning: false,
-  supports: { settlement: true, snooze: true, pinning: true, titleRegeneration: true },
+  supports: {
+    settlement: true,
+    snooze: true,
+    pinning: true,
+    titleRegeneration: true,
+    hiding: true,
+  },
   snoozePresets: [
     { id: "hour", label: "In 1 hour", whenLabel: "3:00 PM", snoozedUntil: "2026-08-07T15:00:00Z" },
   ],
@@ -31,7 +38,13 @@ describe("buildThreadActionMenuItems", () => {
     expect(
       ids({
         ...baseState,
-        supports: { settlement: false, snooze: false, pinning: false, titleRegeneration: false },
+        supports: {
+          settlement: false,
+          snooze: false,
+          pinning: false,
+          titleRegeneration: false,
+          hiding: false,
+        },
       }),
     ).toEqual(["rename", "mark-unread", "copy", "archive", "delete"]);
   });
@@ -75,7 +88,7 @@ describe("buildThreadActionMenuItems", () => {
     const archiveItem = items.at(-2);
     expect(archiveItem?.id).toBe("archive");
     expect(archiveItem?.icon).toBe("archive");
-    expect(archiveItem?.separatorBefore).toBe(true);
+    expect(archiveItem?.separatorBefore).toBe(false);
     expect(archiveItem?.destructive).toBeFalsy();
     expect(items.at(-1)?.id).toBe("delete");
   });
@@ -84,7 +97,13 @@ describe("buildThreadActionMenuItems", () => {
     expect(
       ids({
         ...baseState,
-        supports: { settlement: false, snooze: false, pinning: false, titleRegeneration: false },
+        supports: {
+          settlement: false,
+          snooze: false,
+          pinning: false,
+          titleRegeneration: false,
+          hiding: false,
+        },
       }),
     ).toContain("archive");
   });
@@ -94,5 +113,18 @@ describe("buildThreadActionMenuItems", () => {
       (item) => item.id === "archive",
     );
     expect(archiveItem?.disabled).toBe(true);
+  });
+
+  it("offers hide while running and flips to unhide for hidden threads", () => {
+    expect(
+      buildThreadActionMenuItems({ ...baseState, isRunning: true }).find(
+        (item) => item.id === "hide",
+      ),
+    ).toMatchObject({ label: "Hide from sidebar" });
+    expect(
+      buildThreadActionMenuItems({ ...baseState, isHidden: true }).find(
+        (item) => item.id === "unhide",
+      ),
+    ).toMatchObject({ label: "Unhide from sidebar" });
   });
 });

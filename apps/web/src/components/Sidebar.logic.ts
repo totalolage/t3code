@@ -46,6 +46,7 @@ type ScopedSidebarThread = ThreadSortInput & {
   environmentId: string;
   projectId: string;
   archivedAt: string | null;
+  hiddenAt?: string | null | undefined;
 };
 
 type LogicalSidebarProject = SidebarProject & {
@@ -911,7 +912,7 @@ export function sortLogicalProjectsForSidebar<
   );
   const threadsByProjectKey = new Map<string, TThread[]>();
   for (const thread of threads) {
-    if (thread.archivedAt !== null) continue;
+    if (thread.archivedAt !== null || thread.hiddenAt != null) continue;
     const projectKey = groupKeyByProjectRef.get(`${thread.environmentId}\0${thread.projectId}`);
     if (!projectKey) continue;
     const existing = threadsByProjectKey.get(projectKey);
@@ -948,7 +949,7 @@ export function sortScopedProjectsForSidebar<
     `${environmentId}\u0000${projectId}`;
   const threadsByProject = new Map<string, TThread[]>();
   for (const thread of threads) {
-    if (thread.archivedAt !== null) {
+    if (thread.archivedAt !== null || thread.hiddenAt != null) {
       continue;
     }
     const key = scopedKey(thread.environmentId, thread.projectId);

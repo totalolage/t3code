@@ -54,7 +54,11 @@ import {
   type HomeGroupDisplayState,
   type HomeListItem,
 } from "../home/homeListItems";
-import { buildHomeProjectScopes, buildHomeThreadGroups } from "../home/homeThreadList";
+import {
+  buildHomeProjectScopes,
+  buildHomeThreadGroups,
+  isThreadVisibleInHomeList,
+} from "../home/homeThreadList";
 import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "../home/thread-swipe-actions";
 import { usePendingTaskListActions } from "../home/usePendingTaskListActions";
 import { useThreadListActions } from "../home/useThreadListActions";
@@ -162,6 +166,7 @@ function ThreadNavigationSidebarPane(
   const sidebarScrollGesture = useMemo(() => Gesture.Native(), []);
   const {
     archiveThread,
+    hideThread,
     confirmDeleteThread,
     settleThread,
     snoozeThread,
@@ -488,6 +493,15 @@ function ThreadNavigationSidebarPane(
     }
     return supported;
   }, [serverConfigs]);
+  const hidingEnvironmentIds = useMemo(() => {
+    const supported = new Set<EnvironmentId>();
+    for (const [environmentId, config] of serverConfigs) {
+      if (config.environment.capabilities.threadHiding === true) {
+        supported.add(environmentId);
+      }
+    }
+    return supported;
+  }, [serverConfigs]);
   // Canonical arranged pinned order for Move up/down flags — computed from
   // all shells so search/scope filtering never disables a valid move.
   const arrangedPinnedKeys = useMemo(() => {
@@ -496,6 +510,7 @@ function ThreadNavigationSidebarPane(
         (thread) =>
           thread.pinnedAt != null &&
           thread.archivedAt === null &&
+          thread.hiddenAt == null &&
           pinReorderEnvironmentIds.has(thread.environmentId),
       ),
     );
@@ -513,7 +528,12 @@ function ThreadNavigationSidebarPane(
         nextSnoozeWakeAt: null,
       };
     return buildThreadListV2Items({
-      threads: threads.filter((thread) => thread.archivedAt === null),
+      threads: threads.filter((thread) =>
+        isThreadVisibleInHomeList(thread, {
+          searchQuery: props.searchQuery,
+          matchedThreadKeys,
+        }),
+      ),
       environmentId: options.selectedEnvironmentId,
       projectRefs: selectedProjectScope === null ? null : selectedProjectScope.projectRefs,
       searchQuery: props.searchQuery,
@@ -924,6 +944,8 @@ function ThreadNavigationSidebarPane(
               onSelectThread={handleSelectThread}
               onDeleteThread={confirmDeleteThread}
               onArchiveThread={archiveThread}
+              onHideThread={hideThread}
+              hidingSupported={hidingEnvironmentIds.has(thread.environmentId)}
               onRegenerateThreadTitle={regenerateThreadTitle}
               titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
               settlementSupported={settlementEnvironmentIds.has(thread.environmentId)}
@@ -1044,6 +1066,8 @@ function ThreadNavigationSidebarPane(
               }
               fullSwipeWidth={props.width - 20}
               onArchiveThread={archiveThread}
+              onHideThread={hideThread}
+              hidingSupported={hidingEnvironmentIds.has(thread.environmentId)}
               onDeleteThread={confirmDeleteThread}
               onRegenerateThreadTitle={regenerateThreadTitle}
               titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
@@ -1075,6 +1099,8 @@ function ThreadNavigationSidebarPane(
       handleSelectThread,
       handleSwipeableClose,
       handleSwipeableWillOpen,
+      hideThread,
+      hidingEnvironmentIds,
       movePinnedThread,
       openPendingTask,
       pinReorderEnvironmentIds,

@@ -805,6 +805,53 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.hide": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const occurredAt = yield* nowIso;
+      const existingHiddenAt = thread.hiddenAt ?? null;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.hidden",
+        payload: {
+          threadId: command.threadId,
+          hiddenAt: existingHiddenAt ?? occurredAt,
+          updatedAt: existingHiddenAt !== null ? thread.updatedAt : occurredAt,
+        },
+      };
+    }
+
+    case "thread.unhide": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const alreadyVisible = thread.hiddenAt == null;
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.unhidden",
+        payload: {
+          threadId: command.threadId,
+          updatedAt: alreadyVisible ? thread.updatedAt : occurredAt,
+        },
+      };
+    }
+
     case "thread.meta.update": {
       const thread = yield* requireThread({
         readModel,

@@ -90,6 +90,7 @@ export function applyThreadDetailEvent(
           createdAt: event.payload.createdAt,
           updatedAt: event.payload.updatedAt,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           unsettledAt: null,
@@ -205,6 +206,26 @@ export function applyThreadDetailEvent(
         thread: {
           ...thread,
           pinOrderKey: event.payload.orderKey,
+          updatedAt: event.payload.updatedAt,
+        },
+      };
+
+    case "thread.hidden":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          hiddenAt: event.payload.hiddenAt,
+          updatedAt: event.payload.updatedAt,
+        },
+      };
+
+    case "thread.unhidden":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          hiddenAt: null,
           updatedAt: event.payload.updatedAt,
         },
       };

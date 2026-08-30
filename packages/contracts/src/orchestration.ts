@@ -436,6 +436,9 @@ export const OrchestrationThread = Schema.Struct({
   // servers never need each other's threads to agree on the merged list.
   // Optional so payloads from pre-reorder servers still decode.
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  // Hidden threads stay live and addressable but do not appear in normal
+  // thread lists. Missing on snapshots from pre-hiding servers.
+  hiddenAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -498,6 +501,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  hiddenAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   session: Schema.NullOr(OrchestrationSession),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
@@ -832,6 +836,18 @@ const ThreadPinReorderCommand = Schema.Struct({
   orderKey: TrimmedNonEmptyString,
 });
 
+const ThreadHideCommand = Schema.Struct({
+  type: Schema.Literal("thread.hide"),
+  commandId: CommandId,
+  threadId: ThreadId,
+});
+
+const ThreadUnhideCommand = Schema.Struct({
+  type: Schema.Literal("thread.unhide"),
+  commandId: CommandId,
+  threadId: ThreadId,
+});
+
 const ThreadMetaUpdateCommand = Schema.Struct({
   type: Schema.Literal("thread.meta.update"),
   commandId: CommandId,
@@ -1002,6 +1018,8 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadPinCommand,
   ThreadUnpinCommand,
   ThreadPinReorderCommand,
+  ThreadHideCommand,
+  ThreadUnhideCommand,
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
@@ -1031,6 +1049,8 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadPinCommand,
   ThreadUnpinCommand,
   ThreadPinReorderCommand,
+  ThreadHideCommand,
+  ThreadUnhideCommand,
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
@@ -1169,6 +1189,8 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.pinned",
   "thread.unpinned",
   "thread.pin-reordered",
+  "thread.hidden",
+  "thread.unhidden",
   "thread.meta-updated",
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
@@ -1300,6 +1322,17 @@ export const ThreadUnpinnedPayload = Schema.Struct({
 export const ThreadPinReorderedPayload = Schema.Struct({
   threadId: ThreadId,
   orderKey: TrimmedNonEmptyString,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadHiddenPayload = Schema.Struct({
+  threadId: ThreadId,
+  hiddenAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadUnhiddenPayload = Schema.Struct({
+  threadId: ThreadId,
   updatedAt: IsoDateTime,
 });
 
@@ -1538,6 +1571,16 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.pin-reordered"),
     payload: ThreadPinReorderedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.hidden"),
+    payload: ThreadHiddenPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.unhidden"),
+    payload: ThreadUnhiddenPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

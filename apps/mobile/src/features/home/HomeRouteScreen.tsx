@@ -40,6 +40,7 @@ export function HomeRouteScreen() {
 
   const {
     archiveThread,
+    hideThread,
     confirmDeleteThread,
     settleThread,
     snoozeThread,
@@ -187,6 +188,7 @@ export function HomeRouteScreen() {
             })
           }
           onArchiveThread={archiveThread}
+          onHideThread={hideThread}
           onDeleteThread={confirmDeleteThread}
           onSettleThread={settleThread}
           onSnoozeThread={snoozeThread}

@@ -22,6 +22,16 @@ If reordering is unavailable for one environment, update the T3 Code server runn
 environment. Older servers can still pin and unpin threads, but do not understand synced ordering;
 their pinned threads keep the default newest-first order below the ones you have arranged.
 
+## Hide a thread from the sidebar
+
+Open a thread's menu and choose **Hide from sidebar** to remove it from your thread lists without
+ending its session or archiving it. The hidden state is stored by the server and applies to your
+other connected devices. You can still open a hidden thread from a direct link or search result.
+
+To restore a hidden thread, open **Settings > Hidden Threads** and choose **Unhide**. Hiding and
+archiving are separate: archive a thread when you are finished with it, and hide it when you only
+want to reduce sidebar clutter.
+
 ## Environment artwork
 
 Dev and Nightly environments can identify themselves with artwork at the top of the sidebar and in

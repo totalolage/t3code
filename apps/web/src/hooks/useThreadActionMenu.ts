@@ -27,6 +27,7 @@ import {
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
   readEnvironmentSupportsTitleRegeneration,
+  readEnvironmentSupportsHiding,
   readThreadShell,
 } from "../state/entities";
 import { readLocalApi } from "../localApi";
@@ -73,6 +74,8 @@ export function useThreadActionMenu(input: {
     pinThread,
     unpinThread,
     archiveThread,
+    hideThread,
+    unhideThread,
     deleteThread,
   } = useThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
@@ -121,6 +124,7 @@ export function useThreadActionMenu(input: {
           snooze: readEnvironmentSupportsSnooze(threadRef.environmentId),
           pinning: readEnvironmentSupportsPinning(threadRef.environmentId),
           titleRegeneration: readEnvironmentSupportsTitleRegeneration(threadRef.environmentId),
+          hiding: readEnvironmentSupportsHiding(threadRef.environmentId),
         };
         const isRegeneratingTitle = thread.titleRegeneration != null;
         const snoozePresets = resolveSnoozePresets(now, timestampFormat);
@@ -141,6 +145,7 @@ export function useThreadActionMenu(input: {
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
+          isHidden: thread.hiddenAt != null,
           isRunning: thread.session?.status === "running" && thread.session.activeTurnId != null,
           supports,
           snoozePresets,
@@ -277,6 +282,12 @@ export function useThreadActionMenu(input: {
             }
             return;
           }
+          case "hide":
+            await reportFailure("Failed to hide thread", () => hideThread(threadRef));
+            return;
+          case "unhide":
+            await reportFailure("Failed to unhide thread", () => unhideThread(threadRef));
+            return;
           case "delete": {
             if (confirmThreadDelete) {
               const confirmed = await settlePromise(() =>
@@ -320,6 +331,7 @@ export function useThreadActionMenu(input: {
       copyThreadIdToClipboard,
       deleteThread,
       handleNewThread,
+      hideThread,
       markThreadUnread,
       onStartRename,
       pinThread,
@@ -329,6 +341,7 @@ export function useThreadActionMenu(input: {
       threadRef,
       timestampFormat,
       unpinThread,
+      unhideThread,
       unsettleThread,
       unsnoozeThread,
       updateThreadMetadata,

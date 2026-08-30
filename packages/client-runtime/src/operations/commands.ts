@@ -42,6 +42,8 @@ export type UnsnoozeThreadInput = CommandInput<"thread.unsnooze">;
 export type PinThreadInput = CommandInput<"thread.pin">;
 export type UnpinThreadInput = CommandInput<"thread.unpin">;
 export type ReorderPinnedThreadInput = CommandInput<"thread.pin.reorder">;
+export type HideThreadInput = CommandInput<"thread.hide">;
+export type UnhideThreadInput = CommandInput<"thread.unhide">;
 export type UpdateThreadMetadataInput = CommandInput<"thread.meta.update">;
 export type SetThreadRuntimeModeInput = CommandInput<"thread.runtime-mode.set">;
 export type SetThreadInteractionModeInput = CommandInput<"thread.interaction-mode.set">;
@@ -156,6 +158,26 @@ export const unarchiveThread: (input: UnarchiveThreadInput) => CommandEffect = E
   return yield* dispatch({
     ...input,
     type: "thread.unarchive",
+    commandId: yield* commandId(input),
+  });
+});
+
+export const hideThread: (input: HideThreadInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.hideThread",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
+    type: "thread.hide",
+    commandId: yield* commandId(input),
+  });
+});
+
+export const unhideThread: (input: UnhideThreadInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.unhideThread",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
+    type: "thread.unhide",
     commandId: yield* commandId(input),
   });
 });

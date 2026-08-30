@@ -29,6 +29,25 @@ import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 
 export type HomeProjectSortOrder = Exclude<SidebarProjectSortOrder, "manual">;
 
+export function isThreadVisibleInHomeList(
+  thread: EnvironmentThreadShell,
+  input: {
+    readonly searchQuery: string;
+    readonly matchedThreadKeys?: ReadonlySet<string>;
+  },
+): boolean {
+  if (thread.archivedAt !== null) return false;
+  if (thread.hiddenAt == null) return true;
+  const query = input.searchQuery.trim().toLocaleLowerCase();
+  if (query.length === 0) return false;
+  return (
+    thread.title.toLocaleLowerCase().includes(query) ||
+    input.matchedThreadKeys?.has(
+      threadSearchMatchKey({ environmentId: thread.environmentId, threadId: thread.id }),
+    ) === true
+  );
+}
+
 export interface HomeProjectScope {
   readonly key: string;
   readonly title: string;
@@ -97,7 +116,7 @@ export function sortHomeProjectScopes(input: {
   };
 
   for (const thread of input.threads) {
-    if (thread.archivedAt !== null) continue;
+    if (thread.archivedAt !== null || thread.hiddenAt != null) continue;
     recordActivity(
       scopeKeyByProjectRef.get(scopedProjectKey(thread.environmentId, thread.projectId)),
       getThreadSortTimestamp(thread, input.projectSortOrder),
@@ -274,7 +293,12 @@ export function buildHomeThreadGroups(input: {
   }
 
   for (const thread of input.threads) {
-    if (thread.archivedAt !== null) {
+    if (
+      !isThreadVisibleInHomeList(thread, {
+        searchQuery: input.searchQuery,
+        matchedThreadKeys: input.matchedThreadKeys,
+      })
+    ) {
       continue;
     }
     if (input.environmentId !== null && thread.environmentId !== input.environmentId) {

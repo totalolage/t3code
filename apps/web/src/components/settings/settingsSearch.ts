@@ -8,6 +8,7 @@ export type SettingsPath =
   | "/settings/integrations"
   | "/settings/source-control"
   | "/settings/connections"
+  | "/settings/hidden"
   | "/settings/archived";
 
 export interface SettingsSearchItem {
@@ -32,6 +33,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/integrations": "Integrations",
   "/settings/source-control": "Source Control",
   "/settings/connections": "Connections",
+  "/settings/hidden": "Hidden threads",
   "/settings/archived": "Archive",
 };
 
@@ -247,6 +249,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "remote-environments",
     title: "Remote environments",
     to: "/settings/connections",
+  },
+  {
+    id: "hidden-threads",
+    title: "Hidden threads",
+    to: "/settings/hidden",
   },
   {
     id: "archive",

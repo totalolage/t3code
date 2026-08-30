@@ -350,6 +350,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly onUnsnoozeThread: (thread: EnvironmentThreadShell) => void;
   readonly onUnsettleThread: (thread: EnvironmentThreadShell) => void;
   readonly onArchiveThread: (thread: EnvironmentThreadShell) => void;
+  readonly onHideThread: (thread: EnvironmentThreadShell) => void;
   readonly onPinThread: (thread: EnvironmentThreadShell) => void;
   readonly onUnpinThread: (thread: EnvironmentThreadShell) => void;
   /** False on environments whose server predates thread.settle/unsettle:
@@ -361,6 +362,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly pinningSupported: boolean;
   /** False on servers that predate thread title regeneration. */
   readonly titleRegenerationSupported: boolean;
+  /** False on servers that predate thread.hide/unhide. */
+  readonly hidingSupported: boolean;
   /** False on servers that predate thread.pin.reorder. Gates the pinned
       Move up / Move down menu items. */
   readonly pinReorderSupported?: boolean;
@@ -396,6 +399,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     onUnsnoozeThread,
     onUnsettleThread,
     onArchiveThread,
+    onHideThread,
     onPinThread,
     onUnpinThread,
     onMovePinnedThread,
@@ -453,6 +457,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     [onMovePinnedThread, thread],
   );
   const handleArchive = useCallback(() => onArchiveThread(thread), [onArchiveThread, thread]);
+  const handleHide = useCallback(() => onHideThread(thread), [onHideThread, thread]);
 
   // Swipe: the v2 primary action is the lifecycle transition. Every settled
   // row can un-settle — explicit settles clear the override, auto-settled
@@ -533,6 +538,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       }),
     [props.titleRegenerationSupported, thread.titleRegeneration],
   );
+  const hideMenuItems = useMemo<MenuAction[]>(
+    () =>
+      props.hidingSupported ? [{ id: "hide", title: "Hide from sidebar", image: "eye.slash" }] : [],
+    [props.hidingSupported],
+  );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
     () => [
       { id: "settle", title: "Settle", image: "checkmark" },
@@ -543,36 +553,49 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         subactions: snoozePresetActions,
       },
       ...pinMenuItem,
+      ...hideMenuItems,
       ...titleRegenerationMenuItems,
       { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
     ],
-    [pinMenuItem, snoozePresetActions, titleRegenerationMenuItems],
+    [hideMenuItems, pinMenuItem, snoozePresetActions, titleRegenerationMenuItems],
   );
   const cardMenuActions = useMemo<MenuAction[]>(
     () => [
       CARD_MENU_ACTIONS[0]!,
       ...pinMenuItem,
+      ...hideMenuItems,
       ...titleRegenerationMenuItems,
       ...CARD_MENU_ACTIONS.slice(1),
     ],
-    [pinMenuItem, titleRegenerationMenuItems],
+    [hideMenuItems, pinMenuItem, titleRegenerationMenuItems],
   );
   const slimMenuActions = useMemo<MenuAction[]>(
     () => [
       SLIM_MENU_ACTIONS[0]!,
       ...(thread.pinnedAt != null ? pinMenuItem : []),
+      ...hideMenuItems,
       ...titleRegenerationMenuItems,
       SLIM_MENU_ACTIONS[1]!,
     ],
-    [pinMenuItem, thread.pinnedAt, titleRegenerationMenuItems],
+    [hideMenuItems, pinMenuItem, thread.pinnedAt, titleRegenerationMenuItems],
   );
   const snoozedMenuActions = useMemo<MenuAction[]>(
-    () => [SNOOZED_MENU_ACTIONS[0]!, ...titleRegenerationMenuItems, SNOOZED_MENU_ACTIONS[1]!],
-    [titleRegenerationMenuItems],
+    () => [
+      SNOOZED_MENU_ACTIONS[0]!,
+      ...hideMenuItems,
+      ...titleRegenerationMenuItems,
+      SNOOZED_MENU_ACTIONS[1]!,
+    ],
+    [hideMenuItems, titleRegenerationMenuItems],
   );
   const legacyMenuActions = useMemo<MenuAction[]>(
-    () => [LEGACY_MENU_ACTIONS[0]!, ...titleRegenerationMenuItems, LEGACY_MENU_ACTIONS[1]!],
-    [titleRegenerationMenuItems],
+    () => [
+      LEGACY_MENU_ACTIONS[0]!,
+      ...hideMenuItems,
+      ...titleRegenerationMenuItems,
+      LEGACY_MENU_ACTIONS[1]!,
+    ],
+    [hideMenuItems, titleRegenerationMenuItems],
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
@@ -584,6 +607,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "move-pin-up") handleMovePinnedUp();
       if (nativeEvent.event === "move-pin-down") handleMovePinnedDown();
       if (nativeEvent.event === "archive") handleArchive();
+      if (nativeEvent.event === "hide") handleHide();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
       if (nativeEvent.event === "delete") handleDelete();
       const snoozeSelection = resolveThreadListV2SnoozeMenuSelection({
@@ -600,6 +624,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     [
       handleArchive,
       handleDelete,
+      handleHide,
       handleRegenerateTitle,
       handleMovePinnedDown,
       handleMovePinnedUp,

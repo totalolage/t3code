@@ -54,6 +54,7 @@ import { SettingsAppearanceRouteScreen } from "./features/settings/SettingsAppea
 import { SettingsClientStorageRouteScreen } from "./features/settings/SettingsClientStorageRouteScreen";
 import { SettingsAuthRouteScreen } from "./features/settings/SettingsAuthRouteScreen";
 import { SettingsEnvironmentsRouteScreen } from "./features/settings/SettingsEnvironmentsRouteScreen";
+import { SettingsHiddenThreadsRouteScreen } from "./features/settings/SettingsHiddenThreadsRouteScreen";
 import { SettingsLegalRouteScreen } from "./features/settings/SettingsLegalRouteScreen";
 import { SettingsProjectGroupingRouteScreen } from "./features/settings/SettingsProjectGroupingRouteScreen";
 import { UsageRouteScreen } from "./features/usage/UsageRouteScreen";
@@ -168,6 +169,13 @@ const SettingsContentStack = createNativeStackNavigator({
       linking: "archive",
       options: {
         title: "Archived Threads",
+      },
+    }),
+    SettingsHiddenThreads: createNativeStackScreen({
+      screen: SettingsHiddenThreadsRouteScreen,
+      linking: "hidden-threads",
+      options: {
+        title: "Hidden Threads",
       },
     }),
     SettingsAppearance: createNativeStackScreen({
