@@ -39,7 +39,7 @@ export function parseAssetCollectionKey(
 export function resolveAssetUrl(
   httpBaseUrl: string,
   relativeUrl: string,
-  queryParameters: ReadonlyArray<RemoteQueryParameter> = [],
+  queryParameters: ReadonlyArray<RemoteQueryParameter>,
 ): string | null {
   try {
     return appendRemoteQueryParameters(

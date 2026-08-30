@@ -150,7 +150,10 @@ describe("attachmentUploadQueue", () => {
     mocks.executeAtomQuery.mockResolvedValue({ _tag: "Success", value: {} });
     mocks.runAtomCommand.mockReset();
     mocks.readPreparedConnection.mockReset();
-    mocks.readPreparedConnection.mockReturnValue({ httpBaseUrl: "https://environment.test/" });
+    mocks.readPreparedConnection.mockReturnValue({
+      httpBaseUrl: "https://environment.test/",
+      queryParameters: [],
+    });
     mocks.runAtomCommand.mockImplementation(
       async (
         _registry: unknown,

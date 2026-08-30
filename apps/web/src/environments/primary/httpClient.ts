@@ -11,7 +11,7 @@ export class PrimaryEnvironmentHttpClient extends Context.Service<
 >()("@t3tools/web/environments/primary/httpClient/PrimaryEnvironmentHttpClient") {}
 
 const make = Effect.suspend(() =>
-  makeEnvironmentHttpApiClient(resolvePrimaryEnvironmentHttpUrl("/")),
+  makeEnvironmentHttpApiClient(resolvePrimaryEnvironmentHttpUrl("/"), []),
 );
 
 export const layer = Layer.effect(PrimaryEnvironmentHttpClient, make);
