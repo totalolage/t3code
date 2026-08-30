@@ -1513,6 +1513,61 @@ describe("deriveWorkLogEntries", () => {
     expect(entry?.detail).toBeUndefined();
   });
 
+  it("replaces legacy OpenCode task output with its persisted input detail", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "legacy-opencode-task",
+        kind: "tool.completed",
+        summary: "task",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          detail:
+            '<task id="ses_example" state="completed"> <task_result>All checks pass.</task_result>',
+          data: {
+            tool: "task",
+            state: {
+              status: "completed",
+              input: {
+                description: "Review the auth flow",
+                prompt: "Read every file and report findings",
+              },
+            },
+          },
+        },
+      }),
+    ]);
+
+    expect(entry).toMatchObject({
+      label: "task",
+      detail: "Review the auth flow",
+      itemType: "collab_agent_tool_call",
+    });
+  });
+
+  it("drops legacy OpenCode task output when no persisted input detail exists", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "legacy-opencode-task-without-input",
+        kind: "tool.completed",
+        summary: "task",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          detail: "<task_result>raw subagent transcript</task_result>",
+          data: {
+            tool: "task",
+            state: {
+              status: "completed",
+              input: {},
+              output: "<task_result>raw subagent transcript</task_result>",
+            },
+          },
+        },
+      }),
+    ]);
+
+    expect(entry?.detail).toBeUndefined();
+  });
+
   it("uses grep raw output summaries instead of repeating the generic tool label", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

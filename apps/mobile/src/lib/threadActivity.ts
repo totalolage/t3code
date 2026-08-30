@@ -13,6 +13,7 @@ import type {
   UserInputQuestion,
 } from "@t3tools/contracts";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
+import { resolveLegacyOpenCodeToolDetail } from "@t3tools/shared/toolActivity";
 
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
@@ -422,7 +423,11 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     typeof payload.detail === "string" &&
     payload.detail.length > 0
   ) {
-    const detail = stripTrailingExitCode(payload.detail).output;
+    const compatibleDetail = resolveLegacyOpenCodeToolDetail({
+      detail: payload.detail,
+      data: payload.data,
+    });
+    const detail = compatibleDetail ? stripTrailingExitCode(compatibleDetail).output : null;
     if (detail) {
       entry.detail = detail;
     }

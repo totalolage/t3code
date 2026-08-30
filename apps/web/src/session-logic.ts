@@ -16,6 +16,7 @@ import {
   type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
+import { resolveLegacyOpenCodeToolDetail } from "@t3tools/shared/toolActivity";
 
 import type {
   ChatMessage,
@@ -1652,7 +1653,10 @@ function extractToolDetail(
   payload: Record<string, unknown> | null,
   heading: string,
 ): string | null {
-  const rawDetail = asTrimmedString(payload?.detail);
+  const rawDetail = resolveLegacyOpenCodeToolDetail({
+    detail: asTrimmedString(payload?.detail),
+    data: payload?.data,
+  });
   const detail = rawDetail ? stripTrailingExitCode(rawDetail).output : null;
   const normalizedHeading = normalizePreviewForComparison(heading);
   const normalizedDetail = normalizePreviewForComparison(detail);

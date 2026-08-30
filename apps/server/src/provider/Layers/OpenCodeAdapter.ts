@@ -29,6 +29,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import type { OpencodeClient, Part, PermissionRequest, QuestionRequest } from "@opencode-ai/sdk/v2";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { summarizeToolActivityInput } from "@t3tools/shared/toolActivity";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -603,16 +604,32 @@ function messageRoleForPart(
   return part.type === "tool" ? "assistant" : undefined;
 }
 
-function detailFromToolPart(part: Extract<Part, { type: "tool" }>): string | undefined {
-  switch (part.state.status) {
-    case "completed":
-      return part.state.output;
-    case "error":
-      return part.state.error;
-    case "running":
-      return part.state.title;
+/**
+ * Title family for a live tool row. Covers the tools whose rows previously
+ * leaked raw native output (`<path>…`, `<skill_content>…`, `<task_result>…`)
+ * as their detail; unknown tools keep the native tool name.
+ */
+function toolTitleFamily(toolName: string): string {
+  switch (toolName.toLowerCase()) {
+    case "read":
+      return "Read File";
+    case "skill":
+      return "Skill";
+    case "task":
+      return "Subagent task";
     default:
-      return undefined;
+      return toolName;
+  }
+}
+
+function hidesCompletedToolOutput(toolName: string): boolean {
+  switch (toolName.toLowerCase()) {
+    case "read":
+    case "skill":
+    case "task":
+      return true;
+    default:
+      return false;
   }
 }
 
@@ -2023,9 +2040,24 @@ export function makeOpenCodeAdapter(
 
           if (part.type === "tool") {
             const itemType = toToolLifecycleItemType(part.tool);
+            const familyTitle = toolTitleFamily(part.tool);
+            const nativeRunningTitle =
+              part.state.status === "running" ? trimText(part.state.title) : undefined;
             const title =
-              part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool;
-            const detail = detailFromToolPart(part);
+              familyTitle === part.tool ? (nativeRunningTitle ?? part.tool) : familyTitle;
+            const detail = (() => {
+              if (part.state.status === "error") {
+                return part.state.error;
+              }
+              const inputDetail = summarizeToolActivityInput(part.state.input);
+              if (part.state.status !== "completed") {
+                return inputDetail ?? nativeRunningTitle;
+              }
+              return (
+                inputDetail ??
+                (hidesCompletedToolOutput(part.tool) ? undefined : trimText(part.state.output))
+              );
+            })();
             const payload = {
               itemType,
               ...(part.state.status === "error"
