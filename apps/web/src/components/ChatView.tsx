@@ -2554,7 +2554,11 @@ function ChatViewContent(props: ChatViewProps) {
         return;
       }
 
-      const url = resolveAssetUrl(connection.httpBaseUrl, result.value.relativeUrl);
+      const url = resolveAssetUrl(
+        connection.httpBaseUrl,
+        result.value.relativeUrl,
+        connection.queryParameters,
+      );
       if (!url) {
         toastManager.add({ type: "error", title: `Could not download ${attachment.name}` });
         return;

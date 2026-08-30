@@ -4,7 +4,7 @@ import { appendRemoteQueryParameters, type RemoteQueryParameter } from "@t3tools
 export const environmentEndpointUrl = (
   httpBaseUrl: string,
   pathname: string,
-  queryParameters: ReadonlyArray<RemoteQueryParameter> = [],
+  queryParameters: ReadonlyArray<RemoteQueryParameter>,
 ): string => {
   const url = new URL(httpBaseUrl);
   url.pathname = pathname;

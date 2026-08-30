@@ -174,7 +174,7 @@ export const make = Effect.gen(function* () {
       const ticketProof = yield* signer
         .createProof({
           method: "POST",
-          url: environmentEndpointUrl(token.endpoint.httpBaseUrl, "/api/auth/websocket-ticket"),
+          url: environmentEndpointUrl(token.endpoint.httpBaseUrl, "/api/auth/websocket-ticket", []),
           accessToken: token.accessToken,
         })
         .pipe(
@@ -271,7 +271,7 @@ export const make = Effect.gen(function* () {
       const bootstrapProof = yield* signer
         .createProof({
           method: "POST",
-          url: environmentEndpointUrl(bootstrap.endpoint.httpBaseUrl, "/oauth/token"),
+          url: environmentEndpointUrl(bootstrap.endpoint.httpBaseUrl, "/oauth/token", []),
         })
         .pipe(
           Effect.mapError(

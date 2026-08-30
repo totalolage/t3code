@@ -296,7 +296,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const relayIssuer = normalizeRelayIssuer(settings.relayIssuer);
   const makeEnvironmentClient = (httpBaseUrl: string) =>
-    makeEnvironmentHttpApiClient(httpBaseUrl).pipe(
+    makeEnvironmentHttpApiClient(httpBaseUrl, []).pipe(
       Effect.provideService(HttpClient.HttpClient, httpClient),
     );
   const resolveManagedEndpoint = Effect.fn("relay.environment_connector.resolve_managed_endpoint")(

@@ -290,7 +290,7 @@ export function readPrimaryCloudLinkState(input: {
   readonly target: CloudLinkTarget;
 }): Effect.Effect<CloudLinkState | null, CloudEnvironmentLinkError, HttpClient.HttpClient> {
   return Effect.gen(function* () {
-    const client = yield* makeEnvironmentHttpApiClient(input.target.httpBaseUrl);
+    const client = yield* makeEnvironmentHttpApiClient(input.target.httpBaseUrl, []);
     return yield* client.connect
       .linkState({ headers: {} })
       .pipe(Effect.mapError(environmentApiError("Could not read environment cloud link state.")));
@@ -302,7 +302,7 @@ export function updatePrimaryCloudPreferences(input: {
   readonly publishAgentActivity: boolean;
 }): Effect.Effect<CloudLinkState, CloudEnvironmentLinkError, HttpClient.HttpClient> {
   return Effect.gen(function* () {
-    const client = yield* makeEnvironmentHttpApiClient(input.target.httpBaseUrl);
+    const client = yield* makeEnvironmentHttpApiClient(input.target.httpBaseUrl, []);
     return yield* client.connect
       .preferences({
         headers: {},
@@ -323,7 +323,7 @@ export function unlinkPrimaryEnvironmentFromCloud(input: {
   HttpClient.HttpClient | ManagedRelay.ManagedRelayClient
 > {
   return Effect.gen(function* () {
-    const client = yield* makeEnvironmentHttpApiClient(input.target.httpBaseUrl);
+    const client = yield* makeEnvironmentHttpApiClient(input.target.httpBaseUrl, []);
     yield* client.connect
       .unlink({ headers: {} })
       .pipe(Effect.mapError(environmentApiError("Could not unlink the environment from cloud.")));
@@ -375,7 +375,7 @@ export function linkPrimaryEnvironmentToCloud(input: {
       ? MANAGED_ENDPOINT_PROVIDER_KIND
       : PUBLISH_ONLY_PROVIDER_KIND;
     const relayClient = yield* ManagedRelay.ManagedRelayClient;
-    const environmentClient = yield* makeEnvironmentHttpApiClient(input.target.httpBaseUrl);
+    const environmentClient = yield* makeEnvironmentHttpApiClient(input.target.httpBaseUrl, []);
     if (managedTunnelsEnabled) {
       yield* ensureRelayClientAvailable(EnvironmentId.make(input.target.environmentId));
     }

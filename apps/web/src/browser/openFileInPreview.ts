@@ -57,7 +57,7 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly filePath: string;
   readonly httpBaseUrl: string;
-  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
+  readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
   readonly createAssetUrl: (input: {
     readonly environmentId: EnvironmentId;
     readonly input: { readonly resource: AssetResource };

@@ -116,7 +116,7 @@ const redactRequestUrl = (requestUrl: string): string => {
 
 export const makeEnvironmentHttpApiClient = (
   httpBaseUrl: string,
-  queryParameters: ReadonlyArray<RemoteQueryParameter> = [],
+  queryParameters: ReadonlyArray<RemoteQueryParameter>,
 ) =>
   HttpApiClient.make(EnvironmentHttpApi, {
     baseUrl: remoteApiBaseUrl(httpBaseUrl),
