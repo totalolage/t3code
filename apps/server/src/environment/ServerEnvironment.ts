@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   ORCHESTRATION_CLI_API_VERSION,
+  PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   type ExecutionEnvironmentDescriptor,
 } from "@t3tools/contracts";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -151,9 +152,11 @@ export const make = Effect.gen(function* () {
       repositoryIdentity: true,
       connectionProbe: true,
       attachmentUploads: true,
+      fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },
       pullRequests: true,
       threadSettlement: true,
       threadSnooze: true,
+      environmentThemes: true,
       threadPinning: true,
       threadPinReorder: true,
       threadHiding: true,

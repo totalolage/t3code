@@ -324,6 +324,38 @@ describe("buildThreadFeed", () => {
     ]);
   });
 
+  it("drops runtime warnings with no displayable content", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-noise"),
+      projectId: ProjectId.make("project-1"),
+      title: "Warning noise thread",
+      activities: [
+        makeActivity({
+          id: EventId.make("activity-noise"),
+          kind: "runtime.warning",
+          summary: "Claude system message 'background_tasks_changed' (no displayable text content)",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          turnId: TurnId.make("turn-1"),
+        }),
+        makeActivity({
+          id: EventId.make("activity-signal"),
+          kind: "runtime.warning",
+          summary: "Reconnecting... 2/5",
+          createdAt: "2026-04-01T00:00:03.000Z",
+          turnId: TurnId.make("turn-1"),
+        }),
+      ],
+    });
+
+    const feed = buildThreadFeed(thread);
+    expect(feed).toMatchObject([
+      {
+        type: "activity-group",
+        activities: [{ id: "activity-signal" }],
+      },
+    ]);
+  });
+
   it("collapses matching tool lifecycle rows like desktop", () => {
     const thread = makeThread({
       id: ThreadId.make("thread-2"),
@@ -443,6 +475,90 @@ describe("buildThreadFeed", () => {
     expect(group.activities[0]?.icon).toBe("wrench");
     expect(group.activities[0]?.getFullDetail()).toContain('"query": "work log"');
     expect(group.activities[0]?.getFullDetail()).toContain("repository.search");
+  });
+
+  it("replaces legacy OpenCode task output with its persisted input detail", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-legacy-opencode-task"),
+      projectId: ProjectId.make("project-1"),
+      title: "Legacy OpenCode task",
+      activities: [
+        makeActivity({
+          id: EventId.make("legacy-opencode-task"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "task",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: {
+            itemType: "collab_agent_tool_call",
+            detail:
+              '<task id="ses_example" state="completed"> <task_result>All checks pass.</task_result>',
+            data: {
+              tool: "task",
+              state: {
+                status: "completed",
+                input: {
+                  description: "Review the auth flow",
+                  prompt: "Read every file and report findings",
+                },
+              },
+            },
+          },
+        }),
+      ],
+    });
+
+    const group = buildThreadFeed(thread)[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (!group || group.type !== "activity-group") {
+      return;
+    }
+    expect(group.activities[0]).toMatchObject({
+      summary: "Task",
+      detail: "Review the auth flow",
+      icon: "hammer",
+      status: "success",
+    });
+  });
+
+  it("drops legacy OpenCode task output when no persisted input detail exists", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-legacy-opencode-task-without-input"),
+      projectId: ProjectId.make("project-1"),
+      title: "Legacy OpenCode task without input",
+      activities: [
+        makeActivity({
+          id: EventId.make("legacy-opencode-task-without-input"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "task",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: {
+            itemType: "collab_agent_tool_call",
+            detail: "<task_result>raw subagent transcript</task_result>",
+            data: {
+              tool: "task",
+              state: {
+                status: "completed",
+                input: {},
+                output: "<task_result>raw subagent transcript</task_result>",
+              },
+            },
+          },
+        }),
+      ],
+    });
+
+    const group = buildThreadFeed(thread)[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (!group || group.type !== "activity-group") {
+      return;
+    }
+    expect(group.activities[0]).toMatchObject({
+      summary: "Task",
+      detail: null,
+      canExpand: false,
+    });
   });
 
   it("defers large tool output expansion until a work row is opened or copied", () => {

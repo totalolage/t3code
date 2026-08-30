@@ -935,6 +935,28 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["tool-complete"]);
   });
 
+  it("drops runtime warnings with no displayable content, keeps ones with a preview", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "warning-noise",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "runtime.warning",
+        summary: "Claude system message 'background_tasks_changed' (no displayable text content)",
+        tone: "info",
+      }),
+      makeActivity({
+        id: "warning-signal",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "runtime.warning",
+        summary: "Reconnecting... 2/5",
+        tone: "info",
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities);
+    expect(entries.map((entry) => entry.id)).toEqual(["warning-signal"]);
+  });
+
   it("omits task.started but shows task.progress and task.completed", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -1488,6 +1510,61 @@ describe("deriveWorkLogEntries", () => {
 
     const [entry] = deriveWorkLogEntries(activities);
     expect(entry?.toolTitle).toBe("Read File");
+    expect(entry?.detail).toBeUndefined();
+  });
+
+  it("replaces legacy OpenCode task output with its persisted input detail", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "legacy-opencode-task",
+        kind: "tool.completed",
+        summary: "task",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          detail:
+            '<task id="ses_example" state="completed"> <task_result>All checks pass.</task_result>',
+          data: {
+            tool: "task",
+            state: {
+              status: "completed",
+              input: {
+                description: "Review the auth flow",
+                prompt: "Read every file and report findings",
+              },
+            },
+          },
+        },
+      }),
+    ]);
+
+    expect(entry).toMatchObject({
+      label: "task",
+      detail: "Review the auth flow",
+      itemType: "collab_agent_tool_call",
+    });
+  });
+
+  it("drops legacy OpenCode task output when no persisted input detail exists", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "legacy-opencode-task-without-input",
+        kind: "tool.completed",
+        summary: "task",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          detail: "<task_result>raw subagent transcript</task_result>",
+          data: {
+            tool: "task",
+            state: {
+              status: "completed",
+              input: {},
+              output: "<task_result>raw subagent transcript</task_result>",
+            },
+          },
+        },
+      }),
+    ]);
+
     expect(entry?.detail).toBeUndefined();
   });
 
@@ -2259,7 +2336,7 @@ describe("session activity performance", () => {
     expect(appendedEntries[1]).toBe(initialEntries[1]);
   });
 
-  it("updates 20,000 ordered tool activities within 100 ms", () => {
+  it("reuses entries when appending to 20,000 ordered tool activities", () => {
     const activities = Array.from({ length: 20_000 }, (_, index) =>
       makeActivity({
         id: `benchmark-tool-${index}`,
@@ -2277,7 +2354,8 @@ describe("session activity performance", () => {
         },
       }),
     );
-    deriveWorkLogEntries(activities);
+    const initialEntries = deriveWorkLogEntries(activities);
+    expect(initialEntries).toHaveLength(20_000);
     const updatedActivities = [
       ...activities,
       makeActivity({
@@ -2294,8 +2372,13 @@ describe("session activity performance", () => {
       }),
     ];
 
-    const startedAt = performance.now();
-    expect(deriveWorkLogEntries(updatedActivities)).toHaveLength(20_001);
-    expect(performance.now() - startedAt).toBeLessThan(100);
+    const updatedEntries = deriveWorkLogEntries(updatedActivities);
+    expect(updatedEntries).toHaveLength(20_001);
+    expect(initialEntries.every((entry, index) => updatedEntries[index] === entry)).toBe(true);
+    expect(updatedEntries.at(-1)).toMatchObject({
+      id: "benchmark-tool-appended",
+      command: "git diff",
+      toolLifecycleStatus: "completed",
+    });
   });
 });

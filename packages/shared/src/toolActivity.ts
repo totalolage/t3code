@@ -259,3 +259,82 @@ export function deriveToolActivityPresentation(
     summary: title ?? fallbackSummary,
   };
 }
+
+/**
+ * Markup families that identify a legacy OpenCode completed-output detail,
+ * keyed by the lowercased `data.tool`. Kept narrow on purpose: anything else
+ * is left untouched.
+ */
+const LEGACY_OPENCODE_DETAIL_MARKUP: Readonly<Record<string, readonly string[]>> = {
+  read: ["<path", "<skill_content"],
+  skill: ["<skill_content"],
+  task: ["<task"],
+};
+
+// Priority-ordered input fields a derived detail can summarize. The first
+// present string field wins.
+const TOOL_DETAIL_INPUT_KEYS = [
+  "command",
+  "filePath",
+  "path",
+  "pattern",
+  "query",
+  "url",
+  "name",
+  "description",
+  "prompt",
+] as const;
+
+const TOOL_DETAIL_MAX_LENGTH = 160;
+
+export function summarizeToolActivityInput(
+  input: Record<string, unknown> | undefined,
+): string | undefined {
+  for (const key of TOOL_DETAIL_INPUT_KEYS) {
+    const value = input?.[key];
+    if (typeof value !== "string") {
+      continue;
+    }
+    const normalized = value.replace(/\s+/gu, " ").trim();
+    if (!normalized) {
+      continue;
+    }
+    return normalized.length > TOOL_DETAIL_MAX_LENGTH
+      ? `${normalized.slice(0, TOOL_DETAIL_MAX_LENGTH - 1)}…`
+      : normalized;
+  }
+  return undefined;
+}
+
+/**
+ * Compatibility detail for a tool activity item, safe to run over stored
+ * items in web and mobile. Returns the trimmed detail as-is unless it is a
+ * legacy OpenCode read/skill/task row whose detail leaked raw native output
+ * (`<path>…`, `<skill_content>…`, `<task_result>…`); those are rewritten to
+ * the concise input-derived detail the server now emits, derived from
+ * `data.state.input`, or undefined when no useful input exists.
+ */
+export function resolveLegacyOpenCodeToolDetail(input: {
+  readonly detail?: string | null | undefined;
+  readonly data?: unknown;
+}): string | undefined {
+  const detail = asTrimmedString(input.detail);
+  const data = asRecord(input.data);
+  // OpenCode stores its native tool name at `data.tool`; other adapters use
+  // different payload keys, so they bypass this compatibility path.
+  const tool = asTrimmedString(data?.tool)?.toLowerCase();
+  const markupPrefixes =
+    tool !== undefined && Object.hasOwn(LEGACY_OPENCODE_DETAIL_MARKUP, tool)
+      ? LEGACY_OPENCODE_DETAIL_MARKUP[tool]
+      : undefined;
+  const normalizedDetail = detail?.toLowerCase();
+  if (
+    !markupPrefixes ||
+    !detail ||
+    !normalizedDetail ||
+    !markupPrefixes.some((prefix) => normalizedDetail.startsWith(prefix))
+  ) {
+    return detail;
+  }
+  return summarizeToolActivityInput(asRecord(asRecord(data?.state)?.input));
+}
