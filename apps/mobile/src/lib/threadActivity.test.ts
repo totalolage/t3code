@@ -561,6 +561,93 @@ describe("buildThreadFeed", () => {
     });
   });
 
+  it("replaces legacy OpenCode todowrite JSON with the active task", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-legacy-opencode-todowrite"),
+      projectId: ProjectId.make("project-1"),
+      title: "Legacy OpenCode task list",
+      activities: [
+        makeActivity({
+          id: EventId.make("legacy-opencode-todowrite"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "todowrite",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: {
+            // Legacy servers classified todowrite as a file change and titled
+            // the row with the raw tool name.
+            itemType: "file_change",
+            title: "todowrite",
+            detail:
+              '[{"content":"Inspect bar header implementation","status":"in_progress","priority":"high"}]',
+            data: {
+              tool: "todowrite",
+              state: {
+                status: "completed",
+                input: {
+                  todos: [
+                    {
+                      content: "Inspect bar header implementation",
+                      status: "in_progress",
+                      priority: "high",
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+      ],
+    });
+
+    const group = buildThreadFeed(thread)[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (!group || group.type !== "activity-group") {
+      return;
+    }
+    expect(group.activities[0]).toMatchObject({
+      summary: "Update task list",
+      detail: "Inspect bar header implementation",
+      icon: "hammer",
+      status: "success",
+    });
+  });
+
+  it("does not treat a subagent command hint as a shell command", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-opencode-task-command-hint"),
+      projectId: ProjectId.make("project-1"),
+      title: "OpenCode task command hint",
+      activities: [
+        makeActivity({
+          id: EventId.make("opencode-task-command-hint"),
+          kind: "tool.updated",
+          tone: "tool",
+          summary: "Subagent task",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: {
+            itemType: "collab_agent_tool_call",
+            status: "inProgress",
+            detail: "Continue implementation of server-synced Hide from sidebar",
+            data: { command: "Continue implementation of server-synced Hide from sidebar" },
+          },
+        }),
+      ],
+    });
+
+    const group = buildThreadFeed(thread)[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (!group || group.type !== "activity-group") {
+      return;
+    }
+    expect(group.activities[0]).toMatchObject({
+      summary: "Subagent task",
+      detail: "Continue implementation of server-synced Hide from sidebar",
+      icon: "hammer",
+      status: "neutral",
+    });
+  });
+
   it("defers large tool output expansion until a work row is opened or copied", () => {
     let serializedToolOutputs = 0;
     const activities = Array.from({ length: 5_000 }, (_, index) =>

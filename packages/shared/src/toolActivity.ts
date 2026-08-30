@@ -269,6 +269,7 @@ const LEGACY_OPENCODE_DETAIL_MARKUP: Readonly<Record<string, readonly string[]>>
   read: ["<path", "<skill_content"],
   skill: ["<skill_content"],
   task: ["<task"],
+  todowrite: ["["],
 };
 
 // Priority-ordered input fields a derived detail can summarize. The first
@@ -285,34 +286,65 @@ const TOOL_DETAIL_INPUT_KEYS = [
   "prompt",
 ] as const;
 
+const TASK_DETAIL_INPUT_KEYS = ["description", "prompt", "command"] as const;
+
 const TOOL_DETAIL_MAX_LENGTH = 160;
 
-export function summarizeToolActivityInput(
+function normalizeToolActivityDetail(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  if (!normalized) {
+    return undefined;
+  }
+  return normalized.length > TOOL_DETAIL_MAX_LENGTH
+    ? `${normalized.slice(0, TOOL_DETAIL_MAX_LENGTH - 1)}…`
+    : normalized;
+}
+
+function summarizeTodoInput(input: Record<string, unknown> | undefined): string | undefined {
+  const todos = input?.todos;
+  if (!Array.isArray(todos)) {
+    return undefined;
+  }
+  const records = todos.flatMap((todo) => {
+    const record = asRecord(todo);
+    return record ? [record] : [];
+  });
+  const selected =
+    records.find((todo) => todo.status === "in_progress" || todo.status === "inProgress") ??
+    records.find((todo) => todo.status === "pending") ??
+    records.findLast((todo) => todo.status === "completed") ??
+    records[0];
+  return (
+    normalizeToolActivityDetail(selected?.activeForm) ??
+    normalizeToolActivityDetail(selected?.content)
+  );
+}
+
+export function summarizeOpenCodeToolInput(
+  toolName: string,
   input: Record<string, unknown> | undefined,
 ): string | undefined {
-  for (const key of TOOL_DETAIL_INPUT_KEYS) {
-    const value = input?.[key];
-    if (typeof value !== "string") {
-      continue;
+  const inputKeys =
+    toolName.toLowerCase() === "task" ? TASK_DETAIL_INPUT_KEYS : TOOL_DETAIL_INPUT_KEYS;
+  for (const key of inputKeys) {
+    const detail = normalizeToolActivityDetail(input?.[key]);
+    if (detail) {
+      return detail;
     }
-    const normalized = value.replace(/\s+/gu, " ").trim();
-    if (!normalized) {
-      continue;
-    }
-    return normalized.length > TOOL_DETAIL_MAX_LENGTH
-      ? `${normalized.slice(0, TOOL_DETAIL_MAX_LENGTH - 1)}…`
-      : normalized;
   }
-  return undefined;
+  return summarizeTodoInput(input);
 }
 
 /**
  * Compatibility detail for a tool activity item, safe to run over stored
  * items in web and mobile. Returns the trimmed detail as-is unless it is a
- * legacy OpenCode read/skill/task row whose detail leaked raw native output
- * (`<path>…`, `<skill_content>…`, `<task_result>…`); those are rewritten to
- * the concise input-derived detail the server now emits, derived from
- * `data.state.input`, or undefined when no useful input exists.
+ * legacy OpenCode read/skill/task/todowrite row whose detail leaked raw native
+ * output (`<path>…`, `<skill_content>…`, `<task_result>…`, todo JSON); those
+ * are rewritten to the concise input-derived detail the server now emits,
+ * derived from `data.state.input`, or undefined when no useful input exists.
  */
 export function resolveLegacyOpenCodeToolDetail(input: {
   readonly detail?: string | null | undefined;
@@ -328,13 +360,50 @@ export function resolveLegacyOpenCodeToolDetail(input: {
       ? LEGACY_OPENCODE_DETAIL_MARKUP[tool]
       : undefined;
   const normalizedDetail = detail?.toLowerCase();
+  const stateInput = asRecord(asRecord(data?.state)?.input);
   if (
+    !tool ||
     !markupPrefixes ||
     !detail ||
     !normalizedDetail ||
-    !markupPrefixes.some((prefix) => normalizedDetail.startsWith(prefix))
+    !markupPrefixes.some((prefix) => normalizedDetail.startsWith(prefix)) ||
+    (tool === "todowrite" && !Array.isArray(stateInput?.todos))
   ) {
     return detail;
   }
-  return summarizeToolActivityInput(asRecord(asRecord(data?.state)?.input));
+  return summarizeOpenCodeToolInput(tool, stateInput);
+}
+
+export interface LegacyOpenCodeTodoWritePresentation {
+  readonly title: "Update task list";
+  readonly itemType: "dynamic_tool_call";
+}
+
+/**
+ * Presentation override for the legacy persisted OpenCode TodoWrite row. Old
+ * servers classified `todowrite` as a file change (the tool name contains
+ * "write"), kept the raw tool name as summary and title, and leaked the full
+ * todo JSON as the detail. Matches that exact persisted shape only — rows
+ * from current servers are already dynamic tool calls and never match — so
+ * the wire projection and the clients agree on when to repair it.
+ */
+export function resolveLegacyOpenCodeTodoWritePresentation(input: {
+  readonly summary?: string | null | undefined;
+  readonly itemType?: unknown;
+  readonly data?: unknown;
+}): LegacyOpenCodeTodoWritePresentation | undefined {
+  if (input.itemType !== "file_change") {
+    return undefined;
+  }
+  if (asTrimmedString(input.summary)?.toLowerCase() !== "todowrite") {
+    return undefined;
+  }
+  const data = asRecord(input.data);
+  if (asTrimmedString(data?.tool)?.toLowerCase() !== "todowrite") {
+    return undefined;
+  }
+  if (!Array.isArray(asRecord(asRecord(data?.state)?.input)?.todos)) {
+    return undefined;
+  }
+  return { title: "Update task list", itemType: "dynamic_tool_call" };
 }

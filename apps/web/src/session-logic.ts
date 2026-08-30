@@ -16,7 +16,10 @@ import {
   type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
-import { resolveLegacyOpenCodeToolDetail } from "@t3tools/shared/toolActivity";
+import {
+  resolveLegacyOpenCodeToolDetail,
+  resolveLegacyOpenCodeTodoWritePresentation,
+} from "@t3tools/shared/toolActivity";
 
 import type {
   ChatMessage,
@@ -947,9 +950,17 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     activity.payload && typeof activity.payload === "object"
       ? (activity.payload as Record<string, unknown>)
       : null;
+  // Legacy OpenCode TodoWrite rows arrive from old servers as file changes
+  // titled with the raw tool name; present them with the dynamic-tool
+  // semantics current servers emit.
+  const legacyTodoWrite = resolveLegacyOpenCodeTodoWritePresentation({
+    summary: activity.summary,
+    itemType: payload?.itemType,
+    data: payload?.data,
+  });
   const commandPreview = extractToolCommand(payload);
   const changedFiles = extractChangedFiles(payload);
-  const title = extractToolTitle(payload);
+  const title = legacyTodoWrite ? legacyTodoWrite.title : extractToolTitle(payload);
   const isTaskActivity =
     activity.kind === "task.started" ||
     activity.kind === "task.progress" ||
@@ -979,7 +990,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     id: activity.id,
     createdAt: activity.createdAt,
     turnId: activity.turnId,
-    label: taskLabel || activity.summary,
+    label: legacyTodoWrite ? legacyTodoWrite.title : taskLabel || activity.summary,
     tone:
       activity.kind === "task.progress"
         ? "thinking"
@@ -988,7 +999,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
           : activity.tone,
     sourceActivityKind: activity.kind,
   };
-  const itemType = extractWorkLogItemType(payload);
+  const itemType = legacyTodoWrite?.itemType ?? extractWorkLogItemType(payload);
   const requestKind = extractWorkLogRequestKind(payload);
   if (detail) {
     entry.detail = detail;
@@ -1474,7 +1485,10 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
   const item = asRecord(data?.item);
   const itemResult = asRecord(item?.result);
   const itemInput = asRecord(item?.input);
-  const itemType = asTrimmedString(payload?.itemType);
+  const itemType = extractWorkLogItemType(payload);
+  if (itemType === "collab_agent_tool_call") {
+    return { command: null, rawCommand: null };
+  }
   const detail = asTrimmedString(payload?.detail);
   const candidates: unknown[] = [
     item?.command,
