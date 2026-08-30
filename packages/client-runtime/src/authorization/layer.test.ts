@@ -6,6 +6,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
 
+import { DPOP_UNKNOWN_HINT } from "../relay/errorPresentation.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
 import { remoteHttpClientLayer } from "../rpc/http.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
@@ -175,6 +176,7 @@ describe("RemoteEnvironmentAuthorization", () => {
             wsBaseUrl: ENDPOINT.wsBaseUrl,
             bearerToken: "bearer-token",
             queryParameters: [],
+            connectionMethod: "direct",
           });
         return [yield* authorize(), yield* authorize()] as const;
       }).pipe(Effect.provide(harness.layer));
@@ -213,6 +215,7 @@ describe("RemoteEnvironmentAuthorization", () => {
             wsBaseUrl: ENDPOINT.wsBaseUrl,
             bearerToken: "bearer-token",
             queryParameters: [],
+            connectionMethod: "direct",
           });
 
         yield* authorize();
@@ -257,6 +260,7 @@ describe("RemoteEnvironmentAuthorization", () => {
       }).pipe(Effect.provide(harness.layer));
 
       expect(authorized.socketUrl).toContain("wsTicket=cached-ticket");
+      expect(authorized.socketUrl).toContain("connectionMethod=relay");
       expect(yield* Ref.get(harness.bootstrapCalls)).toBe(0);
       expect(harness.fetch.calls).toHaveLength(1);
       expect(String(harness.fetch.calls[0]?.[0])).toBe(
@@ -340,6 +344,29 @@ describe("RemoteEnvironmentAuthorization", () => {
         }),
       );
       expect(harness.fetch.calls).toHaveLength(4);
+    }),
+  );
+
+  it.effect("presents clock skew as one possible cause for a generic DPoP rejection", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        responses: [Response.json(DESCRIPTOR), authInvalid()],
+      });
+
+      const failure = yield* Effect.gen(function* () {
+        const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+        return yield* remote.authorizeDpop({
+          expectedEnvironmentId: ENVIRONMENT_ID,
+          obtainBootstrap: harness.obtainBootstrap,
+        });
+      }).pipe(Effect.provide(harness.layer), Effect.flip);
+
+      expect(failure).toMatchObject({
+        _tag: "ConnectionBlockedError",
+        reason: "authentication",
+        detail: `The environment credential is invalid. ${DPOP_UNKNOWN_HINT}`,
+        traceId: "trace-auth-invalid",
+      });
     }),
   );
 

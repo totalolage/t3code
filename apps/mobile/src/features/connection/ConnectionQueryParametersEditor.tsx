@@ -3,7 +3,7 @@ import { Pressable, View } from "react-native";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
-import { useThemeColor } from "../../lib/useThemeColor";
+import { useUniwindTheme } from "../../lib/useUniwindTheme";
 
 export interface QueryParameterRow extends RemoteQueryParameter {
   readonly id: string;
@@ -47,7 +47,7 @@ export function ConnectionQueryParametersEditor({
   onOpenChange,
   onRowsChange,
 }: ConnectionQueryParametersEditorProps) {
-  const iconColor = useThemeColor("--color-icon-subtle");
+  const iconColor = useUniwindTheme()["--color-icon-subtle"];
 
   const updateRow = (id: string, field: "key" | "value", value: string) => {
     onRowsChange(rows.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
