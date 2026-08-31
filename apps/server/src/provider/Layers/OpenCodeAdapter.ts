@@ -7,6 +7,7 @@ import {
   type ProviderSession,
   RuntimeItemId,
   RuntimeRequestId,
+  RuntimeTaskId,
   ThreadId,
   type ToolLifecycleItemType,
   TurnId,
@@ -249,7 +250,52 @@ type OpenCodeRoutedRequestEvent = OpenCodeAskedRequestEvent | OpenCodeTerminalRe
 
 interface OpenCodeRequestRelationRetry {
   warned: boolean;
+  /** Session the waiting request belongs to, so eviction can detach it. */
+  readonly sessionID: string;
   fiber?: Fiber.Fiber<void, never>;
+}
+
+interface OpenCodeParentTask {
+  readonly callId: string;
+  readonly ownerSessionId: string;
+  readonly turnId: TurnId;
+  childSessionId?: string;
+  title?: string;
+  role?: string;
+  background: boolean;
+  backgroundKnown: boolean;
+}
+
+interface OpenCodeChildTask {
+  readonly sessionId: string;
+  parentSessionId: string;
+  turnId: TurnId;
+  parentToolUseId?: string;
+  linkageExact: boolean;
+  title?: string;
+  role?: string;
+  background: boolean;
+  backgroundKnown: boolean;
+  idleObserved: boolean;
+  latestResult?: string;
+  started: boolean;
+  terminal: boolean;
+  linkageFingerprint?: string;
+  status?: string;
+  readonly toolFingerprints: Map<string, string>;
+  readonly textFingerprints: Map<string, string>;
+}
+
+interface OpenCodePendingChildState {
+  readonly parentSessionId: string;
+  readonly observedTurnId?: TurnId;
+  readonly title?: string;
+  idleObserved: boolean;
+  latestResult?: string;
+  terminal?: {
+    readonly status: "failed" | "stopped";
+    readonly summary?: string;
+  };
 }
 
 interface OpenCodePendingRequestRecovery {
@@ -260,6 +306,64 @@ interface OpenCodePendingRequestRecovery {
 function trimText(value: string | undefined | null): string | undefined {
   const trimmed = value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+function recordFromUnknown(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  return typeof value === "string" ? trimText(value) : undefined;
+}
+
+function boundedOpenCodeActivityText(value: unknown, maxLength: number): string | undefined {
+  const text = stringFromUnknown(value);
+  if (!text) {
+    return undefined;
+  }
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+}
+
+function openCodeTaskMetadata(part: Extract<Part, { type: "tool" }>): {
+  readonly childSessionId?: string;
+  readonly parentSessionId?: string;
+  readonly resumeSessionId?: string;
+  readonly title?: string;
+  readonly role?: string;
+  readonly background: boolean;
+  readonly backgroundKnown: boolean;
+} {
+  const state = recordFromUnknown(part.state);
+  const input = recordFromUnknown(state?.input);
+  const metadata = recordFromUnknown(state?.metadata);
+  const childSessionId = stringFromUnknown(metadata?.sessionId ?? metadata?.sessionID);
+  const parentSessionId = stringFromUnknown(metadata?.parentSessionId ?? metadata?.parentSessionID);
+  const resumeSessionId = stringFromUnknown(input?.task_id);
+  const title = boundedOpenCodeActivityText(input?.description, 240);
+  const role = boundedOpenCodeActivityText(input?.subagent_type, 80);
+  const status = stringFromUnknown(state?.status);
+  const output = stringFromUnknown(state?.output);
+  const runningTaskOutput = /<task\b[^>]*\bstate=["']running["']/i.test(output ?? "");
+  // Metadata that names the child session is the task's authoritative state:
+  // an omitted `background` there reads as foreground, so the root idle
+  // fallback may settle the child. ParentID-only discovery stays unknown.
+  const exactTaskState = childSessionId !== undefined || parentSessionId !== undefined;
+  return {
+    ...(childSessionId ? { childSessionId } : {}),
+    ...(parentSessionId ? { parentSessionId } : {}),
+    ...(resumeSessionId ? { resumeSessionId } : {}),
+    ...(title ? { title } : {}),
+    ...(role ? { role } : {}),
+    background: metadata?.background === true || runningTaskOutput,
+    backgroundKnown:
+      exactTaskState ||
+      typeof metadata?.background === "boolean" ||
+      runningTaskOutput ||
+      status === "completed" ||
+      status === "error",
+  };
 }
 
 function openCodeEventSessionId(event: OpenCodeSubscribedEvent): string | undefined {
@@ -320,6 +424,18 @@ function isOpenCodeChildRequestEvent(event: OpenCodeSubscribedEvent): boolean {
 
 const OPENCODE_DEFAULT_TITLE_PATTERN =
   /^(New session - |Child session - )\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const OPENCODE_TASK_TOMBSTONE_LIMIT = 128;
+const OPENCODE_UNBOUND_TASK_LIMIT = 128;
+const OPENCODE_EVICTED_CHILD_LIMIT = 128;
+const OPENCODE_PENDING_CHILD_LIMIT = 128;
+const OPENCODE_CHILD_FINGERPRINT_LIMIT = 128;
+const OPENCODE_REQUEST_TOMBSTONE_LIMIT = 128;
+/**
+ * Depth cap for walks over the child `parentSessionId` graph (ancestry
+ * checks, descendant enumeration). Matches the bound used by the session
+ * ancestry probe, so a corrupt or cyclic parent chain cannot spin.
+ */
+const OPENCODE_CHILD_GRAPH_LIMIT = 256;
 
 function isOpenCodeDefaultTitle(title: string): boolean {
   return OPENCODE_DEFAULT_TITLE_PATTERN.test(title);
@@ -332,11 +448,25 @@ interface OpenCodeSessionContext {
   readonly directory: string;
   readonly openCodeSessionId: string;
   readonly relatedSessionIds: Set<string>;
+  readonly parentTasksByCallId: Map<string, OpenCodeParentTask>;
+  readonly childTasksBySessionId: Map<string, OpenCodeChildTask>;
+  readonly pendingChildStateBySessionId: Map<string, OpenCodePendingChildState>;
+  readonly evictedChildSessionIds: Set<string>;
+  /**
+   * Flipped the moment the eviction tombstone set rolls over and forgets its
+   * oldest entry. From then on the tombstone set can no longer vouch for
+   * every denied child, so all unknown session ids are rejected. Exact task
+   * metadata can still bind children that were already related or pending.
+   */
+  strictChildCorrelation: boolean;
+  readonly evictedParentTaskCallIds: Set<string>;
+  settleChildTasksOnStop?: () => Effect.Effect<void>;
   readonly resolvedRequestIds: Set<string>;
   readonly emittedTerminalRequestIds: Set<string>;
   readonly requestRelationRetries: Map<string, OpenCodeRequestRelationRetry>;
   readonly pendingPermissions: Map<string, PermissionRequest>;
   readonly pendingQuestions: Map<string, QuestionRequest>;
+  readonly requestTurnById: Map<string, TurnId>;
   readonly messageRoleById: Map<string, "user" | "assistant">;
   readonly compactionMessageIds: Set<string>;
   readonly partById: Map<string, Part>;
@@ -732,10 +862,120 @@ const failPendingOpenCodeCancellation = Effect.fn("failPendingOpenCodeCancellati
   ).pipe(Effect.ignore);
 });
 
-const abortOpenCodeSessionForTeardown = (context: OpenCodeSessionContext) =>
+function liveOpenCodeChildSessionIds(context: OpenCodeSessionContext): ReadonlyArray<string> {
+  const terminalIds = new Set(
+    [...context.childTasksBySessionId.values()]
+      .filter((task) => task.terminal)
+      .map((task) => task.sessionId),
+  );
+  return [
+    ...new Set([
+      ...[...context.childTasksBySessionId.values()]
+        .filter((task) => !task.terminal)
+        .map((task) => task.sessionId),
+      ...[...context.relatedSessionIds].filter(
+        (sessionId) => sessionId !== context.openCodeSessionId && !terminalIds.has(sessionId),
+      ),
+    ]),
+  ];
+}
+
+/**
+ * Whether the parent chain above a session crosses a terminal child task.
+ * Walks the tracked graph — bound child tasks plus pending discoveries,
+ * which also carry a `parentSessionId` — so a newly discovered descendant
+ * is denied even when its immediate parent is still live (e.g. pending
+ * beneath a live child of a terminal task). Bounded by
+ * {@link OPENCODE_CHILD_GRAPH_LIMIT} and a visited set.
+ */
+function hasTerminalOpenCodeAncestor(
+  context: OpenCodeSessionContext,
+  fromSessionId: string,
+): boolean {
+  const seen = new Set<string>([fromSessionId]);
+  let sessionId: string | undefined = fromSessionId;
+  for (let depth = 0; sessionId !== undefined && depth < OPENCODE_CHILD_GRAPH_LIMIT; depth += 1) {
+    if (sessionId === context.openCodeSessionId) {
+      return false;
+    }
+    const task = context.childTasksBySessionId.get(sessionId);
+    if (task) {
+      if (task.terminal) {
+        return true;
+      }
+      sessionId = task.parentSessionId;
+    } else {
+      sessionId = context.pendingChildStateBySessionId.get(sessionId)?.parentSessionId;
+    }
+    if (sessionId === undefined || seen.has(sessionId)) {
+      return false;
+    }
+    seen.add(sessionId);
+  }
+  return false;
+}
+
+/**
+ * Live bound and pending child sessions beneath a session, breadth-first over
+ * the child graph. Ancestors precede descendants so callers can settle bound
+ * tasks in order and tear each session down exactly once.
+ */
+function liveOpenCodeDescendants(
+  context: OpenCodeSessionContext,
+  sessionId: string,
+): {
+  readonly tasks: ReadonlyArray<OpenCodeChildTask>;
+  readonly sessionIds: ReadonlyArray<string>;
+} {
+  const tasks: Array<OpenCodeChildTask> = [];
+  const sessionIds: Array<string> = [];
+  const seen = new Set<string>([sessionId]);
+  const queue: Array<string> = [sessionId];
+  for (let steps = 0; queue.length > 0 && steps < OPENCODE_CHILD_GRAPH_LIMIT; steps += 1) {
+    const parentSessionId = queue.shift()!;
+    for (const task of context.childTasksBySessionId.values()) {
+      if (seen.has(task.sessionId) || task.parentSessionId !== parentSessionId) {
+        continue;
+      }
+      seen.add(task.sessionId);
+      queue.push(task.sessionId);
+      if (!task.terminal) {
+        tasks.push(task);
+        sessionIds.push(task.sessionId);
+      }
+    }
+    for (const [pendingSessionId, pending] of context.pendingChildStateBySessionId) {
+      if (seen.has(pendingSessionId) || pending.parentSessionId !== parentSessionId) {
+        continue;
+      }
+      seen.add(pendingSessionId);
+      queue.push(pendingSessionId);
+      sessionIds.push(pendingSessionId);
+    }
+  }
+  return { tasks, sessionIds };
+}
+
+const abortOpenCodeSessionId = (context: OpenCodeSessionContext, sessionID: string) =>
   runOpenCodeSdk("session.abort", (signal) =>
-    context.client.session.abort({ sessionID: context.openCodeSessionId }, { signal }),
+    context.client.session.abort({ sessionID }, { signal }),
   ).pipe(Effect.timeout("1 second"), Effect.ignore({ log: true }));
+
+const abortOpenCodeSessionForTeardown = Effect.fn("abortOpenCodeSessionForTeardown")(function* (
+  context: OpenCodeSessionContext,
+  childSessionIds?: ReadonlyArray<string>,
+) {
+  const resolvedChildSessionIds = childSessionIds ?? liveOpenCodeChildSessionIds(context);
+  yield* Effect.forEach(
+    resolvedChildSessionIds,
+    (sessionId) => abortOpenCodeSessionId(context, sessionId),
+    {
+      concurrency: "unbounded",
+      discard: true,
+    },
+  );
+  yield* abortOpenCodeSessionId(context, context.openCodeSessionId);
+});
 
 const cancelPendingOpenCodePrompt = Effect.fn("cancelPendingOpenCodePrompt")(function* (
   context: OpenCodeSessionContext,
@@ -797,11 +1037,13 @@ const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
     yield* Deferred.succeed(cancellation.completion, undefined).pipe(Effect.ignore);
   }
   context.promptAdmission = undefined;
-
   // Best-effort remote abort. The scope close below tears down the local
   // handles (event-pump fiber, server-exit fiber, event-subscribe fetch),
   // but we still want to tell OpenCode that this session is done.
   yield* abortOpenCodeSessionForTeardown(context);
+  if (context.settleChildTasksOnStop) {
+    yield* context.settleChildTasksOnStop();
+  }
 
   // Closing the session scope interrupts every fiber forked into it and
   // runs each finalizer we registered — the `AbortController.abort()` call,
@@ -965,6 +1207,784 @@ export function makeOpenCodeAdapter(
       },
     ) => writeNativeEvent(threadId, event).pipe(Effect.catchCause(() => Effect.void));
 
+    const childTaskLinkage = (context: OpenCodeSessionContext, task: OpenCodeChildTask) => ({
+      taskType: "subagent",
+      ...(task.title ? { title: task.title } : {}),
+      ...(task.role ? { role: task.role } : {}),
+      ...(task.parentToolUseId ? { toolUseId: task.parentToolUseId } : {}),
+      ...(task.parentSessionId !== context.openCodeSessionId
+        ? { parentAgentId: task.parentSessionId }
+        : {}),
+      timelineBypass: true,
+    });
+
+    const childTaskFingerprint = (task: OpenCodeChildTask): string =>
+      [task.title ?? "", task.role ?? "", task.parentToolUseId ?? ""].join("\u0000");
+
+    const setBoundedMapValue = <V>(
+      map: Map<string, V>,
+      key: string,
+      value: V,
+      limit: number,
+    ): void => {
+      map.delete(key);
+      map.set(key, value);
+      while (map.size > limit) {
+        const oldest = map.keys().next().value;
+        if (oldest === undefined) {
+          return;
+        }
+        map.delete(oldest);
+      }
+    };
+
+    const rememberRequestTombstone = (set: Set<string>, requestId: string): void => {
+      set.delete(requestId);
+      set.add(requestId);
+      while (set.size > OPENCODE_REQUEST_TOMBSTONE_LIMIT) {
+        const oldest = set.values().next().value;
+        if (oldest === undefined) {
+          return;
+        }
+        set.delete(oldest);
+      }
+    };
+
+    const rememberEvictedChild = (context: OpenCodeSessionContext, sessionId: string): void => {
+      context.evictedChildSessionIds.add(sessionId);
+      while (context.evictedChildSessionIds.size > OPENCODE_EVICTED_CHILD_LIMIT) {
+        const oldest = context.evictedChildSessionIds.values().next().value;
+        if (oldest === undefined) {
+          return;
+        }
+        context.evictedChildSessionIds.delete(oldest);
+        // A tombstone was forgotten, so the set can no longer vouch for every
+        // denied child. Tighten correlation instead of growing state: unknown
+        // session ids now need exact task metadata to be accepted.
+        context.strictChildCorrelation = true;
+      }
+    };
+
+    /**
+     * Drop every open request and routing entry tied to a denied child: the
+     * pending permission/question records, their turn attribution, and any
+     * relation-retry fibers still waiting on session ancestry. Cleaned
+     * request ids are marked resolved so redelivery or recovery cannot
+     * re-open them. Emits the matching declined/empty resolution before
+     * deletion so client and orchestration pending state closes normally.
+     */
+    const detachOpenCodeChildRequests = Effect.fn("detachOpenCodeChildRequests")(function* (
+      context: OpenCodeSessionContext,
+      sessionId: string,
+    ) {
+      const doomedRequestIds = new Set<string>();
+      for (const [requestId, permission] of context.pendingPermissions) {
+        if (permission.sessionID === sessionId) {
+          doomedRequestIds.add(requestId);
+        }
+      }
+      for (const [requestId, question] of context.pendingQuestions) {
+        if (question.sessionID === sessionId) {
+          doomedRequestIds.add(requestId);
+        }
+      }
+      for (const [requestId, retry] of context.requestRelationRetries) {
+        if (retry.sessionID === sessionId) {
+          doomedRequestIds.add(requestId);
+        }
+      }
+      for (const requestId of doomedRequestIds) {
+        const permission = context.pendingPermissions.get(requestId);
+        const question = context.pendingQuestions.get(requestId);
+        const turnId = context.requestTurnById.get(requestId);
+        if (permission) {
+          yield* emit({
+            ...(yield* buildEventBase({
+              threadId: context.session.threadId,
+              turnId,
+              requestId,
+              raw: { type: "opencode.child-request.denied", sessionId },
+            })),
+            type: "request.resolved",
+            payload: {
+              requestType: mapPermissionToRequestType(permission.permission),
+              decision: "decline",
+            },
+          });
+        } else if (question) {
+          yield* emit({
+            ...(yield* buildEventBase({
+              threadId: context.session.threadId,
+              turnId,
+              requestId,
+              raw: { type: "opencode.child-request.denied", sessionId },
+            })),
+            type: "user-input.resolved",
+            payload: { answers: {} },
+          });
+        }
+        context.pendingPermissions.delete(requestId);
+        context.pendingQuestions.delete(requestId);
+        context.requestTurnById.delete(requestId);
+        rememberRequestTombstone(context.resolvedRequestIds, requestId);
+        rememberRequestTombstone(context.emittedTerminalRequestIds, requestId);
+        const retry = context.requestRelationRetries.get(requestId);
+        context.requestRelationRetries.delete(requestId);
+        if (retry?.fiber) {
+          yield* Fiber.interrupt(retry.fiber);
+        }
+      }
+    });
+
+    /**
+     * Tombstone a denied child and forget every request entry tied to it, so
+     * responses can no longer reach the child and its late terminal events
+     * stay silent. Does not abort the remote session.
+     */
+    const forgetOpenCodeChildSession = Effect.fn("forgetOpenCodeChildSession")(function* (
+      context: OpenCodeSessionContext,
+      sessionId: string,
+    ) {
+      context.relatedSessionIds.delete(sessionId);
+      rememberEvictedChild(context, sessionId);
+      yield* detachOpenCodeChildRequests(context, sessionId);
+    });
+
+    /**
+     * Full denial: tombstone, request cleanup, and remote abort.
+     */
+    const denyOpenCodeChildSession = Effect.fn("denyOpenCodeChildSession")(function* (
+      context: OpenCodeSessionContext,
+      sessionId: string,
+    ) {
+      yield* forgetOpenCodeChildSession(context, sessionId);
+      yield* abortOpenCodeSessionId(context, sessionId);
+    });
+
+    const rememberPendingChild = (
+      context: OpenCodeSessionContext,
+      sessionId: string,
+      parentSessionId: string,
+      observedTurnId: TurnId | undefined,
+      title: string | undefined,
+    ): { readonly pending: OpenCodePendingChildState; readonly evictedSessionId?: string } => {
+      const existing = context.pendingChildStateBySessionId.get(sessionId);
+      if (existing) {
+        return { pending: existing };
+      }
+      const pending: OpenCodePendingChildState = {
+        parentSessionId,
+        ...(observedTurnId ? { observedTurnId } : {}),
+        ...(title ? { title } : {}),
+        idleObserved: false,
+      };
+      context.pendingChildStateBySessionId.set(sessionId, pending);
+      const evictedSessionId =
+        context.pendingChildStateBySessionId.size > OPENCODE_PENDING_CHILD_LIMIT
+          ? context.pendingChildStateBySessionId.keys().next().value
+          : undefined;
+      if (evictedSessionId !== undefined) {
+        context.pendingChildStateBySessionId.delete(evictedSessionId);
+        context.relatedSessionIds.delete(evictedSessionId);
+        rememberEvictedChild(context, evictedSessionId);
+      }
+      return {
+        pending,
+        ...(evictedSessionId ? { evictedSessionId } : {}),
+      };
+    };
+
+    const rememberEvictedParentCall = (context: OpenCodeSessionContext, callId: string): void => {
+      context.evictedParentTaskCallIds.add(callId);
+      while (context.evictedParentTaskCallIds.size > OPENCODE_UNBOUND_TASK_LIMIT) {
+        const oldest = context.evictedParentTaskCallIds.values().next().value;
+        if (oldest === undefined) {
+          return;
+        }
+        context.evictedParentTaskCallIds.delete(oldest);
+      }
+    };
+
+    const pruneOpenCodeTaskState = Effect.fn("pruneOpenCodeTaskState")(function* (
+      context: OpenCodeSessionContext,
+    ) {
+      const terminalTasks = [...context.childTasksBySessionId.values()].filter(
+        (task) => task.terminal,
+      );
+      for (const task of terminalTasks.slice(0, -OPENCODE_TASK_TOMBSTONE_LIMIT)) {
+        context.childTasksBySessionId.delete(task.sessionId);
+        context.pendingChildStateBySessionId.delete(task.sessionId);
+        yield* forgetOpenCodeChildSession(context, task.sessionId);
+        for (const [callId, parentTask] of context.parentTasksByCallId) {
+          if (parentTask.childSessionId === task.sessionId) {
+            context.parentTasksByCallId.delete(callId);
+            rememberEvictedParentCall(context, callId);
+          }
+        }
+      }
+
+      const unboundParentTasks = [...context.parentTasksByCallId.entries()].filter(
+        ([, task]) => task.childSessionId === undefined,
+      );
+      for (const [callId] of unboundParentTasks.slice(0, -OPENCODE_UNBOUND_TASK_LIMIT)) {
+        context.parentTasksByCallId.delete(callId);
+        rememberEvictedParentCall(context, callId);
+      }
+    });
+    const emitChildTaskStarted = Effect.fn("emitChildTaskStarted")(function* (
+      context: OpenCodeSessionContext,
+      task: OpenCodeChildTask,
+      raw: unknown,
+    ) {
+      if (task.started || task.terminal) {
+        return;
+      }
+      task.started = true;
+      task.status = "running";
+      task.linkageFingerprint = childTaskFingerprint(task);
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId: task.turnId,
+          raw,
+        })),
+        type: "task.started",
+        payload: {
+          taskId: RuntimeTaskId.make(task.sessionId),
+          ...(task.title ? { description: task.title } : {}),
+          ...childTaskLinkage(context, task),
+        },
+      });
+    });
+
+    const emitChildTaskLinkageUpdate = Effect.fn("emitChildTaskLinkageUpdate")(function* (
+      context: OpenCodeSessionContext,
+      task: OpenCodeChildTask,
+      raw: unknown,
+    ) {
+      if (!task.started || task.terminal) {
+        return;
+      }
+      const fingerprint = childTaskFingerprint(task);
+      if (task.linkageFingerprint === fingerprint) {
+        return;
+      }
+      task.linkageFingerprint = fingerprint;
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId: task.turnId,
+          raw,
+        })),
+        type: "task.updated",
+        payload: {
+          taskId: RuntimeTaskId.make(task.sessionId),
+          ...childTaskLinkage(context, task),
+        },
+      });
+    });
+
+    const emitChildTaskTerminal = Effect.fn("emitChildTaskTerminal")(function* (
+      context: OpenCodeSessionContext,
+      task: OpenCodeChildTask,
+      status: "completed" | "failed" | "stopped",
+      summary: string | undefined,
+      raw: unknown,
+    ) {
+      if (task.terminal) {
+        return;
+      }
+      const needsStart = !task.started;
+      task.terminal = true;
+      if (needsStart) {
+        task.started = true;
+        task.status = "running";
+        task.linkageFingerprint = childTaskFingerprint(task);
+        yield* emit({
+          ...(yield* buildEventBase({
+            threadId: context.session.threadId,
+            turnId: task.turnId,
+            raw,
+          })),
+          type: "task.started",
+          payload: {
+            taskId: RuntimeTaskId.make(task.sessionId),
+            ...(task.title ? { description: task.title } : {}),
+            ...childTaskLinkage(context, task),
+          },
+        });
+      }
+      task.status = status;
+      task.toolFingerprints.clear();
+      task.textFingerprints.clear();
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId: task.turnId,
+          raw,
+        })),
+        type: "task.completed",
+        payload: {
+          taskId: RuntimeTaskId.make(task.sessionId),
+          status,
+          ...(summary ? { summary } : {}),
+          ...childTaskLinkage(context, task),
+        },
+      });
+      yield* pruneOpenCodeTaskState(context);
+    });
+
+    /**
+     * Settle a task that just became terminal and take its whole descendant
+     * subtree with it: every currently live child session beneath it is
+     * settled ("stopped" — it did not end on its own) because its ancestor
+     * is gone. Breadth-first over a single snapshot, so ancestors settle
+     * before descendants and each lifecycle event fires exactly once. The
+     * remote aborts are skipped once the session is already tearing down —
+     * the teardown abort has the whole pre-settle live set.
+     */
+    const settleOpenCodeChildTaskTree = Effect.fn("settleOpenCodeChildTaskTree")(function* (
+      context: OpenCodeSessionContext,
+      task: OpenCodeChildTask,
+      status: "completed" | "failed" | "stopped",
+      summary: string | undefined,
+      raw: unknown,
+    ) {
+      if (task.terminal) {
+        return;
+      }
+      const descendants = liveOpenCodeDescendants(context, task.sessionId);
+      yield* emitChildTaskTerminal(context, task, status, summary, raw);
+      for (const descendant of descendants.tasks) {
+        yield* emitChildTaskTerminal(
+          context,
+          descendant,
+          "stopped",
+          summary ?? descendant.latestResult,
+          raw,
+        );
+      }
+      for (const descendantSessionId of descendants.sessionIds) {
+        context.pendingChildStateBySessionId.delete(descendantSessionId);
+        yield* forgetOpenCodeChildSession(context, descendantSessionId);
+      }
+      if (yield* Ref.get(context.stopped)) {
+        return;
+      }
+      yield* Effect.forEach(
+        descendants.sessionIds,
+        (descendantSessionId) => abortOpenCodeSessionId(context, descendantSessionId),
+        { concurrency: "unbounded", discard: true },
+      );
+    });
+
+    const finishChildTasksForTurn = Effect.fn("finishChildTasksForTurn")(function* (
+      context: OpenCodeSessionContext,
+      turnId: TurnId,
+      status: "completed" | "failed" | "stopped",
+      summary: string | undefined,
+      raw: unknown,
+    ) {
+      yield* Effect.forEach(
+        context.childTasksBySessionId.values(),
+        (task) =>
+          task.turnId === turnId && task.backgroundKnown && !task.background && !task.terminal
+            ? settleOpenCodeChildTaskTree(context, task, status, summary ?? task.latestResult, raw)
+            : Effect.void,
+        { discard: true },
+      );
+    });
+
+    const finishAllChildTasks = Effect.fn("finishAllChildTasks")(function* (
+      context: OpenCodeSessionContext,
+      status: "completed" | "failed" | "stopped",
+      summary: string | undefined,
+      raw: unknown,
+    ) {
+      yield* Effect.forEach(
+        context.childTasksBySessionId.values(),
+        (task) =>
+          task.terminal
+            ? Effect.void
+            : settleOpenCodeChildTaskTree(context, task, status, summary, raw),
+        { discard: true },
+      );
+    });
+
+    const ensureChildTask = (
+      context: OpenCodeSessionContext,
+      input: {
+        readonly sessionId: string;
+        readonly parentSessionId: string;
+        readonly turnId: TurnId;
+        readonly parentToolUseId?: string;
+        readonly title?: string;
+        readonly role?: string;
+        readonly background?: boolean;
+        readonly backgroundKnown?: boolean;
+      },
+    ): OpenCodeChildTask | undefined => {
+      const existing = context.childTasksBySessionId.get(input.sessionId);
+      if (existing) {
+        if (
+          existing.turnId !== input.turnId ||
+          existing.parentSessionId !== input.parentSessionId
+        ) {
+          return undefined;
+        }
+        if (existing.terminal) {
+          return existing;
+        }
+        if (!existing.parentToolUseId && input.parentToolUseId) {
+          existing.parentToolUseId = input.parentToolUseId;
+        }
+        if (input.title) {
+          existing.title = input.title;
+        }
+        if (input.role) {
+          existing.role = input.role;
+        }
+        existing.background ||= input.background === true;
+        existing.backgroundKnown ||= input.backgroundKnown === true;
+        return existing;
+      }
+      const task: OpenCodeChildTask = {
+        sessionId: input.sessionId,
+        parentSessionId: input.parentSessionId,
+        turnId: input.turnId,
+        ...(input.parentToolUseId ? { parentToolUseId: input.parentToolUseId } : {}),
+        linkageExact: false,
+        ...(input.title ? { title: input.title } : {}),
+        ...(input.role ? { role: input.role } : {}),
+        background: input.background === true,
+        backgroundKnown: input.backgroundKnown === true,
+        idleObserved: false,
+        started: false,
+        terminal: false,
+        toolFingerprints: new Map(),
+        textFingerprints: new Map(),
+      };
+      context.childTasksBySessionId.set(input.sessionId, task);
+      return task;
+    };
+
+    const bindParentTaskToChild = Effect.fn("bindParentTaskToChild")(function* (
+      context: OpenCodeSessionContext,
+      parentTask: OpenCodeParentTask,
+      childSessionId: string,
+      parentSessionId: string,
+      exact: boolean,
+      resume: boolean,
+      raw: unknown,
+    ) {
+      if (context.evictedChildSessionIds.has(childSessionId)) {
+        return undefined;
+      }
+      // The immediate parent and every ancestor above it: a newly bound child
+      // of a dead branch is denied, tombstoned, and aborted.
+      if (hasTerminalOpenCodeAncestor(context, parentSessionId)) {
+        yield* denyOpenCodeChildSession(context, childSessionId);
+        return undefined;
+      }
+      const existingTask = context.childTasksBySessionId.get(childSessionId);
+      if (
+        context.strictChildCorrelation &&
+        existingTask === undefined &&
+        !context.relatedSessionIds.has(childSessionId) &&
+        !context.pendingChildStateBySessionId.has(childSessionId)
+      ) {
+        yield* denyOpenCodeChildSession(context, childSessionId);
+        return undefined;
+      }
+      const conflictingOwners = [...context.parentTasksByCallId].filter(
+        ([callId, owner]) =>
+          callId !== parentTask.callId && owner.childSessionId === childSessionId,
+      );
+      if (resume && existingTask?.terminal && parentTask.callId !== existingTask.parentToolUseId) {
+        for (const [, owner] of conflictingOwners) {
+          delete owner.childSessionId;
+        }
+        existingTask.parentSessionId = parentSessionId;
+        existingTask.turnId = parentTask.turnId;
+        existingTask.parentToolUseId = parentTask.callId;
+        existingTask.linkageExact = true;
+        if (parentTask.title) {
+          existingTask.title = parentTask.title;
+        }
+        if (parentTask.role) {
+          existingTask.role = parentTask.role;
+        }
+        existingTask.background = parentTask.background;
+        existingTask.backgroundKnown = parentTask.backgroundKnown;
+        existingTask.idleObserved = false;
+        delete existingTask.latestResult;
+        existingTask.terminal = false;
+        existingTask.status = "running";
+        existingTask.toolFingerprints.clear();
+        existingTask.textFingerprints.clear();
+        existingTask.linkageFingerprint = childTaskFingerprint(existingTask);
+        parentTask.childSessionId = childSessionId;
+        context.relatedSessionIds.add(childSessionId);
+        context.pendingChildStateBySessionId.delete(childSessionId);
+        yield* emit({
+          ...(yield* buildEventBase({
+            threadId: context.session.threadId,
+            turnId: existingTask.turnId,
+            raw,
+          })),
+          type: "task.updated",
+          payload: {
+            taskId: RuntimeTaskId.make(existingTask.sessionId),
+            status: "running",
+            ...childTaskLinkage(context, existingTask),
+          },
+        });
+        return existingTask;
+      }
+      if (conflictingOwners.length > 0 && (!exact || existingTask?.linkageExact === true)) {
+        return undefined;
+      }
+      const task = ensureChildTask(context, {
+        sessionId: childSessionId,
+        parentSessionId,
+        turnId: parentTask.turnId,
+        parentToolUseId: parentTask.callId,
+        ...(parentTask.title ? { title: parentTask.title } : {}),
+        ...(parentTask.role ? { role: parentTask.role } : {}),
+        background: parentTask.background,
+        backgroundKnown: parentTask.backgroundKnown,
+      });
+      if (!task) {
+        return undefined;
+      }
+      // A child answers to one task call at a time. Exact task metadata may
+      // correct a same-turn provisional sole-candidate binding by detaching
+      // the stale owner and taking over the linkage; every other conflicting
+      // claim is refused so two calls never own the same child.
+      if (exact && !task.linkageExact) {
+        for (const [, owner] of conflictingOwners) {
+          delete owner.childSessionId;
+        }
+        task.parentToolUseId = parentTask.callId;
+      }
+      task.linkageExact ||= exact;
+      parentTask.childSessionId = childSessionId;
+      context.relatedSessionIds.add(childSessionId);
+      const pending = context.pendingChildStateBySessionId.get(childSessionId);
+      context.pendingChildStateBySessionId.delete(childSessionId);
+      if (pending && !task.terminal) {
+        task.idleObserved ||= pending.idleObserved;
+        if (!task.title && pending.title) {
+          task.title = pending.title;
+        }
+        if (pending.latestResult) {
+          task.latestResult = pending.latestResult;
+        }
+      }
+      yield* emitChildTaskStarted(context, task, raw);
+      yield* emitChildTaskLinkageUpdate(context, task, raw);
+      if (pending?.terminal && !task.terminal) {
+        yield* settleOpenCodeChildTaskTree(
+          context,
+          task,
+          pending.terminal.status,
+          pending.terminal.summary,
+          raw,
+        );
+      } else if (task.background && task.idleObserved && !task.terminal) {
+        yield* settleOpenCodeChildTaskTree(context, task, "completed", task.latestResult, raw);
+      }
+      return task;
+    });
+
+    const registerChildSession = Effect.fn("registerChildSession")(function* (
+      context: OpenCodeSessionContext,
+      sessionId: string,
+      parentSessionId: string,
+      title: string | undefined,
+      raw: unknown,
+    ) {
+      if (context.evictedChildSessionIds.has(sessionId)) {
+        return undefined;
+      }
+      // The immediate parent and every ancestor above it: a discovery under a
+      // dead branch — including one whose immediate parent is a live pending
+      // child of a terminal task — is denied, tombstoned, and aborted.
+      if (hasTerminalOpenCodeAncestor(context, parentSessionId)) {
+        yield* denyOpenCodeChildSession(context, sessionId);
+        return undefined;
+      }
+      const parentTask = context.childTasksBySessionId.get(parentSessionId);
+      const observedTurnId = parentTask?.turnId ?? context.activeTurnId;
+      const candidates = [...context.parentTasksByCallId.values()].filter(
+        (task) => task.childSessionId === undefined && task.ownerSessionId === parentSessionId,
+      );
+      if (
+        candidates.length === 1 &&
+        observedTurnId !== undefined &&
+        candidates[0]!.turnId === observedTurnId
+      ) {
+        const bound = yield* bindParentTaskToChild(
+          context,
+          candidates[0]!,
+          sessionId,
+          parentSessionId,
+          false,
+          false,
+          raw,
+        );
+        // A refusal from an already-bound child must not re-pend it; only
+        // genuinely unbindable discoveries fall through to pending state.
+        if (bound !== undefined || context.childTasksBySessionId.has(sessionId)) {
+          return bound;
+        }
+      }
+      const remembered = rememberPendingChild(
+        context,
+        sessionId,
+        parentSessionId,
+        observedTurnId,
+        title && !isOpenCodeDefaultTitle(title) ? title : undefined,
+      );
+      if (remembered.evictedSessionId) {
+        yield* denyOpenCodeChildSession(context, remembered.evictedSessionId);
+      }
+      return undefined;
+    });
+
+    const registerOpenCodeTaskPart = Effect.fn("registerOpenCodeTaskPart")(function* (
+      context: OpenCodeSessionContext,
+      ownerSessionId: string,
+      part: Extract<Part, { type: "tool" }>,
+      turnId: TurnId | undefined,
+      raw: unknown,
+    ) {
+      if (part.tool.toLowerCase() !== "task") {
+        return undefined;
+      }
+      if (context.evictedParentTaskCallIds.has(part.callID)) {
+        return undefined;
+      }
+      const existing = context.parentTasksByCallId.get(part.callID);
+      const parentTurnId = existing?.turnId ?? turnId;
+      if (!parentTurnId) {
+        return undefined;
+      }
+      const metadata = openCodeTaskMetadata(part);
+      if (metadata.parentSessionId && metadata.parentSessionId !== ownerSessionId) {
+        return undefined;
+      }
+      if (existing && existing.ownerSessionId !== ownerSessionId) {
+        return undefined;
+      }
+      const parentTask = existing ?? {
+        callId: part.callID,
+        ownerSessionId,
+        turnId: parentTurnId,
+        background: false,
+        backgroundKnown: false,
+      };
+      if (metadata.title) {
+        parentTask.title = metadata.title;
+      }
+      if (metadata.role) {
+        parentTask.role = metadata.role;
+      }
+      parentTask.background ||= metadata.background;
+      parentTask.backgroundKnown ||= metadata.backgroundKnown;
+      context.parentTasksByCallId.set(part.callID, parentTask);
+      yield* pruneOpenCodeTaskState(context);
+
+      let task = parentTask.childSessionId
+        ? context.childTasksBySessionId.get(parentTask.childSessionId)
+        : undefined;
+      if (metadata.childSessionId) {
+        task = yield* bindParentTaskToChild(
+          context,
+          parentTask,
+          metadata.childSessionId,
+          metadata.parentSessionId ?? ownerSessionId,
+          true,
+          metadata.resumeSessionId === metadata.childSessionId,
+          raw,
+        );
+      } else if (!task) {
+        const candidates = [...context.childTasksBySessionId.values()].filter(
+          (candidate) =>
+            candidate.parentSessionId === ownerSessionId &&
+            candidate.turnId === parentTask.turnId &&
+            candidate.parentToolUseId === undefined,
+        );
+        if (candidates.length === 1) {
+          task = yield* bindParentTaskToChild(
+            context,
+            parentTask,
+            candidates[0]!.sessionId,
+            ownerSessionId,
+            false,
+            false,
+            raw,
+          );
+        } else if (candidates.length === 0) {
+          const pendingCandidates = [...context.pendingChildStateBySessionId.entries()].filter(
+            ([, pending]) =>
+              pending.parentSessionId === ownerSessionId &&
+              pending.observedTurnId === parentTask.turnId,
+          );
+          if (pendingCandidates.length === 1) {
+            task = yield* bindParentTaskToChild(
+              context,
+              parentTask,
+              pendingCandidates[0]![0],
+              ownerSessionId,
+              false,
+              false,
+              raw,
+            );
+          }
+        }
+      }
+      if (!task) {
+        return undefined;
+      }
+      if (task.terminal) {
+        return task;
+      }
+
+      if (parentTask.title) {
+        task.title = parentTask.title;
+      }
+      if (parentTask.role) {
+        task.role = parentTask.role;
+      }
+      task.background ||= parentTask.background;
+      task.backgroundKnown ||= parentTask.backgroundKnown;
+      yield* emitChildTaskLinkageUpdate(context, task, raw);
+
+      const state = recordFromUnknown(part.state);
+      const status = stringFromUnknown(state?.status);
+      if (status === "error") {
+        yield* settleOpenCodeChildTaskTree(
+          context,
+          task,
+          "failed",
+          boundedOpenCodeActivityText(state?.error, 1_000),
+          raw,
+        );
+      } else if (task.background && task.idleObserved) {
+        yield* settleOpenCodeChildTaskTree(context, task, "completed", task.latestResult, raw);
+      } else if (status === "completed" && !task.background) {
+        yield* settleOpenCodeChildTaskTree(
+          context,
+          task,
+          "completed",
+          boundedOpenCodeActivityText(state?.output, 2_000),
+          raw,
+        );
+      }
+      return task;
+    });
+
     const cancelIdleReconciliation = Effect.fn("cancelIdleReconciliation")(function* (
       context: OpenCodeSessionContext,
     ) {
@@ -1010,6 +2030,7 @@ export function makeOpenCodeAdapter(
         { clearActiveTurnId: true },
         updatedAt,
       );
+      yield* finishChildTasksForTurn(context, turnId, "completed", undefined, raw);
       if (pendingIdleReconciliation?.fiber) {
         yield* Fiber.interrupt(pendingIdleReconciliation.fiber);
       }
@@ -1367,6 +2388,7 @@ export function makeOpenCodeAdapter(
           { clearActiveTurnId: true, clearLastError: true },
         );
       }
+      yield* finishChildTasksForTurn(context, turnId, "stopped", "Interrupted by user.", raw);
       yield* emit({
         ...(yield* buildEventBase({
           threadId: context.session.threadId,
@@ -1408,11 +2430,13 @@ export function makeOpenCodeAdapter(
       );
       context.promptAdmission = undefined;
       const turnId = context.activeTurnId;
+      const liveChildSessionIds = liveOpenCodeChildSessionIds(context);
       deleteContextIfCurrent(context);
       // Emit lifecycle events BEFORE tearing down the scope. Both call sites
       // run this inside a fiber forked via `Effect.forkIn(context.sessionScope)`;
       // closing that scope triggers the fiber-interrupt finalizer, so any
       // subsequent yield point would unwind and silently drop these emits.
+      yield* finishAllChildTasks(context, "failed", message, undefined).pipe(Effect.ignore);
       yield* emit({
         ...(yield* buildEventBase({
           threadId: context.session.threadId,
@@ -1439,7 +2463,7 @@ export function makeOpenCodeAdapter(
       // Inline the teardown that `stopOpenCodeContext` would do; we can't
       // delegate to it because our `getAndSet` above already flipped the
       // one-shot guard, so the call would no-op.
-      yield* abortOpenCodeSessionForTeardown(context);
+      yield* abortOpenCodeSessionForTeardown(context, liveChildSessionIds);
       yield* Scope.close(context.sessionScope, Exit.void);
     });
 
@@ -1532,8 +2556,14 @@ export function makeOpenCodeAdapter(
       context: OpenCodeSessionContext,
       candidateSessionId: string,
     ) {
+      if (context.evictedChildSessionIds.has(candidateSessionId)) {
+        return false;
+      }
       if (context.relatedSessionIds.has(candidateSessionId)) {
         return true;
+      }
+      if (context.strictChildCorrelation) {
+        return false;
       }
 
       const seen = new Set<string>();
@@ -1578,16 +2608,25 @@ export function makeOpenCodeAdapter(
       if (context.resolvedRequestIds.has(event.properties.id)) {
         return;
       }
+      const requestTurnId =
+        context.childTasksBySessionId.get(event.properties.sessionID)?.turnId ??
+        context.pendingChildStateBySessionId.get(event.properties.sessionID)?.observedTurnId ??
+        (event.properties.sessionID === context.openCodeSessionId
+          ? context.activeTurnId
+          : undefined);
       if (event.type === "permission.asked") {
         const request = event.properties;
         if (context.pendingPermissions.has(request.id)) {
           return;
         }
         context.pendingPermissions.set(request.id, request);
+        if (requestTurnId) {
+          context.requestTurnById.set(request.id, requestTurnId);
+        }
         yield* emit({
           ...(yield* buildEventBase({
             threadId: context.session.threadId,
-            turnId: context.activeTurnId,
+            turnId: requestTurnId,
             requestId: request.id,
             raw,
           })),
@@ -1606,10 +2645,13 @@ export function makeOpenCodeAdapter(
         return;
       }
       context.pendingQuestions.set(request.id, request);
+      if (requestTurnId) {
+        context.requestTurnById.set(request.id, requestTurnId);
+      }
       yield* emit({
         ...(yield* buildEventBase({
           threadId: context.session.threadId,
-          turnId: context.activeTurnId,
+          turnId: requestTurnId,
           requestId: request.id,
           raw,
         })),
@@ -1622,7 +2664,7 @@ export function makeOpenCodeAdapter(
       context: OpenCodeSessionContext,
       requestId: string,
     ) {
-      context.resolvedRequestIds.add(requestId);
+      rememberRequestTombstone(context.resolvedRequestIds, requestId);
       const retry = context.requestRelationRetries.get(requestId);
       context.requestRelationRetries.delete(requestId);
       if (retry?.fiber) {
@@ -1638,12 +2680,19 @@ export function makeOpenCodeAdapter(
       if (context.emittedTerminalRequestIds.has(requestId)) {
         return;
       }
-      context.emittedTerminalRequestIds.add(requestId);
+      rememberRequestTombstone(context.emittedTerminalRequestIds, requestId);
+      const requestTurnId =
+        context.requestTurnById.get(requestId) ??
+        context.childTasksBySessionId.get(event.properties.sessionID)?.turnId ??
+        context.pendingChildStateBySessionId.get(event.properties.sessionID)?.observedTurnId ??
+        (event.properties.sessionID === context.openCodeSessionId
+          ? context.activeTurnId
+          : undefined);
       if (event.type === "permission.replied") {
         yield* emit({
           ...(yield* buildEventBase({
             threadId: context.session.threadId,
-            turnId: context.activeTurnId,
+            turnId: requestTurnId,
             requestId,
             raw: event,
           })),
@@ -1653,6 +2702,7 @@ export function makeOpenCodeAdapter(
             decision: mapPermissionDecision(event.properties.reply),
           },
         });
+        context.requestTurnById.delete(requestId);
         return;
       }
 
@@ -1669,13 +2719,14 @@ export function makeOpenCodeAdapter(
       yield* emit({
         ...(yield* buildEventBase({
           threadId: context.session.threadId,
-          turnId: context.activeTurnId,
+          turnId: requestTurnId,
           requestId,
           raw: event,
         })),
         type: "user-input.resolved",
         payload: { answers },
       });
+      context.requestTurnById.delete(requestId);
     });
 
     const scheduleRequestRelationRetry = Effect.fn("scheduleRequestRelationRetry")(function* (
@@ -1691,7 +2742,10 @@ export function makeOpenCodeAdapter(
       if (isAskedEvent && context.resolvedRequestIds.has(requestId)) {
         return;
       }
-      const retry: OpenCodeRequestRelationRetry = { warned: false };
+      const retry: OpenCodeRequestRelationRetry = {
+        warned: false,
+        sessionID: event.properties.sessionID,
+      };
       context.requestRelationRetries.set(requestId, retry);
       const run = Effect.gen(function* () {
         let retryCount = 0;
@@ -1853,10 +2907,300 @@ export function makeOpenCodeAdapter(
       yield* run.pipe(Effect.forkIn(context.sessionScope));
     });
 
+    const emitChildTaskStatus = Effect.fn("emitChildTaskStatus")(function* (
+      context: OpenCodeSessionContext,
+      task: OpenCodeChildTask,
+      status: "running" | "waiting",
+      raw: unknown,
+    ) {
+      if (task.terminal || task.status === status) {
+        return;
+      }
+      yield* emitChildTaskStarted(context, task, raw);
+      task.status = status;
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId: task.turnId,
+          raw,
+        })),
+        type: "task.updated",
+        payload: {
+          taskId: RuntimeTaskId.make(task.sessionId),
+          status,
+          ...childTaskLinkage(context, task),
+        },
+      });
+    });
+
+    const emitChildTaskProgress = Effect.fn("emitChildTaskProgress")(function* (
+      context: OpenCodeSessionContext,
+      task: OpenCodeChildTask,
+      summary: string,
+      raw: unknown,
+    ) {
+      if (task.terminal) {
+        return;
+      }
+      yield* emitChildTaskStarted(context, task, raw);
+      task.status = "running";
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId: task.turnId,
+          raw,
+        })),
+        type: "task.progress",
+        payload: {
+          taskId: RuntimeTaskId.make(task.sessionId),
+          description: task.title ?? "Subagent task",
+          summary,
+          status: "running",
+          ...childTaskLinkage(context, task),
+        },
+      });
+    });
+
+    const bufferPendingChildEvent = (
+      context: OpenCodeSessionContext,
+      sessionId: string,
+      event: OpenCodeSubscribedEvent,
+    ): void => {
+      const pending = context.pendingChildStateBySessionId.get(sessionId);
+      if (!pending) {
+        return;
+      }
+      switch (event.type) {
+        case "session.status":
+          if (event.properties.status.type === "idle") {
+            pending.idleObserved = true;
+          } else if (
+            event.properties.status.type === "busy" ||
+            event.properties.status.type === "retry"
+          ) {
+            pending.idleObserved = false;
+          }
+          break;
+        case "session.error": {
+          const summary = boundedOpenCodeActivityText(
+            sessionErrorMessage(event.properties.error),
+            1_000,
+          );
+          pending.terminal = {
+            status: isOpenCodeAbortError(event.properties.error) ? "stopped" : "failed",
+            ...(summary ? { summary } : {}),
+          };
+          break;
+        }
+        case "session.deleted":
+          pending.terminal = {
+            status: "stopped",
+            summary: "OpenCode child session ended.",
+          };
+          break;
+        case "message.part.updated": {
+          const part = event.properties.part;
+          if (part.type === "text") {
+            const latestResult = boundedOpenCodeActivityText(part.text, 2_000);
+            if (latestResult) {
+              pending.latestResult = latestResult;
+            }
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    };
+
+    const handleChildSessionEvent = Effect.fn("handleChildSessionEvent")(function* (
+      context: OpenCodeSessionContext,
+      sessionId: string,
+      event: OpenCodeSubscribedEvent,
+    ) {
+      const task = context.childTasksBySessionId.get(sessionId);
+      if (!task) {
+        bufferPendingChildEvent(context, sessionId, event);
+        return;
+      }
+      if (task.terminal) {
+        if (event.type === "message.part.updated") {
+          const part = event.properties.part;
+          if (part.type === "tool" && part.tool.toLowerCase() === "task") {
+            const metadata = openCodeTaskMetadata(part);
+            if (
+              metadata.childSessionId &&
+              !context.evictedChildSessionIds.has(metadata.childSessionId) &&
+              (metadata.parentSessionId === undefined || metadata.parentSessionId === sessionId)
+            ) {
+              yield* denyOpenCodeChildSession(context, metadata.childSessionId);
+            }
+          }
+        }
+        return;
+      }
+      switch (event.type) {
+        case "session.status": {
+          if (event.properties.status.type === "busy" || event.properties.status.type === "retry") {
+            task.idleObserved = false;
+            yield* emitChildTaskStatus(context, task, "running", event);
+          } else if (event.properties.status.type === "idle") {
+            task.idleObserved = true;
+            if (task.background) {
+              yield* settleOpenCodeChildTaskTree(
+                context,
+                task,
+                "completed",
+                task.latestResult,
+                event,
+              );
+            }
+          }
+          break;
+        }
+        case "session.error": {
+          const aborted = isOpenCodeAbortError(event.properties.error);
+          yield* settleOpenCodeChildTaskTree(
+            context,
+            task,
+            aborted ? "stopped" : "failed",
+            boundedOpenCodeActivityText(sessionErrorMessage(event.properties.error), 1_000),
+            event,
+          );
+          break;
+        }
+        case "session.deleted": {
+          yield* settleOpenCodeChildTaskTree(
+            context,
+            task,
+            "stopped",
+            "OpenCode child session ended.",
+            event,
+          );
+          break;
+        }
+        case "message.part.delta": {
+          const summary = boundedOpenCodeActivityText(event.properties.delta, 180);
+          if (!summary) {
+            break;
+          }
+          const fingerprint = `delta\u0000${summary}`;
+          if (task.textFingerprints.get(event.properties.partID) === fingerprint) {
+            break;
+          }
+          setBoundedMapValue(
+            task.textFingerprints,
+            event.properties.partID,
+            fingerprint,
+            OPENCODE_CHILD_FINGERPRINT_LIMIT,
+          );
+          yield* emitChildTaskProgress(context, task, summary, event);
+          break;
+        }
+        case "message.part.updated": {
+          const part = event.properties.part;
+          if (part.type === "tool" && part.tool.toLowerCase() === "task") {
+            yield* registerOpenCodeTaskPart(context, sessionId, part, task.turnId, event);
+          }
+          if (part.type === "tool") {
+            const inputSummary = summarizeOpenCodeToolInput(part.tool, part.state.input);
+            const state = recordFromUnknown(part.state);
+            const summary = boundedOpenCodeActivityText(
+              part.state.status === "error"
+                ? state?.error
+                : (inputSummary ?? state?.title ?? part.tool),
+              180,
+            );
+            const fingerprint = [part.state.status, summary ?? ""].join("\u0000");
+            if (task.toolFingerprints.get(part.callID) === fingerprint || task.terminal) {
+              break;
+            }
+            setBoundedMapValue(
+              task.toolFingerprints,
+              part.callID,
+              fingerprint,
+              OPENCODE_CHILD_FINGERPRINT_LIMIT,
+            );
+            yield* emitChildTaskStarted(context, task, event);
+            yield* emitChildTaskStatus(context, task, "running", event);
+            yield* emit({
+              ...(yield* buildEventBase({
+                threadId: context.session.threadId,
+                turnId: task.turnId,
+                itemId: part.callID,
+                createdAt: toolStateCreatedAt(part),
+                raw: event,
+              })),
+              type: "tool.progress",
+              payload: {
+                taskId: RuntimeTaskId.make(task.sessionId),
+                toolUseId: part.callID,
+                toolName: part.tool,
+                ...(summary ? { summary } : {}),
+              },
+            });
+            break;
+          }
+          const text = textFromPart(part);
+          const summary = boundedOpenCodeActivityText(text, 180);
+          const latestResult =
+            part.type === "text" ? boundedOpenCodeActivityText(text, 2_000) : undefined;
+          const fingerprint = latestResult ?? summary;
+          if (!summary || !fingerprint || task.textFingerprints.get(part.id) === fingerprint) {
+            break;
+          }
+          if (latestResult) {
+            task.latestResult = latestResult;
+          }
+          setBoundedMapValue(
+            task.textFingerprints,
+            part.id,
+            fingerprint,
+            OPENCODE_CHILD_FINGERPRINT_LIMIT,
+          );
+          yield* emitChildTaskProgress(context, task, summary, event);
+          break;
+        }
+        default:
+          break;
+      }
+    });
+
     const handleSubscribedEvent = Effect.fn("handleSubscribedEvent")(function* (
       context: OpenCodeSessionContext,
       event: OpenCodeSubscribedEvent,
     ) {
+      if (yield* Ref.get(context.stopped)) {
+        if (event.type === "session.created" || event.type === "session.updated") {
+          const session = event.properties.info;
+          // During teardown a discovered child is denied and tombstoned; the
+          // bounded tombstone set is the teardown ancestry, so a grandchild
+          // parented to an already-denied late discovery is denied too.
+          if (
+            session.id !== context.openCodeSessionId &&
+            session.parentID &&
+            (context.relatedSessionIds.has(session.parentID) ||
+              context.evictedChildSessionIds.has(session.parentID))
+          ) {
+            yield* denyOpenCodeChildSession(context, session.id);
+          }
+        } else if (event.type === "message.part.updated") {
+          const part = event.properties.part;
+          if (part.type === "tool" && part.tool.toLowerCase() === "task") {
+            const metadata = openCodeTaskMetadata(part);
+            const parentSessionId = metadata.parentSessionId ?? event.properties.sessionID;
+            if (
+              metadata.childSessionId &&
+              (context.relatedSessionIds.has(parentSessionId) ||
+                context.evictedChildSessionIds.has(parentSessionId)) &&
+              !context.evictedChildSessionIds.has(metadata.childSessionId)
+            ) {
+              yield* denyOpenCodeChildSession(context, metadata.childSessionId);
+            }
+          }
+        }
+        return;
+      }
       if (event.type === "server.connected") {
         if (
           (yield* Ref.get(context.stopped)) ||
@@ -1890,16 +3234,45 @@ export function makeOpenCodeAdapter(
         event.type === "question.rejected"
           ? event.properties.requestID
           : undefined;
+      if (
+        terminalRequestId !== undefined &&
+        context.resolvedRequestIds.has(terminalRequestId) &&
+        !context.pendingPermissions.has(terminalRequestId) &&
+        !context.pendingQuestions.has(terminalRequestId)
+      ) {
+        return;
+      }
       if (terminalRequestId !== undefined) {
         yield* resolvePendingOpenCodeRequest(context, terminalRequestId);
       }
       if (event.type === "session.created" || event.type === "session.updated") {
         const session = event.properties.info;
-        if (session.parentID && context.relatedSessionIds.has(session.parentID)) {
-          context.relatedSessionIds.add(session.id);
+        if (
+          session.parentID &&
+          context.evictedChildSessionIds.has(session.parentID) &&
+          !context.evictedChildSessionIds.has(session.id)
+        ) {
+          yield* denyOpenCodeChildSession(context, session.id);
+        } else if (
+          session.parentID &&
+          context.relatedSessionIds.has(session.parentID) &&
+          !context.evictedChildSessionIds.has(session.id)
+        ) {
+          if (
+            !context.strictChildCorrelation ||
+            context.relatedSessionIds.has(session.id) ||
+            context.childTasksBySessionId.get(session.id)?.linkageExact === true
+          ) {
+            context.relatedSessionIds.add(session.id);
+            yield* registerChildSession(
+              context,
+              session.id,
+              session.parentID,
+              boundedOpenCodeActivityText(session.title, 240),
+              event,
+            );
+          }
         }
-      } else if (event.type === "session.deleted") {
-        context.relatedSessionIds.delete(event.properties.info.id);
       }
 
       const payloadSessionId = openCodeEventSessionId(event);
@@ -1932,7 +3305,11 @@ export function makeOpenCodeAdapter(
         payloadSessionId !== undefined &&
         isOpenCodeChildRequestEvent(event) &&
         (context.relatedSessionIds.has(payloadSessionId) || isKnownPendingTerminalEvent);
-      if (!isParentEvent && !isChildRequestEvent) {
+      const isRelatedChildEvent =
+        payloadSessionId !== undefined &&
+        payloadSessionId !== context.openCodeSessionId &&
+        context.relatedSessionIds.has(payloadSessionId);
+      if (!isParentEvent && !isRelatedChildEvent && !isChildRequestEvent) {
         return;
       }
 
@@ -1949,6 +3326,14 @@ export function makeOpenCodeAdapter(
           payload: event,
         },
       });
+
+      if (isRelatedChildEvent && !isOpenCodeChildRequestEvent(event)) {
+        yield* handleChildSessionEvent(context, payloadSessionId, event);
+        if (event.type === "session.deleted") {
+          context.relatedSessionIds.delete(payloadSessionId);
+        }
+        return;
+      }
 
       const suppressInterruptedParentOutput =
         isParentEvent &&
@@ -2129,6 +3514,28 @@ export function makeOpenCodeAdapter(
           }
 
           if (part.type === "tool") {
+            if (part.tool.toLowerCase() === "task") {
+              const childTask = yield* registerOpenCodeTaskPart(
+                context,
+                context.openCodeSessionId,
+                part,
+                turnId,
+                event,
+              );
+              // The shared child lifecycle represents the call once correlated,
+              // and an uncorrelated in-flight row may still correlate; an
+              // uncorrelated terminal row falls through as a normal item.
+              if (
+                childTask ||
+                (part.state.status !== "completed" && part.state.status !== "error")
+              ) {
+                appendTurnItem(context, turnId, part);
+                break;
+              }
+              if (part.state.status === "error") {
+                context.parentTasksByCallId.delete(part.callID);
+              }
+            }
             const itemType = toToolLifecycleItemType(part.tool);
             const familyTitle = toolTitleFamily(part.tool);
             const nativeRunningTitle =
@@ -2290,6 +3697,9 @@ export function makeOpenCodeAdapter(
             }
           }
           yield* cancelIdleReconciliation(context);
+          if (activeTurnId) {
+            yield* finishChildTasksForTurn(context, activeTurnId, "failed", message, event);
+          }
           if (activeTurnId !== undefined && cancellation?.turnId === activeTurnId) {
             context.cancellation = undefined;
             yield* Deferred.succeed(cancellation.completion, undefined).pipe(Effect.ignore);
@@ -2583,11 +3993,18 @@ export function makeOpenCodeAdapter(
           directory,
           openCodeSessionId: started.openCodeSession.id,
           relatedSessionIds: new Set([started.openCodeSession.id]),
+          parentTasksByCallId: new Map(),
+          childTasksBySessionId: new Map(),
+          pendingChildStateBySessionId: new Map(),
+          evictedChildSessionIds: new Set(),
+          strictChildCorrelation: false,
+          evictedParentTaskCallIds: new Set(),
           resolvedRequestIds: new Set(),
           emittedTerminalRequestIds: new Set(),
           requestRelationRetries: new Map(),
           pendingPermissions: new Map(),
           pendingQuestions: new Map(),
+          requestTurnById: new Map(),
           partById: new Map(),
           emittedTextByPartId: new Map(),
           messageRoleById: new Map(),
@@ -2610,6 +4027,10 @@ export function makeOpenCodeAdapter(
           stopped: yield* Ref.make(false),
           sessionScope: started.sessionScope,
         };
+        context.settleChildTasksOnStop = () =>
+          finishAllChildTasks(context, "stopped", "OpenCode session stopped.", undefined).pipe(
+            Effect.ignore,
+          );
         const raceWinner = sessions.get(input.threadId);
         if (raceWinner) {
           // Another start published first. A newly created remote session
