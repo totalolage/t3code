@@ -42,6 +42,16 @@ If a refresh fails, T3 Code keeps the last known models, slash commands, and ski
 connection, then refresh again. A successful refresh can remove entries that OpenCode no longer
 offers.
 
+## Subagent activity
+
+When OpenCode starts a subagent, T3 Code shows its status and progress in the thread's agent
+activity. Nested subagents appear below their parent. Background subagents stay active after the
+main response finishes and close when OpenCode reports that their child session is idle.
+If OpenCode resumes a subagent, its existing activity returns to running for the new turn.
+
+Permission prompts and questions from a subagent appear in the same thread. Stopping or replacing
+the OpenCode session also stops its active subagents.
+
 ## Continue an existing thread
 
 An existing thread keeps its selected model and options when that model is temporarily absent
