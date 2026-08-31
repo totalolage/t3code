@@ -5674,6 +5674,394 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect("summarizes accumulated child text deltas instead of raw fragments", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-child-delta-summary");
+      const releaseEvents = promiseWithResolvers<void>();
+      const childSessionId = "ses_child_delta_summary";
+      const childTextDelta = (delta: string) => ({
+        type: "message.part.delta" as const,
+        properties: {
+          sessionID: childSessionId,
+          messageID: "msg-child-delta-text",
+          partID: "part-child-delta-text",
+          field: "text",
+          delta,
+        },
+      });
+      runtimeMock.state.subscribedEvents = [
+        releaseEvents.promise.then(() =>
+          toolPartEvent(
+            makeToolPart("part-parent-task-delta", "task", "call-parent-task-delta", {
+              status: "running",
+              input: { description: "Watch the state machine", subagent_type: "worker" },
+              title: "Watch the state machine",
+              metadata: {
+                parentSessionId: OPENCODE_TEST_SESSION_ID,
+                sessionId: childSessionId,
+              },
+              time: { start: 1 },
+            }),
+          ),
+        ),
+        childTextDelta("the"),
+        childTextDelta(" em"),
+        childTextDelta(" state"),
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type === "task.started" ||
+              event.type === "task.updated" ||
+              event.type === "task.progress" ||
+              event.type === "task.completed"),
+        ),
+        Stream.take(4),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "Watch the state machine",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("opencode"),
+          "opencode/kimi-k3",
+        ),
+      });
+      releaseEvents.resolve(undefined);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("2 seconds")));
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        ["task.started", "task.progress", "task.progress", "task.progress"],
+      );
+      NodeAssert.equal(
+        events.slice(1).every((event) => event.turnId === turn.turnId),
+        true,
+      );
+      // Each progress row is the accumulated child text so far, so the status
+      // row stays stable instead of flickering per raw token fragment.
+      NodeAssert.deepEqual(
+        events.flatMap((event) => (event.type === "task.progress" ? [event.payload.summary] : [])),
+        ["the", "the em", "the em state"],
+      );
+    }),
+  );
+
+  it.effect("seeds child delta accumulation from authoritative part snapshots", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-child-snapshot-delta");
+      const releaseEvents = promiseWithResolvers<void>();
+      const childSessionId = "ses_child_snapshot_delta";
+      const childTextSnapshot = (partID: string, messageID: string, text: string) => ({
+        type: "message.part.updated" as const,
+        properties: {
+          sessionID: childSessionId,
+          part: {
+            id: partID,
+            sessionID: childSessionId,
+            messageID,
+            type: "text",
+            text,
+            time: { start: 1 },
+          },
+          time: 1,
+        },
+      });
+      const childReasoningSnapshot = (partID: string, messageID: string, text: string) => ({
+        type: "message.part.updated" as const,
+        properties: {
+          sessionID: childSessionId,
+          part: {
+            id: partID,
+            sessionID: childSessionId,
+            messageID,
+            type: "reasoning",
+            text,
+            time: { start: 1 },
+          },
+          time: 2,
+        },
+      });
+      const childDelta = (partID: string, messageID: string, delta: string) => ({
+        type: "message.part.delta" as const,
+        properties: {
+          sessionID: childSessionId,
+          messageID,
+          partID,
+          field: "text",
+          delta,
+        },
+      });
+      runtimeMock.state.subscribedEvents = [
+        releaseEvents.promise.then(() =>
+          toolPartEvent(
+            makeToolPart(
+              "part-parent-task-snapshot-delta",
+              "task",
+              "call-parent-task-snapshot-delta",
+              {
+                status: "running",
+                input: { description: "Draft the summary", subagent_type: "writer" },
+                title: "Draft the summary",
+                metadata: {
+                  parentSessionId: OPENCODE_TEST_SESSION_ID,
+                  sessionId: childSessionId,
+                },
+                time: { start: 1 },
+              },
+            ),
+          ),
+        ),
+        // An authoritative snapshot lands first; the next delta must continue
+        // from it instead of restarting the accumulator from empty text.
+        childTextSnapshot("part-child-snapshot-text", "msg-child-snapshot-text", "the"),
+        childDelta("part-child-snapshot-text", "msg-child-snapshot-text", " em"),
+        childReasoningSnapshot(
+          "part-child-snapshot-reasoning",
+          "msg-child-snapshot-reasoning",
+          "plan step",
+        ),
+        childDelta("part-child-snapshot-reasoning", "msg-child-snapshot-reasoning", " two"),
+        // An empty snapshot is an authoritative replacement of the part: it
+        // must reset that part's accumulator so the next delta starts fresh
+        // instead of extending the stale text. Other parts keep theirs.
+        childTextSnapshot("part-child-snapshot-text", "msg-child-snapshot-text", ""),
+        childDelta("part-child-snapshot-text", "msg-child-snapshot-text", "new"),
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type === "task.started" ||
+              event.type === "task.updated" ||
+              event.type === "task.progress" ||
+              event.type === "task.completed"),
+        ),
+        Stream.take(6),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "Draft the summary",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("opencode"),
+          "opencode/kimi-k3",
+        ),
+      });
+      releaseEvents.resolve(undefined);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("2 seconds")));
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        [
+          "task.started",
+          "task.progress",
+          "task.progress",
+          "task.progress",
+          "task.progress",
+          "task.progress",
+        ],
+      );
+      NodeAssert.equal(
+        events.slice(1).every((event) => event.turnId === turn.turnId),
+        true,
+      );
+      // Each delta row continues from the snapshot it followed, for text and
+      // reasoning parts alike. The empty snapshot resets its part, so the
+      // final delta reads "new" instead of extending the stale "the em".
+      NodeAssert.deepEqual(
+        events.flatMap((event) => (event.type === "task.progress" ? [event.payload.summary] : [])),
+        ["the", "the em", "plan step", "plan step two", "new"],
+      );
+    }),
+  );
+
+  it.effect("reports correlated child usage through progress and completion", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-child-token-usage");
+      const releaseEvents = promiseWithResolvers<void>();
+      const childSessionId = "ses_child_token_usage";
+      const childTokens = {
+        input: 100,
+        output: 40,
+        reasoning: 10,
+        cache: { read: 50, write: 25 },
+      };
+      const childUsageEvent = (tokens: typeof childTokens) => ({
+        type: "message.updated" as const,
+        properties: {
+          sessionID: childSessionId,
+          info: {
+            id: "msg-child-usage",
+            role: "assistant",
+            tokens,
+          },
+        },
+      });
+      runtimeMock.state.subscribedEvents = [
+        releaseEvents.promise.then(() =>
+          toolPartEvent(
+            makeToolPart("part-parent-task-usage", "task", "call-parent-task-usage", {
+              status: "running",
+              input: { description: "Summarize the ledger", subagent_type: "worker" },
+              title: "Summarize the ledger",
+              metadata: {
+                parentSessionId: OPENCODE_TEST_SESSION_ID,
+                sessionId: childSessionId,
+              },
+              time: { start: 1 },
+            }),
+          ),
+        ),
+        // OpenCode initializes a fresh child's token snapshot at all zeros;
+        // the initialization must not emit usage or seed a zero baseline.
+        childUsageEvent({
+          input: 0,
+          output: 0,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        }),
+        childUsageEvent(childTokens),
+        // A later step can report a smaller per-step snapshot; the persisted
+        // usage must never regress.
+        childUsageEvent({
+          input: 20,
+          output: 5,
+          reasoning: 2,
+          cache: { read: 4, write: 1 },
+        }),
+        // OpenCode overwrites the token snapshot at each step finish, so the
+        // same values can arrive again; the second copy must not churn events.
+        childUsageEvent(childTokens),
+        // Raises the input (and total) while lowering output: the field-wise
+        // max keeps the higher of each instead of adopting the whole snapshot.
+        childUsageEvent({
+          input: 130,
+          output: 25,
+          reasoning: 10,
+          cache: { read: 50, write: 25 },
+        }),
+        // Usage from a session that never correlated must be dropped whole.
+        {
+          type: "message.updated",
+          properties: {
+            sessionID: "ses_unrelated_usage",
+            info: {
+              id: "msg-unrelated-usage",
+              role: "assistant",
+              tokens: {
+                input: 90_000,
+                output: 8_000,
+                reasoning: 900,
+                cache: { read: 7_000, write: 800 },
+              },
+            },
+          },
+        },
+        toolPartEvent(
+          makeToolPart("part-parent-task-usage", "task", "call-parent-task-usage", {
+            status: "completed",
+            input: { description: "Summarize the ledger", subagent_type: "worker" },
+            output: "<task_result>ledger summarized</task_result>",
+            title: "Summarize the ledger",
+            metadata: {
+              parentSessionId: OPENCODE_TEST_SESSION_ID,
+              sessionId: childSessionId,
+            },
+            time: { start: 1, end: 5 },
+          }),
+        ),
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type === "task.started" ||
+              event.type === "task.updated" ||
+              event.type === "task.progress" ||
+              event.type === "task.completed"),
+        ),
+        Stream.take(4),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "Summarize the ledger",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("opencode"),
+          "opencode/kimi-k3",
+        ),
+      });
+      releaseEvents.resolve(undefined);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("2 seconds")));
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        ["task.started", "task.progress", "task.progress", "task.completed"],
+      );
+      NodeAssert.equal(
+        events.every((event) => event.turnId === turn.turnId),
+        true,
+      );
+      // input + cache.read + cache.write + output + reasoning, per the
+      // snapshot mapping the shared usage contract documents.
+      const expectedUsage = {
+        totalTokens: 225,
+        inputTokens: 175,
+        cachedInputTokens: 50,
+        outputTokens: 40,
+        reasoningOutputTokens: 10,
+      };
+      // Field-wise max of the high snapshot and the later one that raised
+      // input to 130 while lowering output to 25: total 240 and input 205
+      // grow, while output keeps its earlier high of 40.
+      const expectedMergedUsage = {
+        totalTokens: 240,
+        inputTokens: 205,
+        cachedInputTokens: 50,
+        outputTokens: 40,
+        reasoningOutputTokens: 10,
+      };
+      const progressUsages = events.flatMap((event) =>
+        event.type === "task.progress" && event.payload.typedUsage
+          ? [event.payload.typedUsage]
+          : [],
+      );
+      NodeAssert.deepEqual(progressUsages, [expectedUsage, expectedMergedUsage]);
+      const completed = events.find((event) => event.type === "task.completed");
+      NodeAssert.equal(completed?.type, "task.completed");
+      if (completed?.type === "task.completed") {
+        NodeAssert.equal(completed.payload.status, "completed");
+        NodeAssert.deepEqual(completed.payload.typedUsage, expectedMergedUsage);
+      }
+    }),
+  );
+
   it.effect("discovers a child through parentID and isolates failures and unrelated sessions", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
@@ -7390,6 +7778,142 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect("emits the inner result for OpenCode task output envelope", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-task-output-envelope");
+      // OpenCode's task tool wraps its output in a protocol envelope (see
+      // upstream `renderOutput`): `<task id=… state=…>` around an optional
+      // `<summary>` and a `<task_result>`/`<task_error>` block. Only a whole
+      // anchored envelope unwraps; anything else passes through untouched.
+      // `summary` is the unwrapped expectation; omit it to assert the
+      // original output passes through (modulo the boundary trim).
+      const envelope = (sessionId: string, inner: string) =>
+        `<task id="${sessionId}" state="completed">\n${inner}\n</task>\n`;
+      const taskCases: ReadonlyArray<{
+        sessionId: string;
+        output: string;
+        summary?: string;
+      }> = [
+        {
+          sessionId: "ses_envelope_summary",
+          output: envelope(
+            "ses_envelope_summary",
+            "<summary>Background task completed: Envelope review</summary>\n<task_result>\nLine one.\nLine two.\n</task_result>",
+          ),
+          summary: "Line one.\nLine two.",
+        },
+        {
+          sessionId: "ses_envelope_no_summary",
+          output: envelope(
+            "ses_envelope_no_summary",
+            "<task_result>\n  Indented result body.\n</task_result>",
+          ),
+          summary: "Indented result body.",
+        },
+        {
+          sessionId: "ses_envelope_error",
+          output: envelope(
+            "ses_envelope_error",
+            "<summary>Background task failed: Envelope review</summary>\n<task_error>\nThe child blew up.\n</task_error>",
+          ),
+          summary: "The child blew up.",
+        },
+        {
+          sessionId: "ses_bare_result",
+          output: "<task_result>bare result stays visible</task_result>",
+        },
+        {
+          sessionId: "ses_bare_error",
+          output: "<task_error>bare error stays visible</task_error>",
+        },
+        {
+          sessionId: "ses_mismatched_tags",
+          output: envelope("ses_mismatched_tags", "<task_result>mismatched</task_error>"),
+        },
+        {
+          sessionId: "ses_no_result_block",
+          output: '<task id="ses_no_result_block" state="completed">plain wrapper text</task>',
+        },
+        {
+          sessionId: "ses_malformed_markup",
+          output: envelope(
+            "ses_malformed_markup",
+            "<task_result>never closed</task_result>",
+          ).replace("</task>\n", ""),
+        },
+        {
+          sessionId: "ses_embedded_xml",
+          output: 'See <task id="ses_other" state="completed">inner</task> for details.',
+        },
+      ];
+      const releaseAll = promiseWithResolvers<void>();
+      runtimeMock.state.subscribedEvents = taskCases.map((taskCase, index) =>
+        releaseAll.promise.then(() =>
+          toolPartEvent(
+            makeToolPart(`part-envelope-${index}`, "task", `call-envelope-${index}`, {
+              status: "completed",
+              input: { description: "Envelope review", subagent_type: "worker" },
+              title: "Envelope review",
+              metadata: {
+                parentSessionId: OPENCODE_TEST_SESSION_ID,
+                sessionId: taskCase.sessionId,
+              },
+              output: taskCase.output,
+              time: { start: index * 2 + 1, end: index * 2 + 2 },
+            }),
+          ),
+        ),
+      );
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type === "task.started" || event.type === "task.completed"),
+        ),
+        Stream.take(taskCases.length * 2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "Run envelope and plain reviews",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("opencode"),
+          "opencode/kimi-k3",
+        ),
+      });
+      releaseAll.resolve(undefined);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("5 seconds")));
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        taskCases.flatMap(() => ["task.started", "task.completed"]),
+      );
+      NodeAssert.equal(
+        events.every((event) => event.turnId === turn.turnId),
+        true,
+      );
+      for (const [index, taskCase] of taskCases.entries()) {
+        const completed = events[index * 2 + 1];
+        NodeAssert.ok(completed?.type === "task.completed");
+        NodeAssert.equal(completed.payload.taskId, taskCase.sessionId, taskCase.sessionId);
+        NodeAssert.equal(completed.payload.status, "completed");
+        NodeAssert.equal(
+          completed.payload.summary,
+          taskCase.summary ?? taskCase.output.trim(),
+          taskCase.sessionId,
+        );
+      }
+    }),
+  );
+
   it.effect("keeps an ordinary completed row for an uncorrelated task call", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
@@ -8198,14 +8722,46 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
             time: status === "completed" ? { start: 1, end: 2 } : { start: 1 },
           }),
         );
+      const childTextPartId = "part-resumed-child-text";
+      const childTextMessageId = "msg-resumed-child-text";
+      const childTextSnapshot = (text: string) => ({
+        type: "message.part.updated" as const,
+        properties: {
+          sessionID: childSessionId,
+          part: {
+            id: childTextPartId,
+            sessionID: childSessionId,
+            messageID: childTextMessageId,
+            type: "text",
+            text,
+            time: { start: 1 },
+          },
+          time: 1,
+        },
+      });
+      const childTextDelta = (delta: string) => ({
+        type: "message.part.delta" as const,
+        properties: {
+          sessionID: childSessionId,
+          messageID: childTextMessageId,
+          partID: childTextPartId,
+          field: "text",
+          delta,
+        },
+      });
       runtimeMock.state.subscribedEvents = [
         releaseFirstTurn.promise.then(() => taskPart("call-resume-first", "running", false)),
+        releaseFirstTurn.promise.then(() => childTextSnapshot("old draft")),
+        releaseFirstTurn.promise.then(() => childTextDelta(" tail")),
         taskPart("call-resume-first", "completed", false),
         {
           type: "session.status",
           properties: { sessionID: OPENCODE_TEST_SESSION_ID, status: { type: "idle" } },
         },
         releaseSecondTurn.promise.then(() => taskPart("call-resume-second", "running", true)),
+        // The part id carried over from the first activation; its accumulator
+        // must have been reset, or this delta would resurrect old text.
+        releaseSecondTurn.promise.then(() => childTextDelta("new")),
         taskPart("call-resume-second", "completed", true),
         toolPartEvent(
           makeToolPart("part-resume-marker", "bash", "call-resume-marker", {
@@ -8225,6 +8781,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
             event.threadId === threadId &&
             (event.type === "task.started" ||
               event.type === "task.updated" ||
+              event.type === "task.progress" ||
               event.type === "task.completed" ||
               event.type === "turn.completed" ||
               (event.type === "item.completed" && event.itemId === "call-resume-marker")),
@@ -8234,7 +8791,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
             ? Deferred.succeed(firstTurnCompleted, undefined).pipe(Effect.asVoid)
             : Effect.void,
         ),
-        Stream.take(6),
+        Stream.take(9),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -8268,23 +8825,33 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         events.map((event) => event.type),
         [
           "task.started",
+          "task.progress",
+          "task.progress",
           "task.completed",
           "turn.completed",
           "task.updated",
+          "task.progress",
           "task.completed",
           "item.completed",
         ],
       );
+      // First activation accumulates snapshot→delta text; after terminal
+      // settlement and resume reactivation the same part id starts from
+      // empty text instead of inheriting the first activation's buffer.
+      NodeAssert.deepEqual(
+        events.flatMap((event) => (event.type === "task.progress" ? [event.payload.summary] : [])),
+        ["old draft", "old draft tail", "new"],
+      );
       NodeAssert.equal(events[0]?.turnId, firstTurn.turnId);
       NodeAssert.equal(events[1]?.turnId, firstTurn.turnId);
-      const reactivated = events[3];
+      const reactivated = events[5];
       if (reactivated?.type === "task.updated") {
         NodeAssert.equal(reactivated.turnId, secondTurn.turnId);
         NodeAssert.equal(reactivated.payload.taskId, childSessionId);
         NodeAssert.equal(reactivated.payload.status, "running");
         NodeAssert.equal(reactivated.payload.toolUseId, "call-resume-second");
       }
-      NodeAssert.equal(events[4]?.turnId, secondTurn.turnId);
+      NodeAssert.equal(events[7]?.turnId, secondTurn.turnId);
     }),
   );
 

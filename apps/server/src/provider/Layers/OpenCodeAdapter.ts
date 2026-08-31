@@ -8,6 +8,7 @@ import {
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
+  type RuntimeTaskUsage,
   ThreadId,
   type ToolLifecycleItemType,
   TurnId,
@@ -282,8 +283,18 @@ interface OpenCodeChildTask {
   terminal: boolean;
   linkageFingerprint?: string;
   status?: string;
+  /** Last normalized assistant token snapshot reported for this child. */
+  typedUsage?: RuntimeTaskUsage;
+  usageFingerprint?: string;
   readonly toolFingerprints: Map<string, string>;
   readonly textFingerprints: Map<string, string>;
+  /**
+   * Rolling text snapshot per child text part, fed by `message.part.delta`
+   * events so progress rows carry the accumulated snapshot instead of the
+   * latest raw token fragment. `message.part.updated` snapshots stay
+   * authoritative and share the same keys.
+   */
+  readonly deltaTextByPartId: Map<string, string>;
 }
 
 interface OpenCodePendingChildState {
@@ -318,12 +329,137 @@ function stringFromUnknown(value: unknown): string | undefined {
   return typeof value === "string" ? trimText(value) : undefined;
 }
 
+function nonNegativeInt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : undefined;
+}
+
+/**
+ * OpenCode assistant token snapshot ({input, output, reasoning, cache.read,
+ * cache.write}) → the typed contract shape. The SDK carries no authoritative
+ * total, so the total is the sum of the five fields, and `inputTokens`
+ * includes cache traffic like the other adapters' rollups. A missing or
+ * malformed field fails the whole snapshot rather than yielding a partial
+ * guess.
+ */
+function normalizeOpenCodeChildUsage(tokens: unknown): RuntimeTaskUsage | undefined {
+  const record = recordFromUnknown(tokens);
+  const cache = recordFromUnknown(record?.cache);
+  if (!record || !cache) {
+    return undefined;
+  }
+  const input = nonNegativeInt(record.input);
+  const output = nonNegativeInt(record.output);
+  const reasoning = nonNegativeInt(record.reasoning);
+  const cacheRead = nonNegativeInt(cache.read);
+  const cacheWrite = nonNegativeInt(cache.write);
+  if (
+    input === undefined ||
+    output === undefined ||
+    reasoning === undefined ||
+    cacheRead === undefined ||
+    cacheWrite === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    totalTokens: input + output + reasoning + cacheRead + cacheWrite,
+    inputTokens: input + cacheRead + cacheWrite,
+    cachedInputTokens: cacheRead,
+    outputTokens: output,
+    reasoningOutputTokens: reasoning,
+  };
+}
+
+/**
+ * OpenCode initializes a fresh child's token snapshot at all zeros before any
+ * real work is reported; such a snapshot carries no usage progress.
+ */
+function openCodeChildUsageIsZero(usage: RuntimeTaskUsage): boolean {
+  return (
+    usage.totalTokens === 0 &&
+    (usage.inputTokens === undefined || usage.inputTokens === 0) &&
+    (usage.cachedInputTokens === undefined || usage.cachedInputTokens === 0) &&
+    (usage.outputTokens === undefined || usage.outputTokens === 0) &&
+    (usage.reasoningOutputTokens === undefined || usage.reasoningOutputTokens === 0)
+  );
+}
+
+/**
+ * Per-activation usage is monotonic: snapshots overwrite each other in place
+ * and can shrink at a step boundary, so each field takes the best (highest)
+ * value seen instead of trusting the latest snapshot. Fields never sum across
+ * snapshots.
+ */
+function mergeOpenCodeChildUsage(
+  baseline: RuntimeTaskUsage,
+  next: RuntimeTaskUsage,
+): RuntimeTaskUsage {
+  const maxByField = (
+    baselineValue: number | undefined,
+    nextValue: number | undefined,
+  ): number | undefined =>
+    baselineValue === undefined
+      ? nextValue
+      : nextValue === undefined
+        ? baselineValue
+        : Math.max(baselineValue, nextValue);
+  return {
+    totalTokens: Math.max(baseline.totalTokens, next.totalTokens),
+    inputTokens: maxByField(baseline.inputTokens, next.inputTokens),
+    cachedInputTokens: maxByField(baseline.cachedInputTokens, next.cachedInputTokens),
+    outputTokens: maxByField(baseline.outputTokens, next.outputTokens),
+    reasoningOutputTokens: maxByField(baseline.reasoningOutputTokens, next.reasoningOutputTokens),
+  };
+}
+
+function openCodeChildUsageFingerprint(usage: RuntimeTaskUsage): string {
+  return [
+    usage.totalTokens,
+    usage.inputTokens,
+    usage.cachedInputTokens,
+    usage.outputTokens,
+    usage.reasoningOutputTokens,
+  ].join("\u0000");
+}
+
 function boundedOpenCodeActivityText(value: unknown, maxLength: number): string | undefined {
   const text = stringFromUnknown(value);
   if (!text) {
     return undefined;
   }
   return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+}
+
+/**
+ * OpenCode's task tool reports its output inside a provider-owned protocol
+ * envelope (see upstream `renderOutput`): `<task id=… state=…>` wrapping an
+ * optional `<summary>` and a `<task_result>`/`<task_error>` block. Only a
+ * whole anchored envelope unwraps; bare result/error blocks, a task wrapper
+ * without a result/error block, mismatched tags, and other XML-like text all
+ * pass through untouched.
+ */
+const OPENCODE_TASK_ENVELOPE_PATTERN = /^\s*<task\b[^>]*>([\s\S]*)<\/task>\s*$/i;
+const OPENCODE_TASK_SUMMARY_PATTERN = /^\s*<summary\b[^>]*>[\s\S]*?<\/summary>\s*/i;
+const OPENCODE_TASK_RESULT_PATTERN = /^\s*<task_(result|error)\b[^>]*>([\s\S]*)<\/task_\1>\s*$/i;
+
+function openCodeTaskOutputText(output: unknown): string {
+  const text = stringFromUnknown(output) ?? "";
+  const envelope = OPENCODE_TASK_ENVELOPE_PATTERN.exec(text);
+  if (!envelope) {
+    return text;
+  }
+  let inner = envelope[1] ?? "";
+  const summary = OPENCODE_TASK_SUMMARY_PATTERN.exec(inner);
+  if (summary) {
+    inner = inner.slice(summary[0].length);
+  }
+  const result = OPENCODE_TASK_RESULT_PATTERN.exec(inner.trim());
+  if (!result) {
+    return text;
+  }
+  return (result[2] ?? "").trim();
 }
 
 function openCodeTaskMetadata(part: Extract<Part, { type: "tool" }>): {
@@ -429,7 +565,19 @@ const OPENCODE_UNBOUND_TASK_LIMIT = 128;
 const OPENCODE_EVICTED_CHILD_LIMIT = 128;
 const OPENCODE_PENDING_CHILD_LIMIT = 128;
 const OPENCODE_CHILD_FINGERPRINT_LIMIT = 128;
+const OPENCODE_CHILD_DELTA_TEXT_LIMIT = 2_000;
 const OPENCODE_REQUEST_TOMBSTONE_LIMIT = 128;
+
+/**
+ * Per-part accumulator bound shared by the snapshot seed and the delta
+ * append paths, so one entry can never grow past the limit regardless of
+ * which event fed it.
+ */
+function boundOpenCodeChildDeltaText(text: string): string {
+  return text.length > OPENCODE_CHILD_DELTA_TEXT_LIMIT
+    ? text.slice(0, OPENCODE_CHILD_DELTA_TEXT_LIMIT)
+    : text;
+}
 /**
  * Depth cap for walks over the child `parentSessionId` graph (ancestry
  * checks, descendant enumeration). Matches the bound used by the session
@@ -1517,6 +1665,7 @@ export function makeOpenCodeAdapter(
       task.status = status;
       task.toolFingerprints.clear();
       task.textFingerprints.clear();
+      task.deltaTextByPartId.clear();
       yield* emit({
         ...(yield* buildEventBase({
           threadId: context.session.threadId,
@@ -1528,6 +1677,7 @@ export function makeOpenCodeAdapter(
           taskId: RuntimeTaskId.make(task.sessionId),
           status,
           ...(summary ? { summary } : {}),
+          ...(task.typedUsage ? { typedUsage: task.typedUsage } : {}),
           ...childTaskLinkage(context, task),
         },
       });
@@ -1663,6 +1813,7 @@ export function makeOpenCodeAdapter(
         terminal: false,
         toolFingerprints: new Map(),
         textFingerprints: new Map(),
+        deltaTextByPartId: new Map(),
       };
       context.childTasksBySessionId.set(input.sessionId, task);
       return task;
@@ -1718,10 +1869,13 @@ export function makeOpenCodeAdapter(
         existingTask.backgroundKnown = parentTask.backgroundKnown;
         existingTask.idleObserved = false;
         delete existingTask.latestResult;
+        delete existingTask.typedUsage;
+        delete existingTask.usageFingerprint;
         existingTask.terminal = false;
         existingTask.status = "running";
         existingTask.toolFingerprints.clear();
         existingTask.textFingerprints.clear();
+        existingTask.deltaTextByPartId.clear();
         existingTask.linkageFingerprint = childTaskFingerprint(existingTask);
         parentTask.childSessionId = childSessionId;
         context.relatedSessionIds.add(childSessionId);
@@ -1978,7 +2132,7 @@ export function makeOpenCodeAdapter(
           context,
           task,
           "completed",
-          boundedOpenCodeActivityText(state?.output, 2_000),
+          boundedOpenCodeActivityText(openCodeTaskOutputText(state?.output), 2_000),
           raw,
         );
       }
@@ -2936,7 +3090,7 @@ export function makeOpenCodeAdapter(
     const emitChildTaskProgress = Effect.fn("emitChildTaskProgress")(function* (
       context: OpenCodeSessionContext,
       task: OpenCodeChildTask,
-      summary: string,
+      summary: string | undefined,
       raw: unknown,
     ) {
       if (task.terminal) {
@@ -2954,7 +3108,8 @@ export function makeOpenCodeAdapter(
         payload: {
           taskId: RuntimeTaskId.make(task.sessionId),
           description: task.title ?? "Subagent task",
-          summary,
+          ...(summary ? { summary } : {}),
+          ...(task.typedUsage ? { typedUsage: task.typedUsage } : {}),
           status: "running",
           ...childTaskLinkage(context, task),
         },
@@ -3080,7 +3235,26 @@ export function makeOpenCodeAdapter(
           break;
         }
         case "message.part.delta": {
-          const summary = boundedOpenCodeActivityText(event.properties.delta, 180);
+          // Accumulate fragments per part so the progress row carries the
+          // text so far — mirroring the complete snapshots the
+          // `message.part.updated` path emits — instead of replacing it with
+          // each raw token fragment.
+          const previousDeltaText = task.deltaTextByPartId.get(event.properties.partID) ?? "";
+          const { nextText } = appendOpenCodeAssistantTextDelta(
+            previousDeltaText,
+            event.properties.delta,
+          );
+          const snapshot = boundOpenCodeChildDeltaText(nextText);
+          if (!snapshot) {
+            break;
+          }
+          setBoundedMapValue(
+            task.deltaTextByPartId,
+            event.properties.partID,
+            snapshot,
+            OPENCODE_CHILD_FINGERPRINT_LIMIT,
+          );
+          const summary = boundedOpenCodeActivityText(snapshot, 180);
           if (!summary) {
             break;
           }
@@ -3142,6 +3316,24 @@ export function makeOpenCodeAdapter(
             break;
           }
           const text = textFromPart(part);
+          // A snapshot is the authoritative full text so far: seed/replace
+          // the delta accumulator so the next `message.part.delta` continues
+          // from it instead of restarting from empty text and emitting a raw
+          // fragment. An empty snapshot is an authoritative replacement too:
+          // it resets that part's accumulator so a following delta starts
+          // fresh instead of extending stale text.
+          if (text !== undefined) {
+            if (text.length > 0) {
+              setBoundedMapValue(
+                task.deltaTextByPartId,
+                part.id,
+                boundOpenCodeChildDeltaText(text),
+                OPENCODE_CHILD_FINGERPRINT_LIMIT,
+              );
+            } else {
+              task.deltaTextByPartId.delete(part.id);
+            }
+          }
           const summary = boundedOpenCodeActivityText(text, 180);
           const latestResult =
             part.type === "text" ? boundedOpenCodeActivityText(text, 2_000) : undefined;
@@ -3159,6 +3351,30 @@ export function makeOpenCodeAdapter(
             OPENCODE_CHILD_FINGERPRINT_LIMIT,
           );
           yield* emitChildTaskProgress(context, task, summary, event);
+          break;
+        }
+        case "message.updated": {
+          // OpenCode overwrites the token snapshot as the child works: zero
+          // at activation, cumulative while running, sometimes smaller at a
+          // step boundary. The best-known usage only grows (field-wise max),
+          // and the fingerprint of the merged value — not the raw snapshot —
+          // gates emission, so lower or repeated snapshots stay silent. The
+          // merge state resets when a child is adopted into a new activation.
+          if (event.properties.info.role !== "assistant") {
+            break;
+          }
+          const usage = normalizeOpenCodeChildUsage(event.properties.info.tokens);
+          if (!usage || openCodeChildUsageIsZero(usage)) {
+            break;
+          }
+          const merged = task.typedUsage ? mergeOpenCodeChildUsage(task.typedUsage, usage) : usage;
+          const fingerprint = openCodeChildUsageFingerprint(merged);
+          if (task.usageFingerprint === fingerprint) {
+            break;
+          }
+          task.typedUsage = merged;
+          task.usageFingerprint = fingerprint;
+          yield* emitChildTaskProgress(context, task, undefined, event);
           break;
         }
         default:
