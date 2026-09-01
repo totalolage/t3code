@@ -445,7 +445,11 @@ const OPENCODE_TASK_SUMMARY_PATTERN = /^\s*<summary\b[^>]*>[\s\S]*?<\/summary>\s
 const OPENCODE_TASK_RESULT_PATTERN = /^\s*<task_(result|error)\b[^>]*>([\s\S]*)<\/task_\1>\s*$/i;
 
 function openCodeTaskOutputText(output: unknown): string {
-  const text = stringFromUnknown(output) ?? "";
+  // Plain text passes through byte-for-byte: this output seeds the child
+  // delta accumulator, so a trimmed snapshot would glue the next delta onto
+  // its last word. Only a valid whole envelope unwraps (to trimmed inner
+  // text); everything else — including malformed markup — is returned as-is.
+  const text = typeof output === "string" ? output : "";
   const envelope = OPENCODE_TASK_ENVELOPE_PATTERN.exec(text);
   if (!envelope) {
     return text;
@@ -3156,7 +3160,14 @@ export function makeOpenCodeAdapter(
         case "message.part.updated": {
           const part = event.properties.part;
           if (part.type === "text") {
-            const latestResult = boundedOpenCodeActivityText(part.text, 2_000);
+            // Child text parts can carry a provider-owned task envelope:
+            // OpenCode's task tool injects its `renderOutput` envelope as a
+            // text part on the invoking session when a background subagent
+            // settles. Keep only the inner result in buffered state.
+            const latestResult = boundedOpenCodeActivityText(
+              openCodeTaskOutputText(part.text),
+              2_000,
+            );
             if (latestResult) {
               pending.latestResult = latestResult;
             }
@@ -3316,27 +3327,32 @@ export function makeOpenCodeAdapter(
             break;
           }
           const text = textFromPart(part);
+          // Child text parts can carry a provider-owned task envelope (see
+          // upstream `renderOutput`/`inject`): unwrap a whole envelope so
+          // progress rows and the settled result hold the inner text, while
+          // plain child text and malformed markup pass through untouched.
+          const normalizedText = text === undefined ? undefined : openCodeTaskOutputText(text);
           // A snapshot is the authoritative full text so far: seed/replace
           // the delta accumulator so the next `message.part.delta` continues
           // from it instead of restarting from empty text and emitting a raw
           // fragment. An empty snapshot is an authoritative replacement too:
           // it resets that part's accumulator so a following delta starts
           // fresh instead of extending stale text.
-          if (text !== undefined) {
-            if (text.length > 0) {
+          if (normalizedText !== undefined) {
+            if (normalizedText.length > 0) {
               setBoundedMapValue(
                 task.deltaTextByPartId,
                 part.id,
-                boundOpenCodeChildDeltaText(text),
+                boundOpenCodeChildDeltaText(normalizedText),
                 OPENCODE_CHILD_FINGERPRINT_LIMIT,
               );
             } else {
               task.deltaTextByPartId.delete(part.id);
             }
           }
-          const summary = boundedOpenCodeActivityText(text, 180);
+          const summary = boundedOpenCodeActivityText(normalizedText, 180);
           const latestResult =
-            part.type === "text" ? boundedOpenCodeActivityText(text, 2_000) : undefined;
+            part.type === "text" ? boundedOpenCodeActivityText(normalizedText, 2_000) : undefined;
           const fingerprint = latestResult ?? summary;
           if (!summary || !fingerprint || task.textFingerprints.get(part.id) === fingerprint) {
             break;
