@@ -5837,6 +5837,11 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         // instead of extending the stale text. Other parts keep theirs.
         childTextSnapshot("part-child-snapshot-text", "msg-child-snapshot-text", ""),
         childDelta("part-child-snapshot-text", "msg-child-snapshot-text", "new"),
+        // Plain child text is not provider markup: a snapshot keeps its
+        // boundary whitespace so the next delta joins into real word spacing
+        // instead of gluing onto the last word.
+        childTextSnapshot("part-child-boundary", "msg-child-boundary", "Phase one "),
+        childDelta("part-child-boundary", "msg-child-boundary", "continued"),
       ];
 
       const eventsFiber = yield* adapter.streamEvents.pipe(
@@ -5848,7 +5853,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
               event.type === "task.progress" ||
               event.type === "task.completed"),
         ),
-        Stream.take(6),
+        Stream.take(8),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -5877,6 +5882,8 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           "task.progress",
           "task.progress",
           "task.progress",
+          "task.progress",
+          "task.progress",
         ],
       );
       NodeAssert.equal(
@@ -5885,10 +5892,12 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       );
       // Each delta row continues from the snapshot it followed, for text and
       // reasoning parts alike. The empty snapshot resets its part, so the
-      // final delta reads "new" instead of extending the stale "the em".
+      // final delta reads "new" instead of extending the stale "the em". The
+      // boundary-whitespace part accumulates to "Phase one continued": its
+      // snapshot's trailing space survives the seam.
       NodeAssert.deepEqual(
         events.flatMap((event) => (event.type === "task.progress" ? [event.payload.summary] : [])),
-        ["the", "the em", "plan step", "plan step two", "new"],
+        ["the", "the em", "plan step", "plan step two", "new", "Phase one", "Phase one continued"],
       );
     }),
   );
@@ -7910,6 +7919,255 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           taskCase.summary ?? taskCase.output.trim(),
           taskCase.sessionId,
         );
+      }
+    }),
+  );
+
+  it.effect(
+    "settles a background child with the injected envelope's inner result, not the markup",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-inject-envelope-idle");
+        const releaseEvents = promiseWithResolvers<void>();
+        const coordSessionId = "ses_coord_inject_idle";
+        const grandSessionId = "ses_grand_inject_idle";
+        // OpenCode's task tool renders a settled background subagent with
+        // `renderOutput` and injects the whole envelope as a synthetic text
+        // part on the invoking session (see upstream `inject`). For a nested
+        // spawn that invoking session is the tracked coordinator child.
+        const grandEnvelope = `<task id="${grandSessionId}" state="completed">\n<summary>Background task completed: Grand sub</summary>\n<task_result>\nSub result body\n</task_result>\n</task>\n`;
+        const partOnCoord = (part: Record<string, unknown>) => ({
+          type: "message.part.updated" as const,
+          properties: { sessionID: coordSessionId, part },
+        });
+        runtimeMock.state.subscribedEvents = [
+          releaseEvents.promise.then(() =>
+            toolPartEvent(
+              makeToolPart("part-coord-inject-idle", "task", "call-coord-inject-idle", {
+                status: "running",
+                input: { description: "Run workflow", subagent_type: "coordinator" },
+                title: "Run workflow",
+                metadata: {
+                  parentSessionId: OPENCODE_TEST_SESSION_ID,
+                  sessionId: coordSessionId,
+                  background: true,
+                  jobId: coordSessionId,
+                },
+                time: { start: 1 },
+              }),
+            ),
+          ),
+          releaseEvents.promise.then(() => ({
+            type: "session.created" as const,
+            properties: {
+              sessionID: coordSessionId,
+              info: {
+                id: coordSessionId,
+                parentID: OPENCODE_TEST_SESSION_ID,
+                title: "Child session - 2026-09-01T12:00:00.000Z",
+              },
+            },
+          })),
+          releaseEvents.promise.then(() =>
+            partOnCoord({
+              id: "part-coord-inject-idle-text",
+              sessionID: coordSessionId,
+              messageID: "msg-coord-inject-idle-text",
+              type: "text",
+              text: "Phase one kicked off",
+              time: { start: 2 },
+            }),
+          ),
+          // The grandchild settles before the coordinator goes idle: the
+          // envelope lands on the still-running coordinator session...
+          releaseEvents.promise.then(() =>
+            partOnCoord({
+              id: "part-coord-inject-idle-envelope",
+              sessionID: coordSessionId,
+              messageID: "msg-coord-inject-idle-envelope",
+              type: "text",
+              synthetic: true,
+              text: grandEnvelope,
+              time: { start: 3 },
+            }),
+          ),
+          // ...and the coordinator's own idle then settles the background task
+          // from its latest result.
+          releaseEvents.promise.then(() => ({
+            type: "session.status",
+            properties: { sessionID: coordSessionId, status: { type: "idle" } },
+          })),
+        ];
+
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.threadId === threadId &&
+              (event.type === "task.started" ||
+                event.type === "task.updated" ||
+                event.type === "task.progress" ||
+                event.type === "task.completed"),
+          ),
+          Stream.take(4),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const turn = yield* adapter.sendTurn({
+          threadId,
+          input: "Run workflow",
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("opencode"),
+            "opencode/kimi-k3",
+          ),
+        });
+        releaseEvents.resolve(undefined);
+
+        const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("3 seconds")));
+        NodeAssert.deepEqual(
+          events.map((event) => event.type),
+          ["task.started", "task.progress", "task.progress", "task.completed"],
+        );
+        NodeAssert.equal(
+          events.every((event) => event.turnId === turn.turnId),
+          true,
+        );
+        // Plain child text is preserved as-is...
+        NodeAssert.equal(
+          events[1]?.type === "task.progress" && events[1].payload.summary,
+          "Phase one kicked off",
+        );
+        // ...and the injected provider envelope enters the lifecycle only as
+        // its inner result: the progress row and the final completion summary
+        // must carry the unwrapped text, never the `<task …>` markup.
+        NodeAssert.equal(
+          events[2]?.type === "task.progress" && events[2].payload.summary,
+          "Sub result body",
+        );
+        const completed = events[3];
+        NodeAssert.ok(completed?.type === "task.completed");
+        if (completed?.type === "task.completed") {
+          NodeAssert.equal(completed.payload.taskId, coordSessionId);
+          NodeAssert.equal(completed.payload.status, "completed");
+          NodeAssert.equal(completed.payload.summary, "Sub result body");
+        }
+      }),
+  );
+
+  it.effect("keeps an injected envelope out of a pending child's settled result", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-inject-envelope-pending");
+      const releaseEvents = promiseWithResolvers<void>();
+      const coordSessionId = "ses_coord_inject_pending";
+      const grandSessionId = "ses_grand_inject_pending";
+      const grandEnvelope = `<task id="${grandSessionId}" state="completed">\n<summary>Background task completed: Grand sub</summary>\n<task_result>\nSub result body\n</task_result>\n</task>\n`;
+      runtimeMock.state.subscribedEvents = [
+        // The coordinator session is discovered before its task call is seen,
+        // so its early events buffer as pending child state.
+        releaseEvents.promise.then(() => ({
+          type: "session.created" as const,
+          properties: {
+            sessionID: coordSessionId,
+            info: {
+              id: coordSessionId,
+              parentID: OPENCODE_TEST_SESSION_ID,
+              title: "Child session - 2026-09-01T12:00:00.000Z",
+            },
+          },
+        })),
+        // The grandchild's settled envelope arrives while the coordinator is
+        // still pending...
+        releaseEvents.promise.then(() => ({
+          type: "message.part.updated" as const,
+          properties: {
+            sessionID: coordSessionId,
+            part: {
+              id: "part-coord-inject-pending-envelope",
+              sessionID: coordSessionId,
+              messageID: "msg-coord-inject-pending-envelope",
+              type: "text",
+              synthetic: true,
+              text: grandEnvelope,
+              time: { start: 1 },
+            },
+          },
+        })),
+        releaseEvents.promise.then(() => ({
+          type: "session.status",
+          properties: { sessionID: coordSessionId, status: { type: "idle" } },
+        })),
+        // ...and the background task call that owns it completes afterwards,
+        // binding the pending child and settling it from the buffered result.
+        releaseEvents.promise.then(() =>
+          toolPartEvent(
+            makeToolPart("part-coord-inject-pending", "task", "call-coord-inject-pending", {
+              status: "completed",
+              input: { description: "Run workflow", subagent_type: "coordinator" },
+              output: `<task id="${coordSessionId}" state="running">\n<summary>Background task started</summary>\n<task_result>\nWorking in the background.\n</task_result>\n</task>\n`,
+              title: "Run workflow",
+              metadata: {
+                parentSessionId: OPENCODE_TEST_SESSION_ID,
+                sessionId: coordSessionId,
+                background: true,
+                jobId: coordSessionId,
+              },
+              time: { start: 1, end: 2 },
+            }),
+          ),
+        ),
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type === "task.started" ||
+              event.type === "task.updated" ||
+              event.type === "task.progress" ||
+              event.type === "task.completed"),
+        ),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "Run workflow",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("opencode"),
+          "opencode/kimi-k3",
+        ),
+      });
+      releaseEvents.resolve(undefined);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("3 seconds")));
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        ["task.started", "task.completed"],
+      );
+      NodeAssert.equal(
+        events.every((event) => event.turnId === turn.turnId),
+        true,
+      );
+      const completed = events[1];
+      NodeAssert.ok(completed?.type === "task.completed");
+      if (completed?.type === "task.completed") {
+        NodeAssert.equal(completed.payload.taskId, coordSessionId);
+        NodeAssert.equal(completed.payload.status, "completed");
+        // The pending buffer's envelope-captured result settles the child as
+        // the unwrapped inner text, never the `<task …>` markup.
+        NodeAssert.equal(completed.payload.summary, "Sub result body");
       }
     }),
   );
