@@ -63,6 +63,12 @@ it("builds and verifies versioned self-contained full CLIs for macOS and Linux",
     '"$cli" serve --help | grep -F "Run the T3 Code server without opening a browser and print headless pairing details."',
   );
   assert.include(workflow, '"$cli" service --help');
+  assert.include(workflow, '"$cli" __standalone-preflight | grep -F \'"ok":true\'');
+  assert.equal(
+    (workflow.match(/"\$cli" __standalone-preflight \| grep -F/gu) ?? []).length,
+    2,
+    "the FileFinder artifact probe must run for both the macOS and Linux CLIs",
+  );
   assert.include(workflow, 'codesign --force --sign - "$cli"');
   assert.include(workflow, 'shasum -a 256 "$(basename "$cli_asset")"');
   assert.include(workflow, 'sha256sum "$(basename "$cli_asset")"');
@@ -82,6 +88,21 @@ it("builds and verifies versioned self-contained full CLIs for macOS and Linux",
     workflow,
     "needs: [metadata_and_checks, build_macos_arm64, build_linux_x64, build_android_apk]",
   );
+});
+
+it("keeps the private native library hook the standalone CLIs rely on", () => {
+  const patchPath = NodePath.join(repoRoot, "patches/@ff-labs__fff-node@0.9.4.patch");
+  const patch = NodeFS.readFileSync(patchPath, "utf8");
+  // The resolver hook must be the private global only our materializer sets —
+  // never an inherited environment variable an attacker could point at code.
+  assert.include(patch, 'Symbol.for("t3code.fff.materializedLibraryPath")');
+  assert.equal(patch.includes("FFF_BINARY_PATH"), false);
+  const buildScript = NodeFS.readFileSync(
+    NodePath.join(repoRoot, "apps/server/scripts/buildStandaloneBinary.ts"),
+    "utf8",
+  );
+  assert.include(buildScript, "resolveFffNativeLibrary");
+  assert.include(buildScript, "fffNativeLibrary.filePath");
 });
 
 it("builds and verifies the Linux desktop AppImage", () => {

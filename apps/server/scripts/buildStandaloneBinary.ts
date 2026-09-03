@@ -3,6 +3,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import packageJson from "../package.json" with { type: "json" };
+import { resolveFffNativeLibrary } from "./standaloneNativeLibrary.ts";
 
 const [rawTarget, output] = process.argv.slice(2);
 if ((rawTarget !== "bun-darwin-arm64" && rawTarget !== "bun-linux-x64-baseline") || !output) {
@@ -12,6 +13,7 @@ const target = rawTarget;
 
 const serverDir = NodePath.resolve(import.meta.dirname, "..");
 const repoRoot = NodePath.resolve(serverDir, "../..");
+const fffNativeLibrary = resolveFffNativeLibrary({ target, serverDir });
 const webDist = NodePath.join(repoRoot, "apps", "web", "dist");
 const webIndex = NodePath.join(webDist, "index.html");
 if (!NodeFS.existsSync(webIndex)) {
@@ -30,6 +32,7 @@ function listFiles(root: string): string[] {
 const result = await Bun.build({
   entrypoints: [
     NodePath.join(serverDir, "src", "standalone-bin.ts"),
+    fffNativeLibrary.filePath,
     ...listFiles(webDist).filter((file) => file !== webIndex),
   ],
   compile: {
@@ -45,7 +48,9 @@ const result = await Bun.build({
       name: "standalone-client-assets",
       setup(build) {
         build.onLoad({ filter: /.*/ }, async (args) => {
-          if (!args.path.startsWith(`${webDist}${NodePath.sep}`)) return;
+          const isNativeLibrary = args.path === fffNativeLibrary.filePath;
+          const isClientAsset = args.path.startsWith(`${webDist}${NodePath.sep}`);
+          if (!isNativeLibrary && !isClientAsset) return;
           return {
             contents: new Uint8Array(await Bun.file(args.path).arrayBuffer()),
             loader: "file",
