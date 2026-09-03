@@ -190,6 +190,7 @@ jobs:
           "$cli" remote --help | grep -F "Use the supported remote orchestration API."
           "$cli" serve --help | grep -F "Run the T3 Code server without opening a browser and print headless pairing details."
           "$cli" service --help | grep -F "Manage the T3 Code background service."
+          "$cli" __standalone-preflight | grep -F '"ok":true'
           codesign --force --sign - "$cli"
           codesign --verify --strict --verbose=2 "$cli"
 
@@ -321,6 +322,7 @@ jobs:
           "$cli" remote --help | grep -F "Use the supported remote orchestration API."
           "$cli" serve --help | grep -F "Run the T3 Code server without opening a browser and print headless pairing details."
           "$cli" service --help | grep -F "Manage the T3 Code background service."
+          "$cli" __standalone-preflight | grep -F '"ok":true'
 
           mkdir -p release-publish
           cp "$appimage" "$update_manifest" release-publish/

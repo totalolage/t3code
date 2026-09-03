@@ -1,5 +1,5 @@
 diff --git a/dist/src/binary.js b/dist/src/binary.js
-index ee181aef5007e4bf34a49479c089ca30f73a320b..327e2c55c83cc4c50d396a3109190ef10af75ca7 100644
+index ee181aef5007e4bf34a49479c089ca30f73a320b..776f60e0526967bbf14436c5363285a8c29b73d2 100644
 --- a/dist/src/binary.js
 +++ b/dist/src/binary.js
 @@ -7,7 +7,7 @@
@@ -28,7 +28,7 @@ index ee181aef5007e4bf34a49479c089ca30f73a320b..327e2c55c83cc4c50d396a3109190ef1
  /**
   * Check if the binary exists in any known location
   */
-@@ -69,7 +77,7 @@ function resolveFromNpmPackage() {
+@@ -69,7 +79,7 @@ function resolveFromNpmPackage() {
          const packageDir = dirname(packageJsonPath);
          const binaryPath = join(packageDir, getLibFilename());
          if (existsSync(binaryPath)) {
@@ -37,3 +37,25 @@ index ee181aef5007e4bf34a49479c089ca30f73a320b..327e2c55c83cc4c50d396a3109190ef1
          }
      }
      catch {
+@@ -104,12 +114,21 @@ function isDevWorkspace() {
+  * Find the native library binary.
+  *
+  * Resolution order:
+  * - Dev workspace: local dev build first, then npm package
+  * - Production: npm package first, then dev build
+  *
+  * @returns Absolute path to the library, or null if not found
+  */
+ export function findBinary() {
++    // T3 Code: compiled standalone binaries set this private global to the
++    // materialized embedded library path; only their own startup code assigns
++    // it, so ordinary npm/dev/desktop resolution below stays untouched.
++    const materializedPath = globalThis[Symbol.for("t3code.fff.materializedLibraryPath")];
++    if (typeof materializedPath === "string" && materializedPath.length > 0) {
++        if (existsSync(materializedPath)) {
++            return materializedPath;
++        }
++    }
+     if (isDevWorkspace()) {
+         // 1. Local bin/ directory (populated by `make prepare-node`)
+         const binPath = join(getPackageDir(), "bin", getLibFilename());

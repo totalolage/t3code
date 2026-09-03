@@ -85,7 +85,7 @@ patchedDependencies:
   '@clerk/expo@4.2.0': 72e426f44fc1cde16fc2cbba3d1e96cdca7c6d957faa73d0fe6b43948608a6c1
   '@effect/vitest@4.0.0-beta.103': a16b1e870d8c29e4a98b17cc4c638a4ff471753d8ca3487f78a22b759caf951b
   '@expo/metro-config@57.0.12': 96f1a75347e6ea02dc4b7034ace815d8ee39e18b8166ebfb573d9e58328f0dc2
-  '@ff-labs/fff-node@0.9.4': ab9ff544009e1891cfe3930105862d3699007f38922a79f3c98d90018deca368
+  '@ff-labs/fff-node@0.9.4': 3f917b3961b5ad77ba5af7e30a1973c8127e9d7f79b0ffd5916ab94526b518e8
   '@legendapp/list@3.3.5': 064530db83875fa671559a81ae42dc159726dc2dd6ec4c982da44ff7c7a74706
   '@pierre/diffs@1.3.0-beta.10': 7ef7cb0cbabb17c15cdb137554068b36f15f6f5265e73fb51452aa3380db91aa
   '@react-native-menu/menu@2.0.0': f63d256bf6a97a873b5e628eb595bd6ef0075ddd5bdd890fc920f7a6024290dd
@@ -481,7 +481,7 @@ importers:
         version: 4.0.0-beta.103(effect@4.0.0-beta.103(patch_hash=af36b7948b6f9c56623074662b51dade5699880c1a7c71245de73e13c3185fb6))
       '@ff-labs/fff-node':
         specifier: 0.9.4
-        version: 0.9.4(patch_hash=ab9ff544009e1891cfe3930105862d3699007f38922a79f3c98d90018deca368)
+        version: 0.9.4(patch_hash=3f917b3961b5ad77ba5af7e30a1973c8127e9d7f79b0ffd5916ab94526b518e8)
       '@opencode-ai/sdk':
         specifier: ^1.3.15
         version: 1.15.13
@@ -12338,7 +12338,7 @@ snapshots:
   '@ff-labs/fff-bin-win32-x64@0.9.4':
     optional: true
 
-  '@ff-labs/fff-node@0.9.4(patch_hash=ab9ff544009e1891cfe3930105862d3699007f38922a79f3c98d90018deca368)':
+  '@ff-labs/fff-node@0.9.4(patch_hash=3f917b3961b5ad77ba5af7e30a1973c8127e9d7f79b0ffd5916ab94526b518e8)':
     dependencies:
       ffi-rs: 1.3.2
     optionalDependencies:

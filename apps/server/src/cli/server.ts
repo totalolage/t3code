@@ -3,6 +3,7 @@ import { Command, GlobalFlag } from "effect/unstable/cli";
 
 import { ServerConfig, type StartupPresentation } from "../config.ts";
 import { runServer } from "../server.ts";
+import { prepareStandaloneNativeLibrary } from "../standaloneFffNative.ts";
 import { type CliServerFlags, resolveServerConfig, sharedServerCommandFlags } from "./config.ts";
 
 export const runServerCommand = (
@@ -15,6 +16,10 @@ export const runServerCommand = (
   Effect.gen(function* () {
     const logLevel = yield* GlobalFlag.LogLevel;
     const config = yield* resolveServerConfig(flags, logLevel, options);
+    // Compiled binaries materialize the embedded fff native library under the
+    // effective base directory before anything can dlopen it. Every other
+    // command skips this, so --version and helpers never touch the disk.
+    yield* prepareStandaloneNativeLibrary(config.baseDir);
     return yield* runServer.pipe(Effect.provideService(ServerConfig, config));
   });
 
