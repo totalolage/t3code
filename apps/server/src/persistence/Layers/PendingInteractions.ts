@@ -142,6 +142,23 @@ const makePendingInteractionRepository = Effect.gen(function* () {
     `,
   });
 
+  const listAllOpenByThreadIdRows = SqlSchema.findAll({
+    Request: Schema.Struct({ threadId: ThreadId }),
+    Result: PendingInteractionDbRow,
+    execute: ({ threadId }) => sql`
+      SELECT
+        thread_id AS "threadId", request_id AS "requestId", kind, status, summary,
+        can_approve AS "canApprove", questions_json AS "questions",
+        response_action AS "responseAction", response_command_id AS "responseCommandId",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt", resolved_at AS "resolvedAt"
+      FROM pending_interactions
+      WHERE status IN ('pending', 'responding')
+        AND thread_id = ${threadId}
+      ORDER BY created_at ASC, thread_id ASC, request_id ASC
+    `,
+  });
+
   const getRow = SqlSchema.findOneOption({
     Request: PendingInteractionLookup,
     Result: PendingInteractionDbRow,
@@ -212,6 +229,19 @@ const makePendingInteractionRepository = Effect.gen(function* () {
         mapRepositoryError(
           "PendingInteractionRepository.listOpen:query",
           "PendingInteractionRepository.listOpen:decode",
+        ),
+      ),
+    );
+
+  const listAllOpenByThreadId: PendingInteractionRepositoryShape["listAllOpenByThreadId"] = (
+    input,
+  ) =>
+    listAllOpenByThreadIdRows(input).pipe(
+      Effect.map((rows) => rows.map(toRow)),
+      Effect.mapError(
+        mapRepositoryError(
+          "PendingInteractionRepository.listAllOpenByThreadId:query",
+          "PendingInteractionRepository.listAllOpenByThreadId:decode",
         ),
       ),
     );
@@ -402,6 +432,7 @@ const makePendingInteractionRepository = Effect.gen(function* () {
   return PendingInteractionRepository.of({
     upsertOpened,
     listOpen,
+    listAllOpenByThreadId,
     get,
     markResponding,
     resolve,

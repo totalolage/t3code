@@ -27,6 +27,7 @@ import * as TerminalManager from "../../terminal/Manager.ts";
 import * as VcsStatusBroadcaster from "../../vcs/VcsStatusBroadcaster.ts";
 import * as OrchestrationEngine from "./OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./ProjectionSnapshotQuery.ts";
+import { ThreadDeletionReactor } from "./ThreadDeletionReactor.ts";
 
 const makeTestDispatcher = (dependencies: {
   readonly crypto: Crypto.Crypto;
@@ -37,6 +38,7 @@ const makeTestDispatcher = (dependencies: {
   readonly startup: unknown;
   readonly terminalManager?: unknown;
   readonly vcsStatusBroadcaster: unknown;
+  readonly threadDeletionReactor?: unknown;
 }) =>
   make.pipe(
     Effect.provideService(Crypto.Crypto, dependencies.crypto),
@@ -76,7 +78,69 @@ const makeTestDispatcher = (dependencies: {
       VcsStatusBroadcaster.VcsStatusBroadcaster,
       dependencies.vcsStatusBroadcaster as never,
     ),
+    Effect.provideService(
+      ThreadDeletionReactor,
+      (dependencies.threadDeletionReactor ?? {
+        start: () => Effect.void,
+        drainThrough: () => Effect.void,
+      }) as never,
+    ),
   );
+
+const makeBootstrapTurnStartCommand = (input: {
+  readonly commandId: string;
+  readonly threadId: string;
+  readonly projectId: string;
+  readonly branch?: string;
+  readonly prepareWorktree?: boolean;
+  readonly runSetupScript?: boolean;
+  readonly startFromOrigin?: boolean;
+}) => {
+  const threadId = ThreadId.make(input.threadId);
+  const projectId = ProjectId.make(input.projectId);
+  const modelSelection = {
+    instanceId: ProviderInstanceId.make("codex"),
+    model: "gpt-5.4",
+  } as const;
+  return {
+    type: "thread.turn.start",
+    commandId: CommandId.make(input.commandId),
+    threadId,
+    message: {
+      messageId: MessageId.make(`${input.commandId}-message`),
+      role: "user",
+      text: "bootstrap test",
+      attachments: [],
+    },
+    modelSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    bootstrap: {
+      createThread: {
+        projectId,
+        title: "Bootstrap test",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      ...(input.prepareWorktree === false
+        ? {}
+        : {
+            prepareWorktree: {
+              projectCwd: "/tmp/project",
+              baseBranch: "main",
+              branch: input.branch ?? "feat/bootstrap-test",
+              startFromOrigin: input.startFromOrigin ?? false,
+            },
+          }),
+      runSetupScript: input.runSetupScript ?? false,
+    },
+    createdAt: "2026-01-01T00:00:00.000Z",
+  } satisfies OrchestrationCommand;
+};
 
 describe("OrchestrationCommandDispatcher error classification", () => {
   it("classifies cause-free domain invariants as expected client errors", () => {
@@ -199,6 +263,430 @@ effectIt.effect("rejects a bootstrap project cwd outside the registered project"
     expect(error.message).toContain("does not match the registered project");
     expect(dispatched).toBe(false);
     expect(gitInvoked).toBe(false);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect.each([
+  {
+    name: "a missing origin",
+    id: "missing-origin",
+    hasOrigin: false,
+    hasRemoteBranch: false,
+    expectedGitCalls: ["remote-exists", "create:main"],
+  },
+  {
+    name: "a missing remote base branch",
+    id: "missing-remote-branch",
+    hasOrigin: true,
+    hasRemoteBranch: false,
+    expectedGitCalls: ["remote-exists", "fetch", "remote-branch-exists", "create:main"],
+  },
+  {
+    name: "an existing remote base branch",
+    id: "existing-remote-branch",
+    hasOrigin: true,
+    hasRemoteBranch: true,
+    expectedGitCalls: [
+      "remote-exists",
+      "fetch",
+      "remote-branch-exists",
+      "resolve",
+      "create:remote-base-sha",
+    ],
+  },
+] as const)("selects the bootstrap base ref with $name", (testCase) =>
+  Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto;
+    const gitCalls: string[] = [];
+    const dispatcher = yield* makeTestDispatcher({
+      crypto,
+      orchestrationEngine: {
+        dispatch: (command: OrchestrationCommand) =>
+          Effect.succeed({ sequence: command.type === "thread.create" ? 1 : 2 }),
+        getCommandReceipt: () => Effect.succeed(Option.none()),
+        withBootstrapDispatchLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      gitWorkflow: {
+        remoteExists: () =>
+          Effect.sync(() => {
+            gitCalls.push("remote-exists");
+            return testCase.hasOrigin;
+          }),
+        fetchRemote: () =>
+          Effect.sync(() => {
+            gitCalls.push("fetch");
+          }),
+        remoteBranchExists: () =>
+          Effect.sync(() => {
+            gitCalls.push("remote-branch-exists");
+            return testCase.hasRemoteBranch;
+          }),
+        resolveRemoteTrackingCommit: () =>
+          Effect.sync(() => {
+            gitCalls.push("resolve");
+            return { commitSha: "remote-base-sha", remoteRefName: "origin/main" };
+          }),
+        createWorktree: (input: { readonly refName: string }) =>
+          Effect.sync(() => {
+            gitCalls.push(`create:${input.refName}`);
+            return {
+              worktree: {
+                refName: `feat/${testCase.id}`,
+                path: `/tmp/${testCase.id}`,
+              },
+            };
+          }),
+      },
+      projectSetupScriptRunner: {},
+      startup: {
+        enqueueCommand: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      vcsStatusBroadcaster: { refreshStatus: () => Effect.void },
+    });
+
+    yield* dispatcher.dispatch(
+      makeBootstrapTurnStartCommand({
+        commandId: `cmd-${testCase.id}`,
+        threadId: `thread-${testCase.id}`,
+        projectId: `project-${testCase.id}`,
+        branch: `feat/${testCase.id}`,
+        startFromOrigin: true,
+      }),
+    );
+
+    expect(gitCalls).toEqual(testCase.expectedGitCalls);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect("waits for deletion cleanup before completing a plain thread create", () =>
+  Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto;
+    const drainStarted = yield* Deferred.make<void>();
+    const releaseDrain = yield* Deferred.make<void>();
+    const effects: string[] = [];
+    const dispatcher = yield* makeTestDispatcher({
+      crypto,
+      orchestrationEngine: {
+        dispatch: (command: OrchestrationCommand) =>
+          Effect.sync(() => {
+            effects.push(`dispatch.${command.type}`);
+            return { sequence: effects.length };
+          }),
+        getCommandReceipt: () => Effect.succeed(Option.none()),
+        withBootstrapDispatchLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      gitWorkflow: {},
+      projectSetupScriptRunner: {},
+      startup: {
+        enqueueCommand: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      vcsStatusBroadcaster: {},
+      threadDeletionReactor: {
+        drainThrough: (sequence: number) =>
+          Effect.gen(function* () {
+            effects.push(`drain:${sequence}`);
+            yield* Deferred.succeed(drainStarted, undefined);
+            yield* Deferred.await(releaseDrain);
+          }),
+      },
+    });
+
+    const dispatchFiber = yield* dispatcher
+      .dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-plain-create-fence"),
+        threadId: ThreadId.make("thread-plain-create-fence"),
+        projectId: ProjectId.make("project-plain-create-fence"),
+        title: "Plain create fence",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.4",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      })
+      .pipe(Effect.forkChild);
+
+    yield* Deferred.await(drainStarted);
+    expect(dispatchFiber.pollUnsafe()).toBeUndefined();
+    expect(effects).toEqual(["dispatch.thread.create", "drain:1"]);
+
+    yield* Deferred.succeed(releaseDrain, undefined);
+    const exit = yield* Fiber.await(dispatchFiber);
+    expect(Exit.isSuccess(exit)).toBe(true);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect("fences bootstrap resources behind thread deletion cleanup", () =>
+  Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto;
+    const drainStarted = yield* Deferred.make<void>();
+    const releaseDrain = yield* Deferred.make<void>();
+    const effects: string[] = [];
+    const dispatcher = yield* makeTestDispatcher({
+      crypto,
+      orchestrationEngine: {
+        dispatch: (command: OrchestrationCommand) =>
+          Effect.sync(() => {
+            effects.push(`dispatch.${command.type}`);
+            return { sequence: effects.length };
+          }),
+        getCommandReceipt: () => Effect.succeed(Option.none()),
+        withBootstrapDispatchLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      gitWorkflow: {
+        createWorktree: (input: { readonly refName: string }) =>
+          Effect.sync(() => {
+            effects.push(`worktree.create:${input.refName}`);
+            return {
+              worktree: {
+                refName: "feat/bootstrap-fence",
+                path: "/tmp/bootstrap-fence",
+              },
+            };
+          }),
+      },
+      projectSetupScriptRunner: {
+        runForThread: () =>
+          Effect.sync(() => {
+            effects.push("setup.start");
+            return { status: "no-script" as const };
+          }),
+      },
+      startup: {
+        enqueueCommand: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      vcsStatusBroadcaster: { refreshStatus: () => Effect.void },
+      threadDeletionReactor: {
+        drainThrough: (sequence: number) =>
+          Effect.gen(function* () {
+            effects.push(`drain:${sequence}`);
+            yield* Deferred.succeed(drainStarted, undefined);
+            yield* Deferred.await(releaseDrain);
+          }),
+      },
+    });
+
+    const dispatchFiber = yield* dispatcher
+      .dispatch(
+        makeBootstrapTurnStartCommand({
+          commandId: "cmd-bootstrap-fence",
+          threadId: "thread-bootstrap-fence",
+          projectId: "project-bootstrap-fence",
+          branch: "feat/bootstrap-fence",
+          runSetupScript: true,
+        }),
+      )
+      .pipe(Effect.forkChild);
+
+    yield* Deferred.await(drainStarted);
+    expect(dispatchFiber.pollUnsafe()).toBeUndefined();
+    expect(effects).toEqual(["dispatch.thread.create", "drain:1"]);
+
+    yield* Deferred.succeed(releaseDrain, undefined);
+    const exit = yield* Fiber.await(dispatchFiber);
+    expect(Exit.isSuccess(exit)).toBe(true);
+    expect(effects).toEqual([
+      "dispatch.thread.create",
+      "drain:1",
+      "worktree.create:main",
+      "dispatch.thread.meta.update",
+      "setup.start",
+      "dispatch.thread.turn.start",
+    ]);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect("keeps bootstrap ownership through an interrupted deletion drain", () =>
+  Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto;
+    const drainStarted = yield* Deferred.make<void>();
+    const effects: string[] = [];
+    const dispatcher = yield* makeTestDispatcher({
+      crypto,
+      orchestrationEngine: {
+        dispatch: (command: OrchestrationCommand) =>
+          Effect.sync(() => {
+            effects.push(`dispatch.${command.type}`);
+            return { sequence: effects.length };
+          }),
+        getCommandReceipt: () => Effect.succeed(Option.none()),
+        withBootstrapDispatchLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      gitWorkflow: {},
+      projectSetupScriptRunner: {},
+      startup: {
+        enqueueCommand: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      vcsStatusBroadcaster: {},
+      threadDeletionReactor: {
+        drainThrough: (sequence: number) =>
+          Effect.gen(function* () {
+            effects.push(`drain:${sequence}`);
+            if (sequence === 1) {
+              yield* Deferred.succeed(drainStarted, undefined);
+              return yield* Effect.never;
+            }
+          }),
+      },
+    });
+
+    const dispatchFiber = yield* dispatcher
+      .dispatch(
+        makeBootstrapTurnStartCommand({
+          commandId: "cmd-interrupted-create-drain",
+          threadId: "thread-interrupted-create-drain",
+          projectId: "project-interrupted-create-drain",
+        }),
+      )
+      .pipe(Effect.forkChild);
+
+    yield* Deferred.await(drainStarted);
+    yield* Fiber.interrupt(dispatchFiber);
+    const exit = yield* Fiber.await(dispatchFiber);
+
+    expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true);
+    expect(effects).toEqual([
+      "dispatch.thread.create",
+      "drain:1",
+      "dispatch.thread.delete",
+      "drain:3",
+    ]);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect("waits for cleanup drain before reporting a deleted bootstrap thread", () =>
+  Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto;
+    const deleteDrainStarted = yield* Deferred.make<void>();
+    const releaseDeleteDrain = yield* Deferred.make<void>();
+    const effects: string[] = [];
+    const dispatcher = yield* makeTestDispatcher({
+      crypto,
+      orchestrationEngine: {
+        dispatch: (command: OrchestrationCommand) => {
+          effects.push(`dispatch.${command.type}`);
+          return command.type === "thread.turn.start"
+            ? Effect.fail(
+                new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail: "final dispatch rejected",
+                }),
+              )
+            : Effect.succeed({ sequence: effects.length });
+        },
+        getCommandReceipt: () => Effect.succeed(Option.none()),
+        withBootstrapDispatchLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      gitWorkflow: {},
+      projectSetupScriptRunner: {},
+      startup: {
+        enqueueCommand: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      vcsStatusBroadcaster: {},
+      threadDeletionReactor: {
+        drainThrough: (sequence: number) =>
+          Effect.gen(function* () {
+            effects.push(`drain:${sequence}`);
+            if (sequence !== 1) {
+              yield* Deferred.succeed(deleteDrainStarted, undefined);
+              yield* Deferred.await(releaseDeleteDrain);
+            }
+          }),
+      },
+    });
+
+    const dispatchFiber = yield* dispatcher
+      .dispatch(
+        makeBootstrapTurnStartCommand({
+          commandId: "cmd-cleanup-disposition",
+          threadId: "thread-cleanup-disposition",
+          projectId: "project-cleanup-disposition",
+          prepareWorktree: false,
+        }),
+      )
+      .pipe(Effect.forkChild);
+
+    yield* Deferred.await(deleteDrainStarted);
+    expect(dispatchFiber.pollUnsafe()).toBeUndefined();
+    expect(effects).toEqual([
+      "dispatch.thread.create",
+      "drain:1",
+      "dispatch.thread.turn.start",
+      "dispatch.thread.delete",
+      "drain:4",
+    ]);
+
+    yield* Deferred.succeed(releaseDeleteDrain, undefined);
+    const exit = yield* Fiber.await(dispatchFiber);
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      const failure = Option.getOrThrow(Cause.findErrorOption(exit.cause));
+      expect(failure).toMatchObject({ bootstrapThreadDisposition: "deleted" });
+    }
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect("preserves cleanup failure semantics when deletion draining fails", () =>
+  Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto;
+    const effects: string[] = [];
+    const dispatcher = yield* makeTestDispatcher({
+      crypto,
+      orchestrationEngine: {
+        dispatch: (command: OrchestrationCommand) => {
+          effects.push(`dispatch.${command.type}`);
+          return command.type === "thread.turn.start"
+            ? Effect.fail(
+                new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail: "final dispatch rejected",
+                }),
+              )
+            : Effect.succeed({ sequence: effects.length });
+        },
+        getCommandReceipt: () => Effect.succeed(Option.none()),
+        withBootstrapDispatchLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      gitWorkflow: {},
+      projectSetupScriptRunner: {},
+      startup: {
+        enqueueCommand: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      },
+      vcsStatusBroadcaster: {},
+      threadDeletionReactor: {
+        drainThrough: (sequence: number) =>
+          Effect.sync(() => {
+            effects.push(`drain:${sequence}`);
+            if (sequence !== 1) {
+              throw new Error("deletion worker failed");
+            }
+          }),
+      },
+    });
+
+    const failure = yield* dispatcher
+      .dispatch(
+        makeBootstrapTurnStartCommand({
+          commandId: "cmd-cleanup-failure",
+          threadId: "thread-cleanup-failure",
+          projectId: "project-cleanup-failure",
+          prepareWorktree: false,
+        }),
+      )
+      .pipe(Effect.flip);
+
+    expect(failure).not.toMatchObject({ bootstrapThreadDisposition: "deleted" });
+    expect(effects).toEqual([
+      "dispatch.thread.create",
+      "drain:1",
+      "dispatch.thread.turn.start",
+      "dispatch.thread.delete",
+      "drain:4",
+    ]);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 

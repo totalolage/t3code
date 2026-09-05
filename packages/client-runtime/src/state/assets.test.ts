@@ -8,7 +8,18 @@ import {
   createAssetEnvironmentAtoms,
   InvalidAssetCollectionKeyError,
   parseAssetCollectionKey,
+  resolveAssetUrl,
 } from "./assets.ts";
+
+describe("asset URLs", () => {
+  it("preserves endpoint query parameters when resolving a relative asset URL", () => {
+    expect(
+      resolveAssetUrl("https://environment.example.test/base", "/api/assets/icon.svg", [
+        { key: "proxy", value: "fork route" },
+      ]),
+    ).toBe("https://environment.example.test/api/assets/icon.svg?proxy=fork+route");
+  });
+});
 
 describe("asset collection keys", () => {
   it("preserves malformed JSON and its native cause", () => {

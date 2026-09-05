@@ -96,6 +96,9 @@ export interface PendingInteractionRepositoryShape {
   readonly listOpen: (input?: {
     readonly threadId?: ThreadId;
   }) => Effect.Effect<ReadonlyArray<PendingInteractionRow>, ProjectionRepositoryError>;
+  readonly listAllOpenByThreadId: (input: {
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<ReadonlyArray<PendingInteractionRow>, ProjectionRepositoryError>;
   readonly get: (input: {
     readonly threadId: ThreadId;
     readonly requestId: ApprovalRequestId;

@@ -6,6 +6,7 @@ import { StageBackdropButtonArt, useSidebarStageBackdropVariant } from "../Sideb
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
+import { composerFloatingLayerProps } from "./composerEventScope";
 
 interface PendingActionState {
   questionIndex: number;
@@ -37,7 +38,7 @@ interface ComposerPrimaryActionsProps {
   onImplementPlanInNewThread: () => void;
 }
 
-export const formatPendingPrimaryActionLabel = (input: {
+const formatPendingPrimaryActionLabel = (input: {
   compact: boolean;
   isLastQuestion: boolean;
   isResponding: boolean;
@@ -108,6 +109,21 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     </button>
   );
 
+  const renderQueuedFollowUpInterruptButton = () => (
+    <Button
+      type="button"
+      size="sm"
+      variant="destructive"
+      className="rounded-full"
+      {...pointerFocusProps}
+      onClick={onInterrupt}
+      aria-label="Interrupt and run queued message"
+      title="Interrupt the current turn and run the queued message"
+    >
+      Interrupt
+    </Button>
+  );
+
   if (pendingAction) {
     return (
       <div className={cn("flex items-center justify-end", compact ? "gap-1.5" : "gap-2")}>
@@ -163,23 +179,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     );
   }
 
-  if (isRunning && hasQueuedNonSteerableFollowUp) {
-    return (
-      <Button
-        type="button"
-        size="sm"
-        variant="destructive"
-        className="rounded-full"
-        {...pointerFocusProps}
-        onClick={onInterrupt}
-        aria-label="Interrupt and run queued message"
-        title="Interrupt the current turn and run the queued message"
-      >
-        Interrupt
-      </Button>
-    );
-  }
-  if (showPlanFollowUpPrompt) {
+  if (showPlanFollowUpPrompt && !(isRunning && hasQueuedNonSteerableFollowUp)) {
     if (promptHasText) {
       return (
         <Button
@@ -223,7 +223,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           >
             <ChevronDownIcon className="size-3.5" />
           </MenuTrigger>
-          <MenuPopup align="end" side="top">
+          <MenuPopup align="end" side="top" {...composerFloatingLayerProps}>
             <MenuItem
               disabled={isSendBusy || isSendDisabled || isConnecting || isEnvironmentUnavailable}
               onClick={() => void onImplementPlanInNewThread()}
@@ -294,7 +294,9 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
 
   return (
     <>
-      {renderStopGenerationButton(false)}
+      {hasQueuedNonSteerableFollowUp
+        ? renderQueuedFollowUpInterruptButton()
+        : renderStopGenerationButton(false)}
       {showSendWhileRunning && hasSendableContent ? sendButton : null}
     </>
   );

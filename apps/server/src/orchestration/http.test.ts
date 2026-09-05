@@ -1,14 +1,33 @@
 import { assert, it } from "@effect/vitest";
 import {
+  DEFAULT_MODEL,
   EnvironmentConflictError,
   EnvironmentInternalError,
   GitCommandError,
   OrchestrationDispatchCommandError,
+  ProviderInstanceId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as HttpServerRespondable from "effect/unstable/http/HttpServerRespondable";
 
-import { failEnvironmentDispatch } from "./http.ts";
+import { failEnvironmentDispatch, resolveCreateModelSelection } from "./http.ts";
+
+it("uses the automatic Codex selection when the project default is missing", () => {
+  assert.deepEqual(resolveCreateModelSelection(null), {
+    instanceId: ProviderInstanceId.make("codex"),
+    model: DEFAULT_MODEL,
+  });
+});
+
+it("preserves an explicit project model selection for REST create", () => {
+  const selection = {
+    instanceId: ProviderInstanceId.make("codex-personal"),
+    model: "gpt-5.4",
+    options: [{ id: "reasoningEffort", value: "high" }],
+  } as const;
+
+  assert.strictEqual(resolveCreateModelSelection(selection), selection);
+});
 
 it.effect("maps a nested worktree conflict to an actionable typed HTTP conflict", () =>
   Effect.gen(function* () {

@@ -11,13 +11,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
-import {
-  findThreadById,
-  listThreadsByProjectId,
-  requireNonNegativeInteger,
-  requireThread,
-  requireThreadAbsent,
-} from "./commandInvariants.ts";
+import { listThreadsByProjectId, requireThread, requireThreadAbsent } from "./commandInvariants.ts";
 
 const now = "2026-01-01T00:00:00.000Z";
 
@@ -122,9 +116,7 @@ const messageSendCommand: OrchestrationCommand = {
 };
 
 describe("commandInvariants", () => {
-  it("finds threads by id and project", () => {
-    expect(findThreadById(readModel, ThreadId.make("thread-1"))?.projectId).toBe("project-a");
-    expect(findThreadById(readModel, ThreadId.make("missing"))).toBeUndefined();
+  it("lists threads by project", () => {
     expect(
       listThreadsByProjectId(readModel, ProjectId.make("project-b")).map((thread) => thread.id),
     ).toEqual([ThreadId.make("thread-2")]);
@@ -258,25 +250,6 @@ describe("commandInvariants", () => {
         command: createDeletedThread("server:bootstrap-thread-create:retry"),
         threadId: ThreadId.make("thread-1"),
       });
-    }),
-  );
-
-  it.effect("requires non-negative integers", () =>
-    Effect.gen(function* () {
-      yield* requireNonNegativeInteger({
-        commandType: "thread.checkpoint.revert",
-        field: "turnCount",
-        value: 0,
-      });
-
-      const error = yield* Effect.flip(
-        requireNonNegativeInteger({
-          commandType: "thread.checkpoint.revert",
-          field: "turnCount",
-          value: -1,
-        }),
-      );
-      expect(error.message).toContain("greater than or equal to 0");
     }),
   );
 });

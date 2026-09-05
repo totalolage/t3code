@@ -52,6 +52,7 @@ describe("remote orchestration HTTP operations", () => {
       );
       yield* compactRemoteOrchestrationThread({
         httpBaseUrl: "https://remote.example",
+        queryParameters: [{ key: "proxy", value: "fork route" }],
         authorization: { accessToken: "secret-token" },
         payload: {
           threadId: ThreadId.make("thread-compact"),
@@ -59,7 +60,9 @@ describe("remote orchestration HTTP operations", () => {
         },
       }).pipe(Effect.provide(remoteHttpClientLayer(fetch.fetchFn)));
 
-      expect(String(fetch.calls[0]?.[0])).toBe("https://remote.example/api/orchestration/compact");
+      expect(String(fetch.calls[0]?.[0])).toBe(
+        "https://remote.example/api/orchestration/compact?proxy=fork+route",
+      );
       const body = fetch.calls[0]?.[1].body;
       const decodedBody =
         typeof body === "string"
@@ -180,6 +183,7 @@ describe("remote orchestration HTTP operations", () => {
         Response.json({ sequence: 1 }),
       );
       const authorization = { accessToken: "secret-token" };
+      const queryParameters = [{ key: "proxy", value: "fork route" }];
       const command = {
         type: "thread.turn.start",
         commandId: CommandId.make("command-http"),
@@ -197,19 +201,23 @@ describe("remote orchestration HTTP operations", () => {
 
       yield* fetchRemoteOrchestrationShell({
         httpBaseUrl: "https://remote.example/base",
+        queryParameters,
         authorization,
       }).pipe(Effect.provide(remoteHttpClientLayer(fetch.fetchFn)));
       yield* fetchRemoteOrchestrationSnapshot({
         httpBaseUrl: "https://remote.example/base",
+        queryParameters,
         authorization,
       }).pipe(Effect.provide(remoteHttpClientLayer(fetch.fetchFn)));
       yield* fetchRemoteOrchestrationThread({
         httpBaseUrl: "https://remote.example/base",
+        queryParameters,
         authorization,
         threadId,
       }).pipe(Effect.provide(remoteHttpClientLayer(fetch.fetchFn)));
       yield* createRemoteOrchestrationThread({
         httpBaseUrl: "https://remote.example/base",
+        queryParameters,
         authorization,
         payload: {
           project: "project-http",
@@ -219,16 +227,17 @@ describe("remote orchestration HTTP operations", () => {
       }).pipe(Effect.provide(remoteHttpClientLayer(fetch.fetchFn)));
       yield* dispatchRemoteOrchestrationCommand({
         httpBaseUrl: "https://remote.example/base",
+        queryParameters,
         authorization,
         command,
       }).pipe(Effect.provide(remoteHttpClientLayer(fetch.fetchFn)));
 
       expect(fetch.calls.map(([url]) => String(url))).toEqual([
-        "https://remote.example/api/orchestration/shell",
-        "https://remote.example/api/orchestration/snapshot",
-        "https://remote.example/api/orchestration/threads/thread-http",
-        "https://remote.example/api/orchestration/create",
-        "https://remote.example/api/orchestration/dispatch",
+        "https://remote.example/api/orchestration/shell?proxy=fork+route",
+        "https://remote.example/api/orchestration/snapshot?proxy=fork+route",
+        "https://remote.example/api/orchestration/threads/thread-http?proxy=fork+route",
+        "https://remote.example/api/orchestration/create?proxy=fork+route",
+        "https://remote.example/api/orchestration/dispatch?proxy=fork+route",
       ]);
       for (const [, init] of fetch.calls) {
         expect(init.headers).toEqual(

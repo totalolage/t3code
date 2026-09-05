@@ -12,7 +12,6 @@ import {
   type ProjectionStateRepositoryShape,
   GetProjectionStateInput,
   ProjectionState,
-  UpsertManyProjectionStateInput,
 } from "../Services/ProjectionState.ts";
 
 const MinLastAppliedSequenceRowSchema = Schema.Struct({
@@ -43,22 +42,24 @@ const makeProjectionStateRepository = Effect.gen(function* () {
       `,
   });
 
-  const upsertManyProjectionStateRows = SqlSchema.void({
-    Request: UpsertManyProjectionStateInput,
+  const upsertProjectionStateRows = SqlSchema.void({
+    Request: Schema.Array(ProjectionState),
     execute: (rows) =>
-      sql`
-        INSERT INTO projection_state ${sql.insert(
-          rows.map((row) => ({
-            projector: row.projector,
-            last_applied_sequence: row.lastAppliedSequence,
-            updated_at: row.updatedAt,
-          })),
-        )}
-        ON CONFLICT (projector)
-        DO UPDATE SET
-          last_applied_sequence = excluded.last_applied_sequence,
-          updated_at = excluded.updated_at
-      `,
+      rows.length === 0
+        ? Effect.void
+        : sql`
+            INSERT INTO projection_state ${sql.insert(
+              rows.map((row) => ({
+                projector: row.projector,
+                last_applied_sequence: row.lastAppliedSequence,
+                updated_at: row.updatedAt,
+              })),
+            )}
+            ON CONFLICT (projector)
+            DO UPDATE SET
+              last_applied_sequence = excluded.last_applied_sequence,
+              updated_at = excluded.updated_at
+          `,
   });
 
   const getProjectionStateRow = SqlSchema.findOneOption({
@@ -106,7 +107,7 @@ const makeProjectionStateRepository = Effect.gen(function* () {
     );
 
   const upsertMany: ProjectionStateRepositoryShape["upsertMany"] = (rows) =>
-    upsertManyProjectionStateRows(rows).pipe(
+    upsertProjectionStateRows(rows).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionStateRepository.upsertMany:query")),
     );
 

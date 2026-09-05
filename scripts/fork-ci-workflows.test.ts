@@ -20,6 +20,26 @@ it("runs the complete CI suite on hosted runners outside the upstream repository
   assert.strictEqual(workflow.match(/- name: Setup Bun/gmu)?.length, 2);
 });
 
+it("guards optional APT source files on hosted runners", () => {
+  const workflow = readWorkflow("ci.yml");
+
+  assert.strictEqual(
+    workflow.match(
+      /for apt_file in \/etc\/apt\/blacksmith-ubuntu-mirrors\.txt \/etc\/apt\/sources\.list\.d\/ubuntu\.sources;/gu,
+    )?.length,
+    2,
+  );
+  assert.strictEqual(workflow.match(/if test -f "\$apt_file"; then/g)?.length, 2);
+  assert.strictEqual(
+    workflow.split("sudo sed -i 's|http://|https://|g' \"$apt_file\"").length - 1,
+    2,
+  );
+  assert.notInclude(
+    workflow,
+    "sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources",
+  );
+});
+
 it("keeps upstream-owned deployment workflows disabled in forks", () => {
   const gatedWorkflows = [
     "deploy-relay.yml",

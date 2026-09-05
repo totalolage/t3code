@@ -30,6 +30,7 @@ import { environmentSession } from "./session";
 export const serverEnvironment = createServerEnvironmentAtoms(connectionAtomRuntime, {
   initialConfigValueAtom: environmentSession.initialConfigValueAtom,
   environmentThemes: true,
+  usageLimitSources: true,
 });
 export const environmentServerConfigsAtom = createEnvironmentServerConfigsAtom({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
@@ -40,12 +41,11 @@ export const IDLE_SERVICE_UPDATE_STATE: ServiceUpdateState = { status: "idle" };
 export const serviceUpdateStateAtom = Atom.family((environmentId: EnvironmentId | null) =>
   environmentId === null
     ? Atom.make(IDLE_SERVICE_UPDATE_STATE)
-    : Atom.make(
-        (get): ServiceUpdateState =>
-          Option.getOrElse(
-            AsyncResult.value(get(serverEnvironment.serviceUpdate({ environmentId, input: {} }))),
-            () => IDLE_SERVICE_UPDATE_STATE,
-          ),
+    : Atom.make((get): ServiceUpdateState =>
+        Option.getOrElse(
+          AsyncResult.value(get(serverEnvironment.serviceUpdate({ environmentId, input: {} }))),
+          () => IDLE_SERVICE_UPDATE_STATE,
+        ),
       ).pipe(Atom.withLabel(`web-service-update-state:${environmentId}`)),
 );
 

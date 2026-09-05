@@ -23,6 +23,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import { assert, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -42,9 +43,16 @@ import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/unstable/cli";
 
 import { cli, makeCli } from "./bin.ts";
+import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
+import {
+  SERVICE_LAUNCHER_CONTEXT_ENV,
+  SERVICE_LAUNCHER_PROTOCOL,
+} from "./cloud/serviceProtocol.ts";
 import * as ServerConfig from "./config.ts";
+import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
+import { ThreadDeletionReactor } from "./orchestration/Services/ThreadDeletionReactor.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -60,7 +68,6 @@ import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { authHttpApiLayer, environmentAuthenticatedAuthLayer } from "./auth/http.ts";
 import { serverEnvironmentHttpApiLayer } from "./http.ts";
-import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
@@ -72,7 +79,24 @@ import {
 } from "./cli/remote.ts";
 import { RemoteWatchInteractionRequiredError } from "./cli/remoteWatch.ts";
 
+import packageJson from "../package.json" with { type: "json" };
+
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
+const DisconnectedLauncherChildLayer = Layer.mergeAll(
+  Layer.succeed(HostProcessEnvironment, {
+    ...process.env,
+    [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify({
+      protocol: SERVICE_LAUNCHER_PROTOCOL,
+      childVersion: packageJson.version,
+    }),
+  }),
+  Layer.succeed(ServiceLauncherClient.ServiceLauncherHostProcess, {
+    connected: false,
+    send: () => false,
+    on: () => undefined,
+    off: () => undefined,
+  }),
+);
 class ProjectCliHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
@@ -146,11 +170,236 @@ const readPersistedSnapshot = (baseDir: string) =>
     }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
   });
 
+const makeProjectLookupFixture = Effect.fn("makeProjectLookupFixture")(function* (
+  withThread: boolean,
+  removeWorkspace: boolean,
+) {
+  const baseDir = NodeFS.mkdtempSync(
+    NodePath.join(NodeOS.tmpdir(), "t3-cli-project-lookup-state-"),
+  );
+  const workspaceRoot = NodeFS.mkdtempSync(
+    NodePath.join(NodeOS.tmpdir(), "t3-cli-project-lookup-git-"),
+  );
+  NodeChildProcess.execFileSync("git", ["init", "--initial-branch=main", workspaceRoot], {
+    stdio: "ignore",
+  });
+  yield* runCliWithRuntime(["project", "add", workspaceRoot, "--base-dir", baseDir]);
+  const snapshot = yield* readPersistedSnapshot(baseDir);
+  const project = snapshot.projects.find((candidate) => candidate.workspaceRoot === workspaceRoot)!;
+  assert.isDefined(project);
+  if (withThread) {
+    const config = yield* makeCliTestServerConfig(baseDir);
+    yield* Effect.gen(function* () {
+      const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-project-lookup-thread"),
+        threadId: ThreadId.make("thread-project-lookup"),
+        projectId: project.id,
+        title: "Project lookup test",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        interactionMode: "default",
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: DateTime.formatIso(yield* DateTime.now),
+      });
+    }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
+  }
+  if (removeWorkspace) {
+    NodeFS.renameSync(workspaceRoot, `${workspaceRoot}-removed`);
+    assert.isFalse(NodeFS.existsSync(workspaceRoot));
+  }
+  return { baseDir, workspaceRoot, project };
+});
+
+it.layer(NodeServices.layer)("project lookup with unavailable workspaces", (it) => {
+  it.effect("removes an empty project by ID without force after its directory is gone", () =>
+    Effect.gen(function* () {
+      const { baseDir, project } = yield* makeProjectLookupFixture(false, true);
+      yield* runCliWithRuntime(["project", "remove", project.id, "--base-dir", baseDir]);
+      const after = yield* readPersistedSnapshot(baseDir);
+      assert.isNotNull(after.projects.find((candidate) => candidate.id === project.id)!.deletedAt);
+    }),
+  );
+
+  it.effect.each([true, false])(
+    "requires force for child threads, then removes by ID; missing=%s",
+    (removeWorkspace) =>
+      Effect.gen(function* () {
+        const { baseDir, project } = yield* makeProjectLookupFixture(true, removeWorkspace);
+        const error = yield* runCliWithRuntime([
+          "project",
+          "remove",
+          project.id,
+          "--base-dir",
+          baseDir,
+        ]).pipe(Effect.flip);
+        assert.include(error.message, "cannot be deleted without force=true");
+        const retained = yield* readPersistedSnapshot(baseDir);
+        assert.isNull(
+          retained.projects.find((candidate) => candidate.id === project.id)!.deletedAt,
+        );
+        assert.isNull(
+          retained.threads.find((thread) => thread.id === "thread-project-lookup")!.deletedAt,
+        );
+        yield* runCliWithRuntime([
+          "project",
+          "remove",
+          project.id,
+          "--force",
+          "--base-dir",
+          baseDir,
+        ]);
+        const after = yield* readPersistedSnapshot(baseDir);
+        assert.isNotNull(
+          after.projects.find((candidate) => candidate.id === project.id)!.deletedAt,
+        );
+        assert.isNotNull(
+          after.threads.find((thread) => thread.id === "thread-project-lookup")!.deletedAt,
+        );
+      }),
+  );
+
+  it.effect("cannot remove the old environment's ID from a replacement empty database", () =>
+    Effect.gen(function* () {
+      const { baseDir, project } = yield* makeProjectLookupFixture(true, true);
+      const replacementDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-project-lookup-new-state-"),
+      );
+      const error = yield* runCliWithRuntime([
+        "project",
+        "remove",
+        project.id,
+        "--force",
+        "--base-dir",
+        replacementDir,
+      ]).pipe(Effect.flip);
+      assert.include(error.message, "No active project found");
+      assert.include(String(error.cause), "Workspace root does not exist");
+      const original = yield* readPersistedSnapshot(baseDir);
+      assert.isNull(original.projects.find((candidate) => candidate.id === project.id)!.deletedAt);
+      const replacement = yield* readPersistedSnapshot(replacementDir);
+      assert.equal(replacement.projects.length, 0);
+    }),
+  );
+
+  it.effect("renames by ID and stored path, then force removes after the directory is gone", () =>
+    Effect.gen(function* () {
+      const { baseDir, workspaceRoot, project } = yield* makeProjectLookupFixture(true, true);
+      yield* runCliWithRuntime([
+        "project",
+        "rename",
+        project.id,
+        "Renamed by ID",
+        "--base-dir",
+        baseDir,
+      ]);
+      const afterIdRename = yield* readPersistedSnapshot(baseDir);
+      assert.equal(
+        afterIdRename.projects.find((candidate) => candidate.id === project.id)!.title,
+        "Renamed by ID",
+      );
+      yield* runCliWithRuntime([
+        "project",
+        "rename",
+        workspaceRoot,
+        "Renamed by stored path",
+        "--base-dir",
+        baseDir,
+      ]);
+      const afterPathRename = yield* readPersistedSnapshot(baseDir);
+      assert.equal(
+        afterPathRename.projects.find((candidate) => candidate.id === project.id)!.title,
+        "Renamed by stored path",
+      );
+      const error = yield* runCliWithRuntime([
+        "project",
+        "remove",
+        workspaceRoot,
+        "--base-dir",
+        baseDir,
+      ]).pipe(Effect.flip);
+      assert.include(error.message, "cannot be deleted without force=true");
+      yield* runCliWithRuntime([
+        "project",
+        "remove",
+        workspaceRoot,
+        "--force",
+        "--base-dir",
+        baseDir,
+      ]);
+      const after = yield* readPersistedSnapshot(baseDir);
+      assert.isNotNull(after.projects.find((candidate) => candidate.id === project.id)!.deletedAt);
+      assert.isNotNull(
+        after.threads.find((thread) => thread.id === "thread-project-lookup")!.deletedAt,
+      );
+      assert.isFalse(NodeFS.existsSync(workspaceRoot));
+    }),
+  );
+
+  it.effect("preserves normalized paths and distinct symlink project entries", () =>
+    Effect.gen(function* () {
+      const { baseDir, workspaceRoot, project } = yield* makeProjectLookupFixture(false, false);
+      const normalizedInput = `${workspaceRoot}${NodePath.sep}.`;
+      yield* runCliWithRuntime([
+        "project",
+        "rename",
+        normalizedInput,
+        "Normalized",
+        "--base-dir",
+        baseDir,
+      ]);
+      const renamed = yield* readPersistedSnapshot(baseDir);
+      assert.equal(
+        renamed.projects.find((candidate) => candidate.id === project.id)!.title,
+        "Normalized",
+      );
+      const aliasPath = `${workspaceRoot}-alias`;
+      NodeFS.symlinkSync(workspaceRoot, aliasPath, "junction");
+      const error = yield* runCliWithRuntime([
+        "project",
+        "remove",
+        aliasPath,
+        "--force",
+        "--base-dir",
+        baseDir,
+      ]).pipe(Effect.flip);
+      assert.include(error.message, "No active project found");
+      yield* runCliWithRuntime(["project", "add", aliasPath, "--base-dir", baseDir]);
+      const added = yield* readPersistedSnapshot(baseDir);
+      const aliasProject = added.projects.find(
+        (candidate) => candidate.workspaceRoot === aliasPath,
+      )!;
+      assert.notEqual(aliasProject.id, project.id);
+      yield* runCliWithRuntime([
+        "project",
+        "remove",
+        `${aliasPath}${NodePath.sep}.`,
+        "--base-dir",
+        baseDir,
+      ]);
+      const after = yield* readPersistedSnapshot(baseDir);
+      assert.isNotNull(
+        after.projects.find((candidate) => candidate.id === aliasProject.id)!.deletedAt,
+      );
+      assert.isNull(after.projects.find((candidate) => candidate.id === project.id)!.deletedAt);
+      assert.isTrue(NodeFS.existsSync(workspaceRoot));
+    }),
+  );
+});
+
 const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
     const config = yield* makeCliTestServerConfig(baseDir);
     const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
       Layer.provide(orchestrationHttpApiLayer),
+      Layer.provide(
+        Layer.mock(ThreadDeletionReactor)({
+          start: () => Effect.void,
+          drainThrough: () => Effect.void,
+        }),
+      ),
       Layer.provide(authHttpApiLayer),
       Layer.provide(serverEnvironmentHttpApiLayer),
       Layer.provide(environmentAuthenticatedAuthLayer),
@@ -163,6 +412,7 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
       Layer.provideMerge(
         EnvironmentAuth.layer.pipe(
           Layer.provideMerge(SqlitePersistenceLayerLive),
+          Layer.provide(ServerEnvironment.identityLayer),
           Layer.provide(ServerSecretStore.layer),
         ),
       ),
@@ -252,11 +502,19 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
 
 it.layer(NodeServices.layer)("bin cli parsing", (it) => {
   it.effect("accepts the built-in lowercase log-level flag values", () =>
-    runCliWithRuntime(["--log-level", "debug", "--version"]),
+    Effect.gen(function* () {
+      const { output } = yield* captureStdout(runCli(["--log-level", "debug", "--version"]));
+
+      assert.include(output, "0.0.0");
+    }),
   );
 
   it.effect("accepts canonical --no-<flag> boolean negation", () =>
-    runCliWithRuntime(["--no-log-websocket-events", "--version"]),
+    Effect.gen(function* () {
+      const { output } = yield* captureStdout(runCli(["--no-log-websocket-events", "--version"]));
+
+      assert.include(output, "0.0.0");
+    }),
   );
 
   it.effect("exposes the unified local orchestration command surface", () =>
@@ -760,7 +1018,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       assert.equal(status.linked, false);
       assert.equal(status.cloudUserId, null);
       assert.equal(status.relayUrl, null);
-    }),
+    }).pipe(Effect.provide(DisconnectedLauncherChildLayer)),
   );
 
   it.effect("reports actionable human-readable headless connect state", () =>
@@ -931,7 +1189,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         "relay:write",
       ]);
       assert.equal("token" in (listed[0] ?? {}), false);
-    }),
+    }).pipe(Effect.provide(DisconnectedLauncherChildLayer)),
   );
 
   it.effect("rejects invalid ttl values before running auth commands", () =>
@@ -1139,7 +1397,10 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
           });
           const createdAt = "2026-01-01T00:00:00.000Z";
           const threadId = ThreadId.make("rest-bootstrap-thread");
-          const modelSelection = ServerRuntimeStartup.getAutoBootstrapDefaultModelSelection();
+          const modelSelection = {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          } as const;
           const headers = { authorization: `Bearer ${session.token}` };
           const bootstrapPayload = {
             type: "thread.turn.start",

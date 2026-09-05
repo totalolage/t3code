@@ -106,7 +106,6 @@ export function connectionCatalogDisplayUrl(entry: ConnectionCatalogEntry): stri
         : null;
   }
 }
-
 export function connectionCatalogQueryParameters(
   entry: ConnectionCatalogEntry,
 ): ReadonlyArray<RemoteQueryParameter> {

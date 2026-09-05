@@ -102,6 +102,47 @@ layer("PendingInteractionRepository", (it) => {
     }),
   );
 
+  it.effect("lists every open interaction for a thread without changing the public cap", () =>
+    Effect.gen(function* () {
+      const repository = yield* PendingInteractionRepository;
+      const targetThreadId = ThreadId.make("thread-many");
+      const expectedRequestIds = Array.from(
+        { length: 101 },
+        (_, index) => `request-${String(index).padStart(3, "0")}`,
+      );
+
+      for (const requestId of expectedRequestIds) {
+        yield* repository.upsertOpened(opened(targetThreadId, requestId));
+      }
+      const otherThread = opened("thread-other", "request-other");
+      yield* repository.upsertOpened(otherThread);
+
+      const exhaustiveRows = yield* repository.listAllOpenByThreadId({
+        threadId: targetThreadId,
+      });
+      const publicRows = yield* repository.listOpen({ threadId: targetThreadId });
+
+      assert.strictEqual(exhaustiveRows.length, 101);
+      assert.deepStrictEqual(
+        exhaustiveRows.map((row) => row.requestId),
+        expectedRequestIds,
+      );
+      assert.isTrue(exhaustiveRows.every((row) => row.threadId === targetThreadId));
+      assert.strictEqual(publicRows.length, 100);
+      assert.deepStrictEqual(
+        publicRows.map((row) => row.requestId),
+        expectedRequestIds.slice(0, 100),
+      );
+      assert.isTrue(publicRows.every((row) => row.threadId === targetThreadId));
+      assert.deepStrictEqual(
+        (yield* repository.listOpen({ threadId: otherThread.threadId })).map(
+          (row) => row.requestId,
+        ),
+        [otherThread.requestId],
+      );
+    }),
+  );
+
   it.effect("provides session-bound semantic idempotency and accepts dispatch in two phases", () =>
     Effect.gen(function* () {
       const repository = yield* PendingInteractionRepository;

@@ -3,6 +3,7 @@ import { Argument, Command } from "effect/unstable/cli";
 import * as CliError from "effect/unstable/cli/CliError";
 
 import { authCommand } from "./auth.ts";
+import { appCommand } from "./app.ts";
 import { connectCommand } from "./connect.ts";
 import { sharedServerCommandFlags } from "./config.ts";
 import { projectCommand } from "./project.ts";
@@ -47,6 +48,7 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
     Command.withSubcommands([
       startCommand,
       serveCommand,
+      appCommand,
       pairCommand,
       authCommand,
       projectCommand,

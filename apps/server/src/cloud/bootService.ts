@@ -30,8 +30,11 @@ import {
   SERVICE_LAUNCHER_FILE,
   SERVICE_LAUNCHER_PROTOCOL,
   SERVICE_STATE_FILE,
+  compareExactServiceVersions,
   parseServiceState,
+  serviceStateActiveVersion,
   serviceStateHasPendingUpdate,
+  isExactServiceVersion,
   type ServiceState,
 } from "./serviceProtocol.ts";
 
@@ -467,6 +470,21 @@ export function renderS6LauncherScript(plan: BootServicePlan): string {
   ].join("\n");
 }
 
+/** Reads the version marker from a generated launcher without executing shell code. */
+export function parseS6LauncherVersion(contents: string): string | undefined {
+  const prefix = `export ${SERVICE_VERSION_ENV}=`;
+  const line = contents.split(/\r?\n/u).find((entry) => entry.startsWith(prefix));
+  if (line === undefined) return undefined;
+  const rawValue = line.slice(prefix.length).trim();
+  if (rawValue.length === 0) return undefined;
+  const quoted =
+    rawValue.length >= 2 &&
+    ((rawValue.startsWith("'") && rawValue.endsWith("'")) ||
+      (rawValue.startsWith('"') && rawValue.endsWith('"')));
+  const value = quoted ? rawValue.slice(1, -1) : rawValue;
+  return isExactServiceVersion(value) ? value : undefined;
+}
+
 function pathForS6ServiceDir(runPath: string): string {
   return runPath.endsWith("/run") ? runPath.slice(0, -4) : runPath;
 }
@@ -616,7 +634,6 @@ export function systemdManager(input: {
         command: "systemctl",
         args: ["--user", "enable", BOOT_SERVICE_UNIT_FILE],
       },
-      { step: "enabling lingering for this user", command: "loginctl", args: ["enable-linger"] },
       // Start last. No administrative state write occurs after this succeeds.
       {
         step: "starting the service",
@@ -804,6 +821,40 @@ export class BootServiceIdentityError extends Schema.TaggedErrorClass<BootServic
   }
 }
 
+const BootServiceProblem = Schema.Literals([
+  "user-manager-unavailable",
+  "linger-unavailable",
+  "linger-disabled",
+  "service-disabled",
+  "service-stopped",
+]);
+type BootServiceProblem = typeof BootServiceProblem.Type;
+
+/** These codes and recovery steps are documented in docs/user/background-service.md. */
+export function formatBootServiceProblem(problem: BootServiceProblem): string {
+  switch (problem) {
+    case "user-manager-unavailable":
+      return "Cannot reach the systemd user manager. Run `systemctl --user status` in a login session for the service user. Install your distribution's systemd user-session support if it is missing; do not run T3 with sudo.";
+    case "linger-unavailable":
+      return 'Cannot check whether this user can run services after logout. Run `loginctl show-user "$(id -un)" --property=Linger` and check that systemd-logind is available.';
+    case "linger-disabled":
+      return 'Lingering is disabled. T3 Code will stop when your last login session ends and will not start at boot. Run `sudo loginctl enable-linger "$(id -un)"` on this machine, then retry the service command as your normal user.';
+    case "service-disabled":
+      return "The service is not enabled to start automatically. Run `t3 service update` to repair it.";
+    case "service-stopped":
+      return "The service is not running. Check the service log and `systemctl --user status t3code.service`, then run `t3 service update`.";
+  }
+}
+
+export class BootServicePrerequisiteError extends Schema.TaggedErrorClass<BootServicePrerequisiteError>()(
+  "BootServicePrerequisiteError",
+  { problem: BootServiceProblem, cause: Schema.optional(Schema.Defect()) },
+) {
+  override get message(): string {
+    return `[${this.problem}] ${formatBootServiceProblem(this.problem)}`;
+  }
+}
+
 export class BootServiceUpdatePendingError extends Schema.TaggedErrorClass<BootServiceUpdatePendingError>()(
   "BootServiceUpdatePendingError",
   {},
@@ -813,17 +864,33 @@ export class BootServiceUpdatePendingError extends Schema.TaggedErrorClass<BootS
   }
 }
 
+export class BootServiceDowngradeRefusedError extends Schema.TaggedErrorClass<BootServiceDowngradeRefusedError>()(
+  "BootServiceDowngradeRefusedError",
+  {
+    installedVersion: Schema.String,
+    targetVersion: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Refusing to replace t3@${this.installedVersion} with older t3@${this.targetVersion}. Run the command again with --allow-downgrade to continue.`;
+  }
+}
+
 export type BootServiceError =
   | BootServiceUnsupportedError
   | BootServiceCommandError
   | BootServiceIdentityError
   | BootServiceInstallError
-  | BootServiceUpdatePendingError;
+  | BootServicePrerequisiteError
+  | BootServiceUpdatePendingError
+  | BootServiceDowngradeRefusedError;
 
 export interface BootServiceStatus {
   readonly supported: boolean;
   readonly installed: boolean;
   readonly current: boolean;
+  readonly installedVersion?: string;
+  readonly problems?: ReadonlyArray<BootServiceProblem>;
   readonly unitPath: string;
   readonly logPath: string;
 }
@@ -831,7 +898,9 @@ export interface BootServiceStatus {
 export class BootService extends Context.Service<
   BootService,
   {
-    readonly install: Effect.Effect<BootServicePlan, BootServiceError>;
+    readonly install: (options?: {
+      readonly allowDowngrade?: boolean;
+    }) => Effect.Effect<BootServicePlan, BootServiceError>;
     readonly uninstall: Effect.Effect<boolean, BootServiceError>;
     readonly status: Effect.Effect<BootServiceStatus, BootServiceError>;
   }
@@ -956,9 +1025,16 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         yield* fs.makeDirectory(directory, { recursive: true });
         const tempPath = yield* fs.makeTempFileScoped({ directory, prefix: ".service-write-" });
         yield* fs.writeFileString(tempPath, contents, { mode: 0o600 });
-        yield* (yield* fs.open(tempPath, { flag: "r" })).sync;
+        // Opened read-write: Windows refuses to flush a handle without write access.
+        yield* (yield* fs.open(tempPath, { flag: "r+" })).sync;
         yield* fs.rename(tempPath, filePath);
-        yield* (yield* fs.open(directory, { flag: "r" })).sync;
+        // Windows has no directory fsync (EPERM); NTFS journals the rename.
+        yield* (yield* fs.open(directory, { flag: "r" })).sync.pipe(
+          Effect.catchIf(
+            (error) => (error.reason.cause as NodeJS.ErrnoException | undefined)?.code === "EPERM",
+            () => Effect.void,
+          ),
+        );
       }),
     ).pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
   const requireSupported = Effect.gen(function* () {
@@ -972,6 +1048,14 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       return yield* new BootServiceUnsupportedError({ platform });
     }
   });
+
+  const logFailure = (error: { readonly message: string }) =>
+    DateTime.now.pipe(
+      Effect.flatMap((now) =>
+        fs.writeFileString(logPath, `${DateTime.formatIso(now)} ${error.message}\n`, { flag: "a" }),
+      ),
+      Effect.ignore,
+    );
 
   const runStep = Effect.fn("cloud.boot_service.run_step")(function* (
     step: string,
@@ -991,16 +1075,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
             stderrLength: result.stderr.length,
           }),
       ),
-      Effect.tapError((error) =>
-        DateTime.now.pipe(
-          Effect.flatMap((now) =>
-            fs.writeFileString(logPath, `${DateTime.formatIso(now)} ${error.message}\n`, {
-              flag: "a",
-            }),
-          ),
-          Effect.ignore,
-        ),
-      ),
+      Effect.tapError(logFailure),
     );
   });
 
@@ -1044,6 +1119,66 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       },
       { discard: true },
     );
+
+  const probe = (command: string, args: ReadonlyArray<string>) =>
+    runner.run({ command, args, timeout: Duration.seconds(5) }).pipe(Effect.option);
+  const succeeded = (result: Option.Option<ProcessRunner.ProcessRunOutput>) =>
+    Option.isSome(result) && result.value.code === 0;
+  const lingerArgs = [
+    "show-user",
+    ...(processUserId === undefined ? [] : [String(processUserId)]),
+    "--property=Linger",
+    "--value",
+  ];
+  const readSystemdProblems = Effect.fn("cloud.boot_service.read_systemd_problems")(function* (
+    includeService: boolean,
+  ) {
+    const [manager, linger] = yield* Effect.all(
+      [probe("systemctl", ["--user", "show-environment"]), probe("loginctl", lingerArgs)],
+      { concurrency: "unbounded" },
+    );
+    const problems: BootServiceProblem[] = [];
+    if (!succeeded(manager)) problems.push("user-manager-unavailable");
+    const lingering = succeeded(linger) && Option.isSome(linger) ? linger.value.stdout.trim() : "";
+    if (lingering !== "yes") {
+      problems.push(lingering === "no" ? "linger-disabled" : "linger-unavailable");
+    }
+    if (includeService && succeeded(manager)) {
+      const [enabled, active] = yield* Effect.all(
+        [
+          probe("systemctl", ["--user", "is-enabled", BOOT_SERVICE_UNIT_FILE]),
+          probe("systemctl", ["--user", "is-active", BOOT_SERVICE_UNIT_FILE]),
+        ],
+        { concurrency: "unbounded" },
+      );
+      if (
+        !succeeded(enabled) ||
+        (Option.isSome(enabled) && enabled.value.stdout.trim() !== "enabled")
+      ) {
+        problems.push("service-disabled");
+      }
+      if (!succeeded(active)) problems.push("service-stopped");
+    }
+    return problems;
+  });
+
+  const requireSystemdPrerequisites = Effect.gen(function* () {
+    const problems = yield* readSystemdProblems(false);
+    const unavailable = problems.find((problem) => problem !== "linger-disabled");
+    if (unavailable) return yield* new BootServicePrerequisiteError({ problem: unavailable });
+    if (!problems.includes("linger-disabled")) return;
+    yield* runStep("enabling lingering for this user", "loginctl", [
+      "enable-linger",
+      "--no-ask-password",
+      ...(processUserId === undefined ? [] : [String(processUserId)]),
+    ]).pipe(
+      Effect.mapError(
+        (cause) => new BootServicePrerequisiteError({ problem: "linger-disabled", cause }),
+      ),
+    );
+    const remaining = yield* readSystemdProblems(false);
+    if (remaining[0]) return yield* new BootServicePrerequisiteError({ problem: remaining[0] });
+  });
 
   /**
    * Ensures plannedEntryPath exists before the unit points at it. A stable
@@ -1142,234 +1277,262 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     unitPath: definitionPath,
   };
 
-  const install: BootService["Service"]["install"] = Effect.gen(function* () {
-    yield* requireSupported;
-    yield* fs.makeDirectory(input.baseDir, { recursive: true }).pipe(
-      Effect.andThen(fs.makeDirectory(input.logsDir, { recursive: true })),
-      Effect.mapError((cause) => new BootServiceInstallError({ cause })),
-    );
-
-    if (supervisor !== "s6") {
-      const manager = detectedManager;
-      if (manager === undefined) {
-        return yield* new BootServiceUnsupportedError({ platform });
-      }
-      // Prepare every immutable artifact before stopping the installed unit.
-      yield* ensurePinnedRuntimeInstalled({
-        baseDir: input.baseDir,
-        version: input.cliVersion,
-        fs,
-        path,
-        runner,
-        validate: validatePinnedRuntime,
-      }).pipe(
-        Effect.mapError((error) =>
-          error._tag === "PinnedRuntimeInstallError"
-            ? new BootServiceCommandError({
-                step: error.step,
-                exitCode: error.exitCode,
-                stdoutLength: error.stdoutLength,
-                stderrLength: error.stderrLength,
-                cause: error,
-              })
-            : new BootServiceInstallError({ cause: error }),
-        ),
-      );
-
-      const launcherSource = yield* fs
-        .readFileString(launcherSourcePath)
-        .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
-      const installed = yield* fs
-        .exists(unitPath)
-        .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
-      if (installed) {
-        yield* runSteps(manager.stop);
-      }
-
-      yield* Effect.gen(function* () {
-        if (installed) {
-          const previousStateText = yield* fs.readFileString(statePath).pipe(Effect.option);
-          if (
-            Option.isSome(previousStateText) &&
-            serviceStateHasPendingUpdate(previousStateText.value)
-          ) {
-            return yield* new BootServiceUpdatePendingError();
-          }
-        }
-        yield* fs
-          .makeDirectory(path.dirname(unitPath), { recursive: true })
-          .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
-        yield* writeDurably(launcherPath, launcherSource);
-        yield* writeDurably(
-          statePath,
-          // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed launcher-owned document.
-          `${JSON.stringify(
-            {
-              protocol: SERVICE_LAUNCHER_PROTOCOL,
-              activeVersion: input.cliVersion,
-            } satisfies ServiceState,
-            null,
-            2,
-          )}\n`,
-        );
-        yield* writeDurably(unitPath, manager.render(plan));
-        yield* runSteps(manager.activate);
-      }).pipe(
-        Effect.tapError(() =>
-          installed ? runSteps(manager.restart).pipe(Effect.ignore) : Effect.void,
-        ),
-      );
-      return plan;
-    }
-
-    yield* ensurePinnedRuntime;
-    if (serviceIdentity === undefined) {
-      return yield* new BootServiceIdentityError({ reason: "missing" });
-    }
-    const numericUserId = parseNonNegativeInteger(serviceIdentity.serviceUser);
-    if (numericUserId === 0) {
-      return yield* new BootServiceIdentityError({ reason: "root" });
-    }
-    if (numericUserId === undefined) {
-      const resolvedUser = yield* runStep("resolving the s6 service user", "id", [
-        "-u",
-        serviceIdentity.serviceUser,
-      ]);
-      const resolvedUserId = parseNonNegativeInteger(resolvedUser.stdout.trim());
-      if (resolvedUserId === undefined || resolvedUserId === 0) {
-        return yield* new BootServiceIdentityError({ reason: "root" });
-      }
-    }
-
-    const previousUnit = yield* fs.exists(definitionPath).pipe(
-      Effect.flatMap((exists) =>
-        exists
-          ? fs.readFileString(definitionPath).pipe(Effect.map(Option.some))
-          : Effect.succeed(Option.none<string>()),
-      ),
-      Effect.mapError((cause) => new BootServiceInstallError({ cause })),
-    );
-    const previousLauncher =
-      serviceLauncherPath !== undefined
-        ? yield* fs.exists(serviceLauncherPath).pipe(
-            Effect.flatMap((exists) =>
-              exists
-                ? fs.readFileString(serviceLauncherPath).pipe(Effect.map(Option.some))
-                : Effect.succeed(Option.none<string>()),
-            ),
-            Effect.mapError((cause) => new BootServiceInstallError({ cause })),
-          )
-        : Option.none<string>();
-    const ownershipTargets = [...new Set([input.baseDir, input.logsDir])];
-    const previousOwnership = yield* Effect.tryPromise({
-      try: async () => {
-        const snapshot: Array<S6OwnershipSnapshot> = [];
-        const visit = async (target: string): Promise<void> => {
-          const info = await NodeFSP.lstat(target);
-          snapshot.push({
-            target,
-            owner: `${String(info.uid)}:${String(info.gid)}`,
-          });
-          if (info.isDirectory()) {
-            for (const entry of await NodeFSP.readdir(target)) {
-              await visit(path.join(target, entry));
-            }
-          }
-        };
-        for (const target of ownershipTargets) {
-          await visit(target);
-        }
-        return snapshot;
-      },
-      catch: (cause) => new BootServiceInstallError({ cause }),
-    });
-
-    const rollbackFailedInstall = Effect.fn("cloud.boot_service.rollback_failed_install")(
-      function* () {
-        if (serviceLauncherPath !== undefined) {
-          if (Option.isSome(previousLauncher)) {
-            yield* fs
-              .writeFileString(serviceLauncherPath, previousLauncher.value)
-              .pipe(Effect.andThen(fs.chmod(serviceLauncherPath, 0o755)), Effect.ignore);
-          } else {
-            yield* fs.remove(serviceLauncherPath).pipe(Effect.ignore);
-          }
-        }
-        if (Option.isSome(previousUnit)) {
-          yield* fs.writeFileString(definitionPath, previousUnit.value).pipe(Effect.ignore);
-        } else {
-          yield* runStep("cleaning up the s6 service", "s6-svc", ["-d", unitDir]).pipe(
-            Effect.ignore,
-          );
-          yield* fs.remove(definitionPath).pipe(Effect.ignore);
-        }
-        for (let index = previousOwnership.length - 1; index >= 0; index -= 1) {
-          const ownership = previousOwnership[index];
-          if (ownership === undefined) continue;
-          yield* runStep("restoring s6 service state ownership", "chown", [
-            "-h",
-            "--",
-            ownership.owner,
-            ownership.target,
-          ]).pipe(Effect.ignore);
-        }
-        if (Option.isSome(previousUnit)) {
-          yield* runStep("restoring the previous s6 service", "s6-svc", ["-r", unitDir]).pipe(
-            Effect.ignore,
-          );
-        }
-      },
-    );
-
-    yield* Effect.gen(function* () {
-      if (serviceLauncherPath !== undefined) {
-        yield* fs.makeDirectory(path.dirname(serviceLauncherPath), { recursive: true }).pipe(
-          Effect.andThen(fs.writeFileString(serviceLauncherPath, renderS6LauncherScript(plan))),
-          Effect.andThen(fs.chmod(serviceLauncherPath, 0o755)),
-          Effect.mapError((cause) => new BootServiceInstallError({ cause })),
-        );
-      }
-
-      const owner =
-        serviceIdentity.serviceGroup === undefined
-          ? serviceIdentity.serviceUser
-          : `${serviceIdentity.serviceUser}:${serviceIdentity.serviceGroup}`;
-      yield* runStep("reconciling s6 service state ownership", "chown", [
-        "-R",
-        "--",
-        owner,
-        ...ownershipTargets,
-      ]);
-
-      const renderedDefinition = renderS6RunScript(plan);
-      const previousServiceEnvironment =
-        !serviceEnvironmentSpecified && Option.isSome(previousUnit)
-          ? serviceEnvironmentBlock(previousUnit.value)
-          : undefined;
-      const definition =
-        previousServiceEnvironment === undefined
-          ? renderedDefinition
-          : replaceServiceEnvironmentBlock(renderedDefinition, previousServiceEnvironment);
-      yield* fs.makeDirectory(unitDir, { recursive: true }).pipe(
-        Effect.andThen(fs.writeFileString(definitionPath, definition)),
-        Effect.andThen(fs.chmod(definitionPath, 0o700)),
+  const install: BootService["Service"]["install"] = (options) =>
+    Effect.gen(function* () {
+      yield* requireSupported;
+      yield* fs.makeDirectory(input.baseDir, { recursive: true }).pipe(
+        Effect.andThen(fs.makeDirectory(input.logsDir, { recursive: true })),
         Effect.mapError((cause) => new BootServiceInstallError({ cause })),
       );
 
-      yield* runStep("rescanning the s6 service directory", "s6-svscanctl", [
-        "-a",
-        path.dirname(unitDir),
-      ]);
-      yield* waitForS6Supervision(unitDir);
-      yield* runStep(
-        Option.isSome(previousUnit) ? "restarting the s6 service" : "starting the s6 service",
-        "s6-svc",
-        [Option.isSome(previousUnit) ? "-r" : "-u", unitDir],
-      );
-    }).pipe(Effect.tapError(() => rollbackFailedInstall()));
+      if (supervisor !== "s6") {
+        const manager = detectedManager;
+        if (manager === undefined) {
+          return yield* new BootServiceUnsupportedError({ platform });
+        }
+        // Check systemd prerequisites before preparing files or stopping a live service.
+        if (manager.kind === "systemd") {
+          yield* requireSystemdPrerequisites.pipe(Effect.tapError(logFailure));
+        }
+        // Prepare every immutable artifact before stopping the installed unit.
+        yield* ensurePinnedRuntimeInstalled({
+          baseDir: input.baseDir,
+          version: input.cliVersion,
+          fs,
+          path,
+          runner,
+          validate: validatePinnedRuntime,
+        }).pipe(
+          Effect.mapError((error) =>
+            error._tag === "PinnedRuntimeInstallError"
+              ? new BootServiceCommandError({
+                  step: error.step,
+                  exitCode: error.exitCode,
+                  stdoutLength: error.stdoutLength,
+                  stderrLength: error.stderrLength,
+                  cause: error,
+                })
+              : new BootServiceInstallError({ cause: error }),
+          ),
+        );
 
-    return plan;
-  }).pipe(Effect.withSpan("cloud.boot_service.install"));
+        const launcherSource = yield* fs
+          .readFileString(launcherSourcePath)
+          .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
+        const installed = yield* fs
+          .exists(unitPath)
+          .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
+        if (installed) {
+          yield* runSteps(manager.stop);
+        }
+
+        yield* Effect.gen(function* () {
+          if (installed) {
+            const previousStateText = yield* fs.readFileString(statePath).pipe(Effect.option);
+            if (Option.isSome(previousStateText)) {
+              if (serviceStateHasPendingUpdate(previousStateText.value)) {
+                return yield* new BootServiceUpdatePendingError();
+              }
+              const installedVersion = serviceStateActiveVersion(previousStateText.value);
+              if (
+                installedVersion !== undefined &&
+                options?.allowDowngrade !== true &&
+                compareExactServiceVersions(input.cliVersion, installedVersion) < 0
+              ) {
+                return yield* new BootServiceDowngradeRefusedError({
+                  installedVersion,
+                  targetVersion: input.cliVersion,
+                });
+              }
+            }
+          }
+          yield* fs
+            .makeDirectory(path.dirname(unitPath), { recursive: true })
+            .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
+          yield* writeDurably(launcherPath, launcherSource);
+          yield* writeDurably(
+            statePath,
+            // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed launcher-owned document.
+            `${JSON.stringify(
+              {
+                protocol: SERVICE_LAUNCHER_PROTOCOL,
+                activeVersion: input.cliVersion,
+              } satisfies ServiceState,
+              null,
+              2,
+            )}\n`,
+          );
+          yield* writeDurably(unitPath, manager.render(plan));
+          yield* runSteps(manager.activate);
+        }).pipe(
+          Effect.tapError(() =>
+            installed ? runSteps(manager.restart).pipe(Effect.ignore) : Effect.void,
+          ),
+        );
+        return plan;
+      }
+
+      if (serviceIdentity === undefined) {
+        return yield* new BootServiceIdentityError({ reason: "missing" });
+      }
+      const numericUserId = parseNonNegativeInteger(serviceIdentity.serviceUser);
+      if (numericUserId === 0) {
+        return yield* new BootServiceIdentityError({ reason: "root" });
+      }
+      if (numericUserId === undefined) {
+        const resolvedUser = yield* runStep("resolving the s6 service user", "id", [
+          "-u",
+          serviceIdentity.serviceUser,
+        ]);
+        const resolvedUserId = parseNonNegativeInteger(resolvedUser.stdout.trim());
+        if (resolvedUserId === undefined || resolvedUserId === 0) {
+          return yield* new BootServiceIdentityError({ reason: "root" });
+        }
+      }
+
+      const previousUnit = yield* fs.exists(definitionPath).pipe(
+        Effect.flatMap((exists) =>
+          exists
+            ? fs.readFileString(definitionPath).pipe(Effect.map(Option.some))
+            : Effect.succeed(Option.none<string>()),
+        ),
+        Effect.mapError((cause) => new BootServiceInstallError({ cause })),
+      );
+      const previousLauncher =
+        serviceLauncherPath !== undefined
+          ? yield* fs.exists(serviceLauncherPath).pipe(
+              Effect.flatMap((exists) =>
+                exists
+                  ? fs.readFileString(serviceLauncherPath).pipe(Effect.map(Option.some))
+                  : Effect.succeed(Option.none<string>()),
+              ),
+              Effect.mapError((cause) => new BootServiceInstallError({ cause })),
+            )
+          : Option.none<string>();
+      const installedVersion = Option.isSome(previousLauncher)
+        ? parseS6LauncherVersion(previousLauncher.value)
+        : undefined;
+      if (
+        installedVersion !== undefined &&
+        options?.allowDowngrade !== true &&
+        compareExactServiceVersions(input.cliVersion, installedVersion) < 0
+      ) {
+        return yield* new BootServiceDowngradeRefusedError({
+          installedVersion,
+          targetVersion: input.cliVersion,
+        });
+      }
+      yield* ensurePinnedRuntime;
+      const ownershipTargets = [...new Set([input.baseDir, input.logsDir])];
+      const previousOwnership = yield* Effect.tryPromise({
+        try: async () => {
+          const snapshot: Array<S6OwnershipSnapshot> = [];
+          const visit = async (target: string): Promise<void> => {
+            const info = await NodeFSP.lstat(target);
+            snapshot.push({
+              target,
+              owner: `${String(info.uid)}:${String(info.gid)}`,
+            });
+            if (info.isDirectory()) {
+              for (const entry of await NodeFSP.readdir(target)) {
+                await visit(path.join(target, entry));
+              }
+            }
+          };
+          for (const target of ownershipTargets) {
+            await visit(target);
+          }
+          return snapshot;
+        },
+        catch: (cause) => new BootServiceInstallError({ cause }),
+      });
+
+      const rollbackFailedInstall = Effect.fn("cloud.boot_service.rollback_failed_install")(
+        function* () {
+          if (serviceLauncherPath !== undefined) {
+            if (Option.isSome(previousLauncher)) {
+              yield* fs
+                .writeFileString(serviceLauncherPath, previousLauncher.value)
+                .pipe(Effect.andThen(fs.chmod(serviceLauncherPath, 0o755)), Effect.ignore);
+            } else {
+              yield* fs.remove(serviceLauncherPath).pipe(Effect.ignore);
+            }
+          }
+          if (Option.isSome(previousUnit)) {
+            yield* fs.writeFileString(definitionPath, previousUnit.value).pipe(Effect.ignore);
+          } else {
+            yield* runStep("cleaning up the s6 service", "s6-svc", ["-d", unitDir]).pipe(
+              Effect.ignore,
+            );
+            yield* fs.remove(definitionPath).pipe(Effect.ignore);
+          }
+          for (let index = previousOwnership.length - 1; index >= 0; index -= 1) {
+            const ownership = previousOwnership[index];
+            if (ownership === undefined) continue;
+            yield* runStep("restoring s6 service state ownership", "chown", [
+              "-h",
+              "--",
+              ownership.owner,
+              ownership.target,
+            ]).pipe(Effect.ignore);
+          }
+          if (Option.isSome(previousUnit)) {
+            yield* runStep("restoring the previous s6 service", "s6-svc", ["-r", unitDir]).pipe(
+              Effect.ignore,
+            );
+          }
+        },
+      );
+
+      yield* Effect.gen(function* () {
+        if (serviceLauncherPath !== undefined) {
+          yield* fs.makeDirectory(path.dirname(serviceLauncherPath), { recursive: true }).pipe(
+            Effect.andThen(fs.writeFileString(serviceLauncherPath, renderS6LauncherScript(plan))),
+            Effect.andThen(fs.chmod(serviceLauncherPath, 0o755)),
+            Effect.mapError((cause) => new BootServiceInstallError({ cause })),
+          );
+        }
+
+        const owner =
+          serviceIdentity.serviceGroup === undefined
+            ? serviceIdentity.serviceUser
+            : `${serviceIdentity.serviceUser}:${serviceIdentity.serviceGroup}`;
+        yield* runStep("reconciling s6 service state ownership", "chown", [
+          "-R",
+          "--",
+          owner,
+          ...ownershipTargets,
+        ]);
+
+        const renderedDefinition = renderS6RunScript(plan);
+        const previousServiceEnvironment =
+          !serviceEnvironmentSpecified && Option.isSome(previousUnit)
+            ? serviceEnvironmentBlock(previousUnit.value)
+            : undefined;
+        const definition =
+          previousServiceEnvironment === undefined
+            ? renderedDefinition
+            : replaceServiceEnvironmentBlock(renderedDefinition, previousServiceEnvironment);
+        yield* fs.makeDirectory(unitDir, { recursive: true }).pipe(
+          Effect.andThen(fs.writeFileString(definitionPath, definition)),
+          Effect.andThen(fs.chmod(definitionPath, 0o700)),
+          Effect.mapError((cause) => new BootServiceInstallError({ cause })),
+        );
+
+        yield* runStep("rescanning the s6 service directory", "s6-svscanctl", [
+          "-a",
+          path.dirname(unitDir),
+        ]);
+        yield* waitForS6Supervision(unitDir);
+        yield* runStep(
+          Option.isSome(previousUnit) ? "restarting the s6 service" : "starting the s6 service",
+          "s6-svc",
+          [Option.isSome(previousUnit) ? "-r" : "-u", unitDir],
+        );
+      }).pipe(Effect.tapError(() => rollbackFailedInstall()));
+
+      return plan;
+    }).pipe(Effect.withSpan("cloud.boot_service.install"));
 
   const uninstall: BootService["Service"]["uninstall"] = Effect.gen(function* () {
     yield* requireSupported;
@@ -1428,14 +1591,21 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         fs.readFileString(statePath).pipe(Effect.option),
       ]);
       const state = Option.isSome(stateText) ? parseServiceState(stateText.value) : undefined;
+      const installedVersion = Option.isSome(stateText)
+        ? serviceStateActiveVersion(stateText.value)
+        : undefined;
       const normalizeUnit = (contents: string) =>
         detectedManager.kind === "launchd"
           ? contents.replace(/(<key>PATH<\/key>\n\s*<string>)[^<]*(<\/string>)/, "$1$2")
           : contents;
+      const problems = detectedManager.kind === "systemd" ? yield* readSystemdProblems(true) : [];
       return {
         supported: true,
         installed: true,
+        ...(installedVersion === undefined ? {} : { installedVersion }),
+        problems,
         current:
+          problems.length === 0 &&
           normalizeUnit(unit) === normalizeUnit(detectedManager.render(plan)) &&
           launcherExists &&
           runtimeEntryExists &&
@@ -1454,26 +1624,35 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     const entryExists = yield* fs.exists(
       plannedEntryPath === "" ? host.execPath : plannedEntryPath,
     );
-    const launcherCurrent =
+    const launcherContents =
       serviceLauncherPath === undefined
-        ? true
+        ? undefined
         : yield* fs
             .exists(serviceLauncherPath)
             .pipe(
               Effect.flatMap((exists) =>
-                exists
-                  ? fs
-                      .readFileString(serviceLauncherPath)
-                      .pipe(Effect.map((launcher) => launcher === renderS6LauncherScript(plan)))
-                  : Effect.succeed(false),
+                exists ? fs.readFileString(serviceLauncherPath) : Effect.succeed(undefined),
               ),
             );
+    const installedVersion =
+      launcherContents === undefined ? undefined : parseS6LauncherVersion(launcherContents);
+    const launcherCurrent =
+      serviceLauncherPath === undefined
+        ? true
+        : launcherContents !== undefined && launcherContents === renderS6LauncherScript(plan);
     const expected = serviceIdentity === undefined ? undefined : renderS6RunScript(plan);
     const definitionCurrent =
       expected !== undefined && s6DefinitionsMatch(unit, expected, serviceEnvironmentSpecified);
     const current =
       definitionCurrent && definitionPermissionsCurrent && entryExists && launcherCurrent;
-    return { supported: true, installed: true, current, unitPath: definitionPath, logPath };
+    return {
+      supported: true,
+      installed: true,
+      ...(installedVersion === undefined ? {} : { installedVersion }),
+      current,
+      unitPath: definitionPath,
+      logPath,
+    };
   }).pipe(
     Effect.mapError((cause) => new BootServiceInstallError({ cause })),
     Effect.withSpan("cloud.boot_service.status"),

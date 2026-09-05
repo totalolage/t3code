@@ -102,7 +102,7 @@ const remoteApiBaseUrl = (httpBaseUrl: string): string => {
   return url.toString();
 };
 
-const redactRequestUrl = (requestUrl: string): string => {
+export const redactRequestUrl = (requestUrl: string): string => {
   try {
     const url = new URL(requestUrl);
     for (const key of new Set(url.searchParams.keys())) {

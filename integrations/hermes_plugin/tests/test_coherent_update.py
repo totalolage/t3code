@@ -12,7 +12,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
-from integrations.hermes_plugin import coherent_update, update_process
+from integrations.hermes_plugin import coherent_update, service, update_process
 from integrations.hermes_plugin.config import load_config
 
 
@@ -126,6 +126,80 @@ class CoherentUpdateTest(unittest.TestCase):
             json.loads(prior_state),
         )
         restore_service.assert_called_once_with(self.config, installed_intent=True)
+
+    def test_failed_activation_rollback_allows_a_restored_older_runtime(self) -> None:
+        root = Path(self.temporary.name)
+        config = replace(
+            self.config,
+            runtime_root=root / "runtime",
+            binary_path=root / "runtime" / "bin" / "t3",
+            data_dir=root / "runtime" / "data",
+            service_dir=root / "service" / "t3code",
+            watchdog_service_dir=root / "service" / "t3code-plugin-watchdog",
+        )
+        older_runtime = b"older installed launcher"
+        newer_runtime = b"newer failed launcher"
+        config.runtime_root.mkdir(parents=True)
+        config.binary_path.parent.mkdir(parents=True)
+        config.binary_path.write_bytes(newer_runtime)
+        config.service_dir.mkdir(parents=True)
+        (config.service_dir / "run").write_text("run", encoding="utf-8")
+        backup = root / "snapshot" / "t3"
+        backup.parent.mkdir(parents=True)
+        backup.write_bytes(older_runtime)
+        prior_state = b'{"version":1,"desired_state":"installed"}\n'
+        snapshot = coherent_update.ProductSnapshot(
+            binary_backup=backup,
+            state_backup=prior_state,
+            services_installed=True,
+        )
+        service_commands: list[list[str]] = []
+
+        def run_command(args, **_kwargs):
+            if args[-1] == "--help":
+                self.assertEqual(config.binary_path.read_bytes(), older_runtime)
+                return CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout="  --allow-downgrade  permit an older runtime\n",
+                    stderr="",
+                )
+            if args[0] == "s6-svstat":
+                return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+            if args[0] == str(config.binary_path):
+                service_commands.append(args)
+                return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected command: {args}")
+
+        with (
+            patch(
+                "integrations.hermes_plugin.service._command",
+                side_effect=run_command,
+            ),
+            patch("integrations.hermes_plugin.service._prepare_service_dir"),
+            patch("integrations.hermes_plugin.service._remove_redundant_s6_svperms"),
+            patch("integrations.hermes_plugin.service._install_watchdog"),
+            patch("integrations.hermes_plugin.service._verify_t3_service_up", return_value=9621),
+            patch("integrations.hermes_plugin.service._verify_product_health"),
+        ):
+            result = coherent_update._rollback_product(config, snapshot)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(config.binary_path.read_bytes(), older_runtime)
+        self.assertEqual(
+            service_commands,
+            [
+                service._t3_service_args(
+                    config,
+                    "update",
+                    allow_downgrade=True,
+                )
+            ],
+        )
+        self.assertEqual(
+            json.loads(config.service_state_path.read_text(encoding="utf-8")),
+            json.loads(prior_state),
+        )
 
     def test_failed_install_rollback_preserves_uninstalled_intent(self) -> None:
         snapshot = coherent_update.ProductSnapshot(

@@ -234,7 +234,12 @@ class TagDrivenUpdateTest(unittest.TestCase):
 
         self.assertEqual(result["action"], "installed")
         self.assertEqual(result["status"], current_status)
-        write_service.assert_called_once_with(self.config, "update", timeout=45)
+        write_service.assert_called_once_with(
+            self.config,
+            "update",
+            timeout=45,
+            allow_downgrade=True,
+        )
         state = json.loads(
             self.config.service_state_path.read_text(encoding="utf-8")
         )

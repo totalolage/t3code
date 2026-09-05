@@ -47,11 +47,26 @@ jobs:
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron
 
+      # Files/dependencies are repo-wide; export checks cover clean workspaces only.
+      - name: Check unused code
+        run: vp run knip:check
+
       - name: Check
         run: vp check
 
       - name: Typecheck
         run: vpr typecheck
+
+      - uses: ./.github/actions/setup-apt-mirrors
+
+      - name: Install browser secret helper build libraries
+        run: |
+          for apt_file in /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources; do
+            if test -f "$apt_file"; then
+              sudo sed -i 's|http://|https://|g' "$apt_file"
+            fi
+          done
+          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
 
       - name: Build desktop pipeline
         run: vp run build:desktop
@@ -90,6 +105,17 @@ jobs:
           bun-version: 1.3.14
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron
+
+      - uses: ./.github/actions/setup-apt-mirrors
+
+      - name: Install browser secret helper build libraries
+        run: |
+          for apt_file in /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources; do
+            if test -f "$apt_file"; then
+              sudo sed -i 's|http://|https://|g' "$apt_file"
+            fi
+          done
+          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
 
       - name: Verify s6-overlay service privilege drop
         env:

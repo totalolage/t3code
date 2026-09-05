@@ -11,6 +11,12 @@ import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 
 export const HERMES_DEFAULT_MODEL = "hermes-default";
 const HERMES_AUTH_METHOD_ID = "hermes-setup";
+const HERMES_MODE_ID_BY_RUNTIME_MODE = {
+  "approval-required": "default",
+  "auto-accept-edits": "accept_edits",
+  auto: "default",
+  "full-access": "dont_ask",
+} as const satisfies Record<RuntimeMode, string>;
 
 type HermesAcpRuntimeSettings = Pick<HermesSettings, "binaryPath">;
 
@@ -69,7 +75,8 @@ export function currentHermesModelIdFromSessionSetup(
     | EffectAcpSchema.ResumeSessionResponse,
 ): string | undefined {
   const modelId = sessionSetupResult.models?.currentModelId;
-  return modelId?.trim() ? modelId : undefined;
+  const trimmed = modelId?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 export function resolveHermesRequestedModelId(
@@ -79,7 +86,7 @@ export function resolveHermesRequestedModelId(
     return undefined;
   }
   const trimmed = model.trim();
-  return !trimmed || trimmed === HERMES_DEFAULT_MODEL ? undefined : model;
+  return !trimmed || trimmed === HERMES_DEFAULT_MODEL ? undefined : trimmed;
 }
 
 export function resolveHermesAcpConfigUpdates(
@@ -173,11 +180,6 @@ export function applyHermesRuntimeMode<E>(input: {
   readonly runtimeMode: RuntimeMode;
   readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
 }): Effect.Effect<void, E> {
-  const modeId =
-    input.runtimeMode === "approval-required"
-      ? "default"
-      : input.runtimeMode === "auto-accept-edits"
-        ? "accept_edits"
-        : "dont_ask";
+  const modeId = HERMES_MODE_ID_BY_RUNTIME_MODE[input.runtimeMode];
   return input.runtime.setSessionMode(modeId).pipe(Effect.mapError(input.mapError), Effect.asVoid);
 }

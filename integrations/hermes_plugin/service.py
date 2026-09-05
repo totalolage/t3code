@@ -75,6 +75,8 @@ _SERVICE_START_TIMEOUT_SECONDS = 10.0
 _SERVICE_START_POLL_SECONDS = 0.1
 _SERVICE_STABLE_SECONDS = 0.5
 _PROCESS_EXIT_TIMEOUT_SECONDS = 10.0
+_SERVICE_HELP_TIMEOUT_SECONDS = 5.0
+_ALLOW_DOWNGRADE_OPTION = "--allow-downgrade"
 _SVSTAT_PID = re.compile(
     r"^\s*up \(pid ([1-9][0-9]*)(?: pgid [1-9][0-9]*)?\)(?=\s|$)"
 )
@@ -922,7 +924,48 @@ def _service_has_expected_hermes_home(config: PluginConfig) -> bool:
     return assignments == [str(config.hermes_home)]
 
 
-def _t3_service_args(config: PluginConfig, action: str) -> list[str]:
+def _t3_service_supports_allow_downgrade(
+    config: PluginConfig, action: str
+) -> bool:
+    """Probe the selected binary without caching across runtime replacements."""
+
+    command = [str(config.binary_path), "service", action, "--help"]
+    probe_description = (
+        f"could not probe T3 service {action} help for {_ALLOW_DOWNGRADE_OPTION}"
+    )
+    try:
+        result = _command(
+            command,
+            timeout=_SERVICE_HELP_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except ServiceError as error:
+        raise ServiceError(f"{probe_description}: {error}") from error
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise ServiceError(
+            f"{probe_description}: {command[0]} service {action} --help "
+            f"exited with status {result.returncode}{suffix}"
+        )
+
+    help_text = f"{result.stdout or ''}\n{result.stderr or ''}"
+    return (
+        re.search(
+            rf"(?<![A-Za-z0-9_-]){re.escape(_ALLOW_DOWNGRADE_OPTION)}"
+            r"(?![A-Za-z0-9_-])",
+            help_text,
+        )
+        is not None
+    )
+
+
+def _t3_service_args(
+    config: PluginConfig,
+    action: str,
+    *,
+    allow_downgrade: bool = False,
+) -> list[str]:
     args = [
         str(config.binary_path),
         "service",
@@ -946,6 +989,8 @@ def _t3_service_args(config: PluginConfig, action: str) -> list[str]:
         )
     if config.service_group:
         args.extend(["--service-group", config.service_group])
+    if allow_downgrade:
+        args.append(_ALLOW_DOWNGRADE_OPTION)
     return args
 
 
@@ -954,9 +999,19 @@ def _write_t3_s6_service(
     action: str,
     *,
     timeout: float,
+    allow_downgrade: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    if allow_downgrade:
+        allow_downgrade = _t3_service_supports_allow_downgrade(config, action)
     previous_pid = _service_pid(config.service_dir) if action == "update" else None
-    result = _command(_t3_service_args(config, action), timeout=timeout)
+    result = _command(
+        _t3_service_args(
+            config,
+            action,
+            allow_downgrade=allow_downgrade,
+        ),
+        timeout=timeout,
+    )
     _remove_redundant_s6_svperms(config.service_dir)
     _verify_t3_service_up(config, reject_pid=previous_pid)
     return result
@@ -1116,7 +1171,12 @@ def _install_locked(config: PluginConfig) -> dict[str, object]:
     _set_desired_state(config, _DESIRED_INSTALLED, version=release.version)
     config.data_dir.mkdir(parents=True, exist_ok=True)
     _prepare_service_dir(config.service_dir)
-    _write_t3_s6_service(config, "install", timeout=45)
+    _write_t3_s6_service(
+        config,
+        "install",
+        timeout=45,
+        allow_downgrade=True,
+    )
     try:
         _install_watchdog(config)
     except Exception:
@@ -1148,7 +1208,12 @@ def _update_locked(config: PluginConfig) -> dict[str, object]:
     release = install_release(config)
     _set_desired_state(config, _DESIRED_INSTALLED, version=release.version)
     _prepare_service_dir(config.service_dir)
-    _write_t3_s6_service(config, "update", timeout=45)
+    _write_t3_s6_service(
+        config,
+        "update",
+        timeout=45,
+        allow_downgrade=True,
+    )
     _install_watchdog(config)
     return {
         "ok": True,
@@ -1187,6 +1252,7 @@ def _activate_staged_product_locked(
         config,
         "update" if service_exists else "install",
         timeout=45,
+        allow_downgrade=True,
     )
     _install_watchdog(config)
     pid = _verify_t3_service_up(config)
@@ -1220,6 +1286,7 @@ def _restore_runtime_after_product_rollback(
         config,
         "update" if service_exists else "install",
         timeout=45,
+        allow_downgrade=True,
     )
     _install_watchdog(config)
     pid = _verify_t3_service_up(config)
