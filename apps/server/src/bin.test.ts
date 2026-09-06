@@ -12,9 +12,6 @@ import {
   CommandId,
   EnvironmentId,
   EnvironmentHttpApi,
-  EnvironmentAuthHttpApi,
-  EnvironmentMetadataHttpApi,
-  EnvironmentOrchestrationHttpApi,
   EventId,
   ORCHESTRATION_CLI_API_VERSION,
   MessageId,
@@ -98,9 +95,9 @@ const DisconnectedLauncherChildLayer = Layer.mergeAll(
   }),
 );
 class ProjectCliHttpApi extends HttpApi.make("environment")
-  .add(EnvironmentMetadataHttpApi)
-  .add(EnvironmentAuthHttpApi)
-  .add(EnvironmentOrchestrationHttpApi) {}
+  .add(EnvironmentHttpApi.groups.metadata)
+  .add(EnvironmentHttpApi.groups.auth)
+  .add(EnvironmentHttpApi.groups.orchestration) {}
 
 const connectCli = makeCli({ cloudEnabled: true });
 const noConnectCli = makeCli({ cloudEnabled: false });

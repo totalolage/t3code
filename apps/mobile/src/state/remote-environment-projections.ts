@@ -2,7 +2,10 @@ import type {
   EnvironmentPresentation,
   PreparedConnection,
 } from "@t3tools/client-runtime/connection";
-import { connectionCatalogDisplayUrl } from "@t3tools/client-runtime/connection";
+import {
+  connectionCatalogDisplayUrl,
+  connectionCatalogQueryParameters,
+} from "@t3tools/client-runtime/connection";
 import type { EnvironmentId, ServerConfig } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { Atom } from "effect/unstable/reactivity";
@@ -44,6 +47,8 @@ export function createRemoteEnvironmentProjectionAtoms(input: {
 
       const displayUrl = connectionCatalogDisplayUrl(presentation.entry) ?? "";
       const httpBaseUrl = prepared?.httpBaseUrl ?? displayUrl;
+      const queryParameters =
+        prepared?.queryParameters ?? connectionCatalogQueryParameters(presentation.entry);
       const socketUrl = prepared?.socketUrl ?? "";
       const wsBaseUrl =
         socketUrl === ""
@@ -63,6 +68,7 @@ export function createRemoteEnvironmentProjectionAtoms(input: {
         displayUrl,
         httpBaseUrl,
         wsBaseUrl,
+        queryParameters,
         bearerToken: authorization?._tag === "Bearer" ? authorization.token : null,
         ...(relayManaged
           ? {

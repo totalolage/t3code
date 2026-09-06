@@ -355,7 +355,8 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         Stream.runHead,
         Effect.forkChild,
       );
-      yield* adapter.compactThread!(threadId);
+      NodeAssert.ok(adapter.compaction?.type === "native");
+      yield* adapter.compaction.start(threadId);
       yield* runtime.emit({
         id: asEventId("evt-compaction-item-completed"),
         kind: "notification",
@@ -417,9 +418,11 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       NodeAssert.ok(runtime);
       runtime.sendTurnImpl.mockClear();
 
-      const compactThread = adapter.compactThread;
-      NodeAssert.ok(compactThread);
-      yield* compactThread(threadId);
+      const compaction = adapter.compaction;
+      NodeAssert.ok(compaction);
+      NodeAssert.equal(compaction.type, "native");
+      if (compaction.type !== "native") return;
+      yield* compaction.start(threadId);
 
       NodeAssert.equal(runtime.compactThreadImpl.mock.calls.length, 1);
       NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 0);

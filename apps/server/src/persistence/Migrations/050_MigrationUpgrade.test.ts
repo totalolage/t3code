@@ -62,6 +62,7 @@ const upstreamMigrationNames = [
   "ProjectionProjectsAutoPull",
   "RepairAutomaticSettlementTimestamps",
   "ProjectionProjectIcon",
+  "ProjectionThreadBranchPullRequest",
 ] as const;
 
 const expectedMigrationHistory = [...forkMigrationNames, ...upstreamMigrationNames].map(
@@ -248,6 +249,12 @@ layer("MigrationUpgrade", (it) => {
       assert.deepStrictEqual(hiddenRows, [
         { threadId: "thread-durable", hiddenAt: "2026-09-01T00:02:00.000Z" },
       ]);
+
+      const threadColumns = yield* sql<{ readonly name: string }>`
+        PRAGMA table_info(projection_threads)
+      `;
+      assert.ok(threadColumns.some((column) => column.name === "hidden_at"));
+      assert.ok(threadColumns.some((column) => column.name === "branch_pull_request_json"));
     }),
   );
 
@@ -288,6 +295,7 @@ layer("MigrationUpgrade", (it) => {
         PRAGMA table_info(projection_threads)
       `;
       assert.ok(threadColumns.some((column) => column.name === "hidden_at"));
+      assert.ok(threadColumns.some((column) => column.name === "branch_pull_request_json"));
 
       const projectColumns = yield* sql<{ readonly name: string }>`
         PRAGMA table_info(projection_projects)

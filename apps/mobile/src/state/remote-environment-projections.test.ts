@@ -39,6 +39,7 @@ function prepared(
   environmentId: EnvironmentId,
   endpoint: string,
   token: string,
+  queryParameters: PreparedConnection["queryParameters"] = [],
 ): PreparedConnection {
   return {
     environmentId,
@@ -46,7 +47,7 @@ function prepared(
     httpBaseUrl: `https://${endpoint}.example.test`,
     socketUrl: `wss://${endpoint}.example.test/ws?token=redacted`,
     httpAuthorization: { _tag: "Bearer", token },
-    queryParameters: [],
+    queryParameters,
     target: target(environmentId, endpoint),
   };
 }
@@ -103,7 +104,11 @@ describe("remote environment projections", () => {
 
     harness.registry.set(
       harness.preparedConnectionAtom(ENVIRONMENT_ID),
-      Option.some(prepared(ENVIRONMENT_ID, "rotated", "rotated-token")),
+      Option.some(
+        prepared(ENVIRONMENT_ID, "rotated", "rotated-token", [
+          { key: "proxy", value: "fork route" },
+        ]),
+      ),
     );
     const rotated = harness.registry.get(firstConsumer);
 
@@ -112,6 +117,7 @@ describe("remote environment projections", () => {
       httpBaseUrl: "https://rotated.example.test",
       wsBaseUrl: "wss://rotated.example.test",
       bearerToken: "rotated-token",
+      queryParameters: [{ key: "proxy", value: "fork route" }],
     });
     expect(harness.registry.get(secondConsumer)).toBe(rotated);
     expect(harness.registry.get(otherConsumer)).toBe(otherInitial);

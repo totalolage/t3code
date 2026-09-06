@@ -122,6 +122,9 @@ jobs:
           T3_S6_OVERLAY_INTEGRATION: "1"
         run: vp test run apps/server/src/cloud/bootService.s6-overlay.integration.test.ts
 
+      - name: Test nightly release checks
+        run: node --test .github/scripts/check-nightly-release.test.cjs
+
       - name: Test
         run: vp run --parallel --concurrency-limit 4 --filter '!t3' --filter '!@t3tools/monorepo' test
 

@@ -5,6 +5,9 @@ on:
     tags:
       - "v*.*.*"
       - "!v*-nightly.*"
+  schedule:
+    # Avoid minute zero, when GitHub scheduled jobs are busiest.
+    - cron: "8,38 * * * *"
   workflow_dispatch:
     inputs:
       channel:
@@ -20,16 +23,52 @@ on:
         required: false
         type: string
 
+# Serialize nightlies (scheduled and manual) so overlapping runs cannot build
+# the same commit twice or publish out of order. Stable tag releases get their
+# own group so a nightly never blocks them. Running publishers are never
+# canceled, and queue: max keeps every pending run instead of the default
+# newest-wins single slot, so a queued stable tag can never be silently
+# dropped. Automatic nightlies recheck the release gap after leaving the queue.
+concurrency:
+  group: release-${{ (github.event_name == 'schedule' || inputs.channel == 'nightly') && 'nightly' || 'stable' }}
+  cancel-in-progress: false
+  queue: max
+
 permissions:
   contents: read
   id-token: none
 
 jobs:
+  check_changes:
+    name: Check automatic nightly release
+    if: github.event_name == 'schedule' && github.repository == 'pingdotgg/t3code'
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 5
+    outputs:
+      has_changes: ${{ steps.check.outputs.result }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: .github/scripts
+
+      - id: check
+        name: Check release gap and new commits
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { shouldReleaseNightly } = require('./.github/scripts/check-nightly-release.cjs');
+            return await shouldReleaseNightly({ github, context, core });
+
   preflight:
     name: Preflight
+    needs: [check_changes]
     # Fork releases use f8y-release.yml; the canonical release infrastructure,
     # credentials, and publishing destinations are owned by upstream.
-    if: github.repository == 'pingdotgg/t3code'
+    if: |
+      github.repository == 'pingdotgg/t3code' &&
+      !failure() && !cancelled() &&
+      (github.event_name != 'schedule' || needs.check_changes.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:
@@ -72,7 +111,7 @@ jobs:
           NIGHTLY_SHA: ${{ github.sha }}
           NIGHTLY_RUN_NUMBER: ${{ github.run_number }}
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${DISPATCH_CHANNEL:-stable}" == "nightly" ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" || ( "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${DISPATCH_CHANNEL:-stable}" == "nightly" ) ]]; then
             nightly_date="$(date -u -d "$NIGHTLY_DATE" +%Y%m%d)"
 
             node scripts/resolve-nightly-release.ts \

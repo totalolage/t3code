@@ -1215,6 +1215,7 @@ export function makeCursorAdapter(
         sessionModelSwitch: "in-session",
         turnSteering: "supported",
       },
+      compaction: { type: "slash-command", command: "/compress" },
       startSession,
       sendTurn,
       interruptTurn,

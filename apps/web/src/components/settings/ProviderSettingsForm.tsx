@@ -186,7 +186,7 @@ export interface ProviderSecretFieldPresentation {
   readonly isStored: boolean;
 }
 
-export function getProviderSecretFieldPresentation(input: {
+function getProviderSecretFieldPresentation(input: {
   readonly secretField: NonNullable<ProviderClientDefinition["secretEnvironmentVariable"]>;
   readonly secretVariable: ProviderInstanceEnvironmentVariable | undefined;
 }): ProviderSecretFieldPresentation {
@@ -209,7 +209,7 @@ export function getProviderSecretFieldPresentation(input: {
   };
 }
 
-export function nextProviderSecretEnvironment(
+function nextProviderSecretEnvironment(
   environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>,
   name: string,
   value: string,
