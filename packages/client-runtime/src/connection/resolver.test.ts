@@ -281,6 +281,7 @@ describe("ConnectionResolver", () => {
         label: "Authorized relay environment",
         httpBaseUrl: ENDPOINT.httpBaseUrl,
         socketUrl: "wss://authorized.example.test/ws?wsTicket=dpop",
+        queryParameters: [],
         httpAuthorization: {
           _tag: "Dpop",
           accessToken: "dpop-access-token",
