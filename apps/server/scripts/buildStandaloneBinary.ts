@@ -42,7 +42,8 @@ const result = await Bun.build({
   root: repoRoot,
   minify: true,
   sourcemap: "linked",
-  external: ["*NodeSqliteClient.ts"],
+  // Node-only SQLite is selected dynamically at runtime; keep Bun's client bundled.
+  external: ["@t3tools/shared/nodeSqliteClient"],
   plugins: [
     {
       name: "standalone-client-assets",
