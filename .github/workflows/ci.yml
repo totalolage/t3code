@@ -74,6 +74,35 @@ jobs:
       - name: Verify preload bundle output
         run: node apps/desktop/scripts/verify-preload-bundle.mjs
 
+      - name: Prepare standalone CLI runtime
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Build standalone Linux CLI
+        run: bun apps/server/scripts/buildStandaloneBinary.ts bun-linux-x64-baseline dist/t3-linux-x64
+
+      - name: Smoke test standalone Linux CLI
+        env:
+          T3CODE_HOME: ${{ runner.temp }}/t3code-standalone
+        run: |
+          set -euo pipefail
+          cli="apps/server/dist/t3-linux-x64"
+          if [[ ! -x "$cli" ]]; then
+            echo "Standalone CLI is missing or is not executable: $cli" >&2
+            exit 1
+          fi
+          expected_cli_version="t3 v$(node -p "require('./apps/server/package.json').version")"
+          cli_version="$("$cli" --version)"
+          if [[ "$cli_version" != "$expected_cli_version" ]]; then
+            echo "Unexpected CLI version: $cli_version (expected $expected_cli_version)" >&2
+            exit 1
+          fi
+          "$cli" remote --help | grep -F "Use the supported remote orchestration API."
+          "$cli" serve --help | grep -F "Run the T3 Code server without opening a browser and print headless pairing details."
+          "$cli" service --help | grep -F "Manage the T3 Code background service."
+          "$cli" __standalone-preflight | grep -F '"ok":true'
+
   # Everything except `t3` (apps/server). `--parallel` drops the package
   # dependency ordering that `vp run` applies by default: these `test` tasks
   # declare no `dependsOn` and resolve workspace deps from source, so ordering
