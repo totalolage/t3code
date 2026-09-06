@@ -1,5 +1,4 @@
 import { EnvironmentId } from "@t3tools/contracts";
-import { stripPairingTokenFromUrl } from "@t3tools/shared/remote";
 import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 
@@ -18,15 +17,6 @@ export interface SavedRemoteConnection {
 }
 
 export type RemoteClientConnectionState = EnvironmentConnectionPhase;
-
-export function redactPairingCredential(pairingUrl: string): string {
-  const trimmed = pairingUrl.trim();
-  try {
-    return stripPairingTokenFromUrl(new URL(trimmed)).toString();
-  } catch {
-    return trimmed;
-  }
-}
 
 export function isRelayManagedConnection(
   connection: Pick<SavedRemoteConnection, "authenticationMethod" | "relayManaged">,

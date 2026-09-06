@@ -13,7 +13,6 @@
  */
 import type {
   ProviderInterruptTurnInput,
-  ProviderCompactThreadInput,
   ProviderInstanceId,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
@@ -24,6 +23,7 @@ import type {
   ProviderStopSessionInput,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
+  MessageId,
   ThreadId,
   ProviderTurnStartResult,
 } from "@t3tools/contracts";
@@ -54,16 +54,17 @@ export interface ProviderServiceShape {
     input: ProviderSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
 
+  readonly compactThread: (
+    threadId: ThreadId,
+    modelSelection?: ProviderSendTurnInput["modelSelection"],
+    requestId?: MessageId,
+  ) => Effect.Effect<void, ProviderServiceError>;
+
   /**
    * Interrupt a running provider turn.
    */
   readonly interruptTurn: (
     input: ProviderInterruptTurnInput,
-  ) => Effect.Effect<void, ProviderServiceError>;
-
-  /** Compact provider context without creating a turn. */
-  readonly compactThread: (
-    input: ProviderCompactThreadInput,
   ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
@@ -104,6 +105,13 @@ export interface ProviderServiceShape {
   readonly getInstanceInfo: (
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderInstanceRoutingInfo, ProviderServiceError>;
+
+  /**
+   * Reject unsupported rewind before files change, without resuming the session.
+   */
+  readonly assertConversationRollbackSupported: (
+    threadId: ThreadId,
+  ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
    * Roll back provider conversation state by a number of turns.

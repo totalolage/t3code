@@ -169,14 +169,13 @@ function decodeGitHubReleases(value: unknown): ReadonlyArray<GitHubRelease> {
     }
     const version = release["tag_name"].replace(/^v/u, "");
     if (parseVersion(version) === null) return [];
-    const assets = release["assets"].flatMap(
-      (asset): ReadonlyArray<GitHubReleaseAsset> =>
-        typeof asset === "object" &&
-        asset !== null &&
-        typeof asset["name"] === "string" &&
-        typeof asset["browser_download_url"] === "string"
-          ? [{ name: asset["name"], browserDownloadUrl: asset["browser_download_url"] }]
-          : [],
+    const assets = release["assets"].flatMap((asset): ReadonlyArray<GitHubReleaseAsset> =>
+      typeof asset === "object" &&
+      asset !== null &&
+      typeof asset["name"] === "string" &&
+      typeof asset["browser_download_url"] === "string"
+        ? [{ name: asset["name"], browserDownloadUrl: asset["browser_download_url"] }]
+        : [],
     );
     return [{ version, assets }];
   });

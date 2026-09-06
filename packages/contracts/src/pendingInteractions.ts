@@ -5,11 +5,11 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import { IsoDateTime, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 export const REMOTE_INTERACTION_ID_MAX_CHARS = 128;
-export const REMOTE_INTERACTION_IDEMPOTENCY_KEY_MAX_CHARS = 128;
+const REMOTE_INTERACTION_IDEMPOTENCY_KEY_MAX_CHARS = 128;
 export const REMOTE_INTERACTION_QUESTION_MAX_COUNT = 3;
 export const REMOTE_INTERACTION_OPTION_MAX_COUNT = 3;
 export const REMOTE_INTERACTION_ANSWER_VALUE_MAX_CHARS = 1_024;
-export const REMOTE_PENDING_INTERACTION_MAX_COUNT = 100;
+const REMOTE_PENDING_INTERACTION_MAX_COUNT = 100;
 
 const OpaqueRemoteIdString = TrimmedNonEmptyString.check(
   Schema.isMaxLength(REMOTE_INTERACTION_ID_MAX_CHARS),

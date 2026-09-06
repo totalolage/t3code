@@ -17,6 +17,7 @@ import {
   type RemoteInteractionThreadId,
   type RemotePendingInteractionsResult,
 } from "@t3tools/contracts";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import * as Effect from "effect/Effect";
 import { HttpClient } from "effect/unstable/http";
 
@@ -37,15 +38,31 @@ const bearerHeaders = (authorization: RemoteBearerAuthorization) => ({
   authorization: `Bearer ${authorization.accessToken}`,
 });
 
+interface RemoteOrchestrationHttpInput {
+  readonly httpBaseUrl: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
+}
+
+const remoteHttpRequest = Effect.fn("clientRuntime.operations.remoteHttpRequest")(function* (
+  input: RemoteOrchestrationHttpInput,
+  pathname: string,
+) {
+  const queryParameters = input.queryParameters ?? [];
+  return {
+    requestUrl: environmentEndpointUrl(input.httpBaseUrl, pathname, queryParameters),
+    client: yield* makeEnvironmentHttpApiClient(input.httpBaseUrl, queryParameters),
+  };
+});
+
 export const fetchRemoteOrchestrationSnapshot = Effect.fn(
   "clientRuntime.operations.fetchRemoteOrchestrationSnapshot",
 )(function* (input: {
   readonly httpBaseUrl: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
   readonly authorization: RemoteBearerAuthorization;
   readonly timeoutMs?: number;
 }): Effect.fn.Return<OrchestrationReadModel, RemoteEnvironmentRequestError, HttpClient.HttpClient> {
-  const requestUrl = environmentEndpointUrl(input.httpBaseUrl, "/api/orchestration/snapshot", []);
-  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl, []);
+  const { requestUrl, client } = yield* remoteHttpRequest(input, "/api/orchestration/snapshot");
   return yield* executeEnvironmentHttpRequest(
     requestUrl,
     input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,
@@ -57,6 +74,7 @@ export const fetchRemoteOrchestrationShell = Effect.fn(
   "clientRuntime.operations.fetchRemoteOrchestrationShell",
 )(function* (input: {
   readonly httpBaseUrl: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
   readonly authorization: RemoteBearerAuthorization;
   readonly timeoutMs?: number;
 }): Effect.fn.Return<
@@ -64,8 +82,7 @@ export const fetchRemoteOrchestrationShell = Effect.fn(
   RemoteEnvironmentRequestError,
   HttpClient.HttpClient
 > {
-  const requestUrl = environmentEndpointUrl(input.httpBaseUrl, "/api/orchestration/shell", []);
-  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl, []);
+  const { requestUrl, client } = yield* remoteHttpRequest(input, "/api/orchestration/shell");
   return yield* executeEnvironmentHttpRequest(
     requestUrl,
     input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,
@@ -77,6 +94,7 @@ export const fetchRemoteOrchestrationThread = Effect.fn(
   "clientRuntime.operations.fetchRemoteOrchestrationThread",
 )(function* (input: {
   readonly httpBaseUrl: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
   readonly authorization: RemoteBearerAuthorization;
   readonly threadId: ThreadId;
   readonly timeoutMs?: number;
@@ -85,12 +103,10 @@ export const fetchRemoteOrchestrationThread = Effect.fn(
   RemoteEnvironmentRequestError,
   HttpClient.HttpClient
 > {
-  const requestUrl = environmentEndpointUrl(
-    input.httpBaseUrl,
+  const { requestUrl, client } = yield* remoteHttpRequest(
+    input,
     `/api/orchestration/threads/${input.threadId}`,
-    [],
   );
-  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl, []);
   return yield* executeEnvironmentHttpRequest(
     requestUrl,
     input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,
@@ -106,12 +122,12 @@ export const dispatchRemoteOrchestrationCommand = Effect.fn(
   "clientRuntime.operations.dispatchRemoteOrchestrationCommand",
 )(function* (input: {
   readonly httpBaseUrl: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
   readonly authorization: RemoteBearerAuthorization;
   readonly command: ClientOrchestrationCommand;
   readonly timeoutMs?: number;
 }): Effect.fn.Return<DispatchResult, RemoteEnvironmentRequestError, HttpClient.HttpClient> {
-  const requestUrl = environmentEndpointUrl(input.httpBaseUrl, "/api/orchestration/dispatch", []);
-  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl, []);
+  const { requestUrl, client } = yield* remoteHttpRequest(input, "/api/orchestration/dispatch");
   return yield* executeEnvironmentHttpRequest(
     requestUrl,
     input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,
@@ -126,6 +142,7 @@ export const createRemoteOrchestrationThread = Effect.fn(
   "clientRuntime.operations.createRemoteOrchestrationThread",
 )(function* (input: {
   readonly httpBaseUrl: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
   readonly authorization: RemoteBearerAuthorization;
   readonly payload: OrchestrationCliCreateRequest;
   readonly timeoutMs?: number;
@@ -134,8 +151,7 @@ export const createRemoteOrchestrationThread = Effect.fn(
   RemoteEnvironmentRequestError,
   HttpClient.HttpClient
 > {
-  const requestUrl = environmentEndpointUrl(input.httpBaseUrl, "/api/orchestration/create", []);
-  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl, []);
+  const { requestUrl, client } = yield* remoteHttpRequest(input, "/api/orchestration/create");
   return yield* executeEnvironmentHttpRequest(
     requestUrl,
     input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,
@@ -150,6 +166,7 @@ export const compactRemoteOrchestrationThread = Effect.fn(
   "clientRuntime.operations.compactRemoteOrchestrationThread",
 )(function* (input: {
   readonly httpBaseUrl: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
   readonly authorization: RemoteBearerAuthorization;
   readonly payload: OrchestrationCliCompactRequest;
   readonly timeoutMs?: number;
@@ -158,8 +175,7 @@ export const compactRemoteOrchestrationThread = Effect.fn(
   RemoteEnvironmentRequestError,
   HttpClient.HttpClient
 > {
-  const requestUrl = environmentEndpointUrl(input.httpBaseUrl, "/api/orchestration/compact", []);
-  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl, []);
+  const { requestUrl, client } = yield* remoteHttpRequest(input, "/api/orchestration/compact");
   return yield* executeEnvironmentHttpRequest(
     requestUrl,
     input.timeoutMs ?? 30_000,
@@ -174,6 +190,7 @@ export const fetchRemotePendingInteractions = Effect.fn(
   "clientRuntime.operations.fetchRemotePendingInteractions",
 )(function* (input: {
   readonly httpBaseUrl: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
   readonly authorization: RemoteBearerAuthorization;
   readonly threadId?: RemoteInteractionThreadId;
   readonly timeoutMs?: number;
@@ -182,12 +199,10 @@ export const fetchRemotePendingInteractions = Effect.fn(
   RemoteEnvironmentRequestError,
   HttpClient.HttpClient
 > {
-  const requestUrl = environmentEndpointUrl(
-    input.httpBaseUrl,
+  const { requestUrl, client } = yield* remoteHttpRequest(
+    input,
     "/api/orchestration/pending-interactions",
-    [],
   );
-  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl, []);
   return yield* executeEnvironmentHttpRequest(
     requestUrl,
     input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,
@@ -202,6 +217,7 @@ export const answerRemotePendingInteraction = Effect.fn(
   "clientRuntime.operations.answerRemotePendingInteraction",
 )(function* (input: {
   readonly httpBaseUrl: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
   readonly authorization: RemoteBearerAuthorization;
   readonly payload: RemoteInteractionAnswerRequest;
   readonly timeoutMs?: number;
@@ -210,12 +226,10 @@ export const answerRemotePendingInteraction = Effect.fn(
   RemoteEnvironmentRequestError,
   HttpClient.HttpClient
 > {
-  const requestUrl = environmentEndpointUrl(
-    input.httpBaseUrl,
+  const { requestUrl, client } = yield* remoteHttpRequest(
+    input,
     "/api/orchestration/pending-interactions/answer",
-    [],
   );
-  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl, []);
   return yield* executeEnvironmentHttpRequest(
     requestUrl,
     input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,
@@ -230,6 +244,7 @@ export const approveRemotePendingInteraction = Effect.fn(
   "clientRuntime.operations.approveRemotePendingInteraction",
 )(function* (input: {
   readonly httpBaseUrl: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
   readonly authorization: RemoteBearerAuthorization;
   readonly payload: RemoteInteractionApproveRequest;
   readonly timeoutMs?: number;
@@ -238,12 +253,10 @@ export const approveRemotePendingInteraction = Effect.fn(
   RemoteEnvironmentRequestError,
   HttpClient.HttpClient
 > {
-  const requestUrl = environmentEndpointUrl(
-    input.httpBaseUrl,
+  const { requestUrl, client } = yield* remoteHttpRequest(
+    input,
     "/api/orchestration/pending-interactions/approve",
-    [],
   );
-  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl, []);
   return yield* executeEnvironmentHttpRequest(
     requestUrl,
     input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,
@@ -258,6 +271,7 @@ export const rejectRemotePendingInteraction = Effect.fn(
   "clientRuntime.operations.rejectRemotePendingInteraction",
 )(function* (input: {
   readonly httpBaseUrl: string;
+  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
   readonly authorization: RemoteBearerAuthorization;
   readonly payload: RemoteInteractionRejectRequest;
   readonly timeoutMs?: number;
@@ -266,12 +280,10 @@ export const rejectRemotePendingInteraction = Effect.fn(
   RemoteEnvironmentRequestError,
   HttpClient.HttpClient
 > {
-  const requestUrl = environmentEndpointUrl(
-    input.httpBaseUrl,
+  const { requestUrl, client } = yield* remoteHttpRequest(
+    input,
     "/api/orchestration/pending-interactions/reject",
-    [],
   );
-  const client = yield* makeEnvironmentHttpApiClient(input.httpBaseUrl, []);
   return yield* executeEnvironmentHttpRequest(
     requestUrl,
     input.timeoutMs ?? DEFAULT_REMOTE_ORCHESTRATION_TIMEOUT_MS,

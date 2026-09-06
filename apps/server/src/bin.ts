@@ -14,7 +14,6 @@ import { formatRemoteCliDiagnostic, isOrchestrationCliInvocation } from "./cli/r
 import { isEntrypoint } from "./entrypoint.ts";
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
-
 if (
   isEntrypoint({
     moduleUrl: import.meta.url,

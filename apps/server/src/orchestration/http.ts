@@ -2,6 +2,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   CommandId,
+  DEFAULT_MODEL,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   EnvironmentConflictError,
@@ -9,7 +10,9 @@ import {
   GitCommandError,
   MessageId,
   type OrchestrationEvent,
+  type ModelSelection,
   ProjectId,
+  ProviderInstanceId,
   ThreadId,
   type EnvironmentInternalError,
   type EnvironmentRequestInvalidError,
@@ -118,6 +121,14 @@ export const failEnvironmentDispatch = (
   }
   return failEnvironmentInternal("orchestration_dispatch_failed", cause);
 };
+
+export const resolveCreateModelSelection = (
+  defaultModelSelection: ModelSelection | null,
+): ModelSelection =>
+  defaultModelSelection ?? {
+    instanceId: ProviderInstanceId.make("codex"),
+    model: DEFAULT_MODEL,
+  };
 
 const failPendingInteractionResponse = (
   cause: unknown,
@@ -270,9 +281,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           if (project === undefined) {
             return yield* failEnvironmentInvalidRequest("invalid_command");
           }
-          if (project.defaultModelSelection === null) {
-            return yield* failEnvironmentInvalidRequest("invalid_command");
-          }
+          const modelSelection = resolveCreateModelSelection(project.defaultModelSelection);
 
           const refs =
             args.payload.baseBranch === undefined
@@ -324,7 +333,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
                 text: args.payload.message,
                 attachments: [],
               },
-              modelSelection: project.defaultModelSelection,
+              modelSelection,
               titleSeed: args.payload.title ?? args.payload.message.slice(0, 80),
               runtimeMode: args.payload.runtimeMode ?? DEFAULT_RUNTIME_MODE,
               interactionMode: args.payload.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -332,7 +341,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
                 createThread: {
                   projectId: ProjectId.make(project.id),
                   title: args.payload.title ?? args.payload.message.slice(0, 80),
-                  modelSelection: project.defaultModelSelection,
+                  modelSelection,
                   runtimeMode: args.payload.runtimeMode ?? DEFAULT_RUNTIME_MODE,
                   interactionMode:
                     args.payload.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,

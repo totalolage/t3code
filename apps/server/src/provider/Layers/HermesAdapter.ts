@@ -268,6 +268,18 @@ export function makeHermesAdapter(
               issue: `Expected provider '${PROVIDER}' but received '${input.provider}'.`,
             });
           }
+          if (
+            (input.providerInstanceId !== undefined &&
+              input.providerInstanceId !== boundInstanceId) ||
+            (input.modelSelection !== undefined &&
+              input.modelSelection.instanceId !== boundInstanceId)
+          ) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue: "The Hermes provider instance does not match the requested session.",
+            });
+          }
           if (!input.cwd?.trim()) {
             return yield* new ProviderAdapterValidationError({
               provider: PROVIDER,
@@ -282,8 +294,7 @@ export function makeHermesAdapter(
           }
 
           const cwd = path.resolve(input.cwd.trim());
-          const modelSelection =
-            input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
+          const modelSelection = input.modelSelection;
           const pendingApprovals = new Map<ApprovalRequestId, PendingApproval>();
           const sessionScope = yield* Scope.make("sequential");
           let sessionScopeTransferred = false;
@@ -540,7 +551,7 @@ export function makeHermesAdapter(
             Effect.catchCause((cause) =>
               Effect.logError("Failed to process Hermes ACP notification.", { cause }),
             ),
-            Effect.forkChild,
+            Effect.forkIn(sessionScope),
           );
           context.notificationFiber = notificationFiber;
           sessions.set(input.threadId, context);
@@ -586,10 +597,18 @@ export function makeHermesAdapter(
                 });
               }
 
-              const modelSelection =
-                input.modelSelection?.instanceId === boundInstanceId
-                  ? input.modelSelection
-                  : undefined;
+              if (
+                input.modelSelection !== undefined &&
+                input.modelSelection.instanceId !== boundInstanceId
+              ) {
+                return yield* new ProviderAdapterValidationError({
+                  provider: PROVIDER,
+                  operation: "sendTurn",
+                  issue: "The selected model belongs to another provider instance.",
+                });
+              }
+
+              const modelSelection = input.modelSelection;
               const currentModelId = yield* applyHermesAcpSelection({
                 runtime: context.acp,
                 currentModelId: context.currentModelId,
@@ -598,36 +617,39 @@ export function makeHermesAdapter(
                   mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
               });
               const text = input.input?.trim();
-              const imageParts = yield* Effect.forEach(input.attachments ?? [], (attachment) =>
-                Effect.gen(function* () {
-                  const attachmentPath = resolveAttachmentPath({
-                    attachmentsDir: serverConfig.attachmentsDir,
-                    attachment,
-                  });
-                  if (!attachmentPath) {
-                    return yield* new ProviderAdapterRequestError({
-                      provider: PROVIDER,
-                      method: "session/prompt",
-                      detail: `Invalid attachment id '${attachment.id}'.`,
+              const imageParts = yield* Effect.forEach(
+                // Generic file paths stay in the input text; only images become ACP blocks.
+                (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
+                (attachment) =>
+                  Effect.gen(function* () {
+                    const attachmentPath = resolveAttachmentPath({
+                      attachmentsDir: serverConfig.attachmentsDir,
+                      attachment,
                     });
-                  }
-                  const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-                    Effect.mapError(
-                      (cause) =>
-                        new ProviderAdapterRequestError({
-                          provider: PROVIDER,
-                          method: "session/prompt",
-                          detail: cause.message,
-                          cause,
-                        }),
-                    ),
-                  );
-                  return {
-                    type: "image",
-                    data: Buffer.from(bytes).toString("base64"),
-                    mimeType: attachment.mimeType,
-                  } satisfies EffectAcpSchema.ContentBlock;
-                }),
+                    if (!attachmentPath) {
+                      return yield* new ProviderAdapterRequestError({
+                        provider: PROVIDER,
+                        method: "session/prompt",
+                        detail: `Invalid attachment id '${attachment.id}'.`,
+                      });
+                    }
+                    const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new ProviderAdapterRequestError({
+                            provider: PROVIDER,
+                            method: "session/prompt",
+                            detail: cause.message,
+                            cause,
+                          }),
+                      ),
+                    );
+                    return {
+                      type: "image",
+                      data: Buffer.from(bytes).toString("base64"),
+                      mimeType: attachment.mimeType,
+                    } satisfies EffectAcpSchema.ContentBlock;
+                  }),
               );
               const prompt: Array<EffectAcpSchema.ContentBlock> = [
                 ...(text ? [{ type: "text" as const, text }] : []),
@@ -904,6 +926,7 @@ export function makeHermesAdapter(
       capabilities: {
         sessionModelSwitch: "in-session",
         turnSteering: "unsupported",
+        supportsConversationRollback: false,
       },
       startSession,
       sendTurn,

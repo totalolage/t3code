@@ -115,6 +115,16 @@ it("builds and verifies the Linux desktop AppImage", () => {
   assert.include(workflow, "dtolnay/rust-toolchain@stable");
   assert.include(workflow, "vp run --filter @t3tools/desktop ensure:electron");
   assert.include(workflow, "T3CODE_DESKTOP_APP_ID: dev.f8y.t3code");
+  assert.include(linuxJob, "uses: ./.github/actions/setup-apt-mirrors");
+  assert.include(linuxJob, "name: Install native browser-secret build dependencies");
+  assert.include(linuxJob, "sudo apt-get install -y libsecret-1-dev pkg-config");
+  assert.include(linuxJob, "name: Install ImageMagick");
+  assert.include(linuxJob, "if ! command -v magick");
+  const nativeDependenciesIndex = linuxJob.indexOf(
+    "name: Install native browser-secret build dependencies",
+  );
+  const imageMagickIndex = linuxJob.indexOf("name: Install ImageMagick");
+  assert.equal(nativeDependenciesIndex >= 0 && nativeDependenciesIndex < imageMagickIndex, true);
   assert.include(linuxJob, "T3CODE_DESKTOP_UPDATE_REPOSITORY: totalolage/t3code");
   assert.notInclude(linuxJob, "T3CODE_DESKTOP_DISABLE_UPDATE_CONFIG");
   assert.include(workflow, "--platform linux");
@@ -128,6 +138,7 @@ it("builds and verifies the Linux desktop AppImage", () => {
 });
 
 it("packages the f8y Linux release as a desktop application", () => {
+  assert.include(f8yPkgbuild, "  'libsecret'");
   assert.include(f8yPkgbuild, '_appimage="T3-Code-${_upstream_version}-${CARCH}.AppImage"');
   assert.include(f8yPkgbuild, '"$pkgdir/usr/bin/t3code"');
   assert.include(f8yPkgbuild, '"$pkgdir/usr/share/applications/t3code.desktop"');

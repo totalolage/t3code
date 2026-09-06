@@ -250,6 +250,13 @@ jobs:
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron
 
+      - uses: ./.github/actions/setup-apt-mirrors
+
+      - name: Install native browser-secret build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev pkg-config
+
       - name: Install ImageMagick
         run: |
           if ! command -v magick >/dev/null 2>&1 && ! command -v convert >/dev/null 2>&1; then

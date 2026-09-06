@@ -1,50 +1,47 @@
-# Running T3 Code in the Background
+# Running T3 Code in the background
 
-On Linux and macOS, T3 Code can run as a background service for your user, so it is ready without
-keeping a terminal open.
+On Linux and macOS, T3 Code can run as a service for your user so you do not need
+to keep a terminal open.
 
-## Manage the Service
+## Manage the service
 
-Install it with the latest T3 Code release:
+Run these commands on the machine that will host T3 Code:
 
-```sh
-npx t3@latest service install
-```
+| Task                            | Command                           |
+| ------------------------------- | --------------------------------- |
+| Install and start               | `npx t3@latest service install`   |
+| Inspect status and log location | `npx t3@latest service status`    |
+| Update or repair                | `npx t3@latest service update`    |
+| Stop and remove from startup    | `npx t3@latest service uninstall` |
 
-Check whether it is installed:
+Uninstalling the service leaves your projects, threads, and settings intact.
 
-```sh
-npx t3@latest service status
-```
+Install and update use the version of the CLI you invoke. For nightly, use
+`npx t3@nightly service update`; replace `nightly` with an exact version to pin
+one. An older CLI refuses to replace a newer service unless you explicitly add
+`--allow-downgrade`.
 
-Update or repair it:
+Updating restarts the server. Finish active work first, and wait for any remote
+update already in progress. To match a remote client's version, follow
+[Updating T3 Code](./updating.md).
 
-```sh
-npx t3@latest service update
-```
+## Platform support
 
-Stop it and remove it from startup:
+Linux needs systemd user services. Setup enables lingering so T3 Code starts at
+boot and keeps running after logout. If this needs administrator permission,
+setup prints a recovery command before changing the service.
 
-```sh
-npx t3@latest service uninstall
-```
+macOS starts the service when you log in and stops it when you log out. Keep the
+Mac logged in and awake for unattended remote access. Installing over SSH while
+nobody is logged in at the Mac's screen can fail at the final start step; the
+service is still installed and will start at the next login.
 
-Updating restarts T3 Code briefly. Let active agent work and terminal commands finish first.
-If a remote update is already in progress, wait for it to finish before retrying a local update.
+Windows background services are not supported.
 
-The service runs a small stable launcher. Exact T3 Code versions are installed separately, so a
-failed remote candidate can return to the previous version without rewriting the service
-definition. The launcher snapshots the database before a remote candidate starts, so database
-updates roll back with the server version. An older launcher may require one local
-`service update` before this is available.
+### Use an s6 supervisor
 
-## Platform Support
-
-**Linux** uses a systemd user unit at `~/.config/systemd/user/t3code.service` by default. The
-service starts when the machine boots and keeps running after you log out. Installation enables
-lingering for the user.
-
-For a classic s6 scan directory, pass the same supervisor options to each lifecycle command:
+For a classic s6 scan directory, pass `--supervisor s6` and an absolute
+`--service-dir` to each service command:
 
 ```sh
 sudo t3 service install --base-dir "$HOME/.t3" \
@@ -53,72 +50,100 @@ sudo t3 service status --base-dir "$HOME/.t3" \
   --supervisor s6 --service-dir /run/service/t3code
 ```
 
-The service directory must already be inside a scan directory managed by `s6-svscan`. T3 Code owns
-the `run` file inside that directory and controls it with `s6-svc`. The generated service drops
-privileges before starting T3 Code. A non-root invocation uses its own UID and GID. A root invocation
-under `sudo` uses `SUDO_UID` and `SUDO_GID`. For another account, or when invoking directly as root,
-select the non-root identity explicitly and repeat it for update or repair commands:
+The service directory must already be inside a scan directory managed by
+`s6-svscan`. T3 Code owns the `run` file in that directory and controls it with
+`s6-svc`.
+
+The generated service drops privileges before starting T3 Code. A non-root
+invocation uses its own UID and GID. A root invocation through `sudo` uses
+`SUDO_UID` and `SUDO_GID`. If you invoke T3 Code directly as root, or select
+another account, provide the non-root identity explicitly and repeat it for
+update or repair commands:
 
 ```sh
 t3 service install --supervisor s6 --service-dir /run/service/t3code \
   --service-user t3 --service-group t3
 ```
 
-Installation reconciles the T3 Code state and log ownership to the selected identity so the service
-can keep writing across supervisor restarts.
+Installation reconciles T3 Code state and log ownership to the selected identity
+so the service can keep writing across supervisor restarts.
 
-Pass `--host` and `--port` when the managed service needs a stable listening address. These values
-are persisted in the generated service definition:
+Pass `--service-environment NAME=VALUE` to `service install` or `service update`
+to add an environment variable to an s6 service. Repeat the flag for multiple
+variables. T3 Code validates the names and values, rejects T3-managed names, and
+exports the variables after the service drops root privileges.
+
+Pass `--host` and `--port` when the managed service needs a stable listening
+address. T3 Code persists these values in the generated service definition:
 
 ```sh
 t3 service install --supervisor s6 --service-dir /run/service/t3code \
   --host 0.0.0.0 --port 3773
 ```
 
-**macOS** uses a launch agent at `~/Library/LaunchAgents/com.t3tools.t3code.service.plist`. It
-starts when you log in, not when the Mac boots, and it stops when you log out. macOS has no
-equivalent of Linux lingering for user agents. For a Mac that must stay reachable unattended,
-turn on automatic login in **System Settings → Users & Groups**, and keep the Mac from sleeping.
-Automatic login is unavailable while FileVault is on.
+T3 Connect can offer service installation during setup, but the two are managed
+separately. Signing out of T3 Connect does not stop or uninstall the service.
 
-A few more macOS notes:
+## Automatic service updates
 
-- Installing over SSH needs someone logged in at the Mac's screen to start the agent immediately.
-  Otherwise, the install command reports an error at the final start step. The agent remains
-  installed and starts at the next login.
-- macOS may show privacy prompts for protected folders such as Desktop, Documents, or Downloads.
-  The prompt may name a bare `node` process. If agent work cannot read those folders, grant Full
-  Disk Access to the node binary listed in the launch agent's `ProgramArguments`.
-- The agent appears under **System Settings → General → Login Items**. If it was switched off there
-  or disabled with `launchctl disable`, switch it back on before the next login.
+For a managed systemd or s6 service, set **Settings → General → Service update
+repository** (`serviceUpdateRepository`) to an exact GitHub repository URL, such
+as `https://github.com/owner/repository`. Automatic update binaries are available
+for Linux x64 and Apple Silicon macOS. Leave the setting empty to disable
+automatic service updates.
 
-**Windows** is not supported yet.
+Every 15 minutes, the managed service checks that repository's GitHub releases.
+It downloads a newer platform-specific CLI and its adjacent `.sha256` file into
+the T3 Code runtime directory. T3 Code verifies the checksum and the binary's
+reported version before marking the update pending.
 
-## Automatic Service Updates
+While an update is pending, existing agent turns may finish and new turns are
+saved in a durable queue. When no agent turn is active, T3 Code atomically
+replaces the systemd unit or s6 launcher and asks the configured supervisor to
+restart it. The replacement process invokes queued turns after it starts. A
+failed supervisor activation restores the previous service definition and
+resumes queued work.
 
-On Linux, set **Settings → General → Service update repository** to an exact GitHub repository URL,
-such as `https://github.com/owner/repository`. Leave the setting empty to disable automatic service
-updates.
+For s6, the root-owned `run` script remains fixed. It grants the selected group
+permission to restart only that service, drops privileges, and runs a launcher
+under the selected identity. Automatic updates replace that user-owned launcher
+rather than modifying a script that s6 executes as root.
 
-Every 15 minutes the managed service checks that repository's GitHub releases. A newer
-platform-specific CLI and its adjacent `.sha256` file are downloaded into the T3 Code runtime
-directory. T3 Code verifies the checksum and the binary's reported version before marking the
-update pending.
+## Troubleshooting
 
-While an update is pending, existing agent turns may finish and new turns are saved in a durable
-queue. Once no agent turn is active, T3 Code atomically replaces the systemd unit or s6 launcher and
-asks the configured supervisor to restart it. The replacement process invokes queued turns after it
-starts. A failed supervisor activation restores the previous service definition and resumes queued
-work.
+Start with `t3 service status` on the host. It prints the log path and, on Linux,
+checks whether the installed service is running, enabled, and allowed to survive
+logout.
 
-For s6, the root-owned run script remains fixed. It grants the selected group permission to restart
-only that service, drops privileges, and then runs a launcher under the selected identity. Automatic
-updates replace that user-owned launcher rather than modifying a script that s6 executes as root.
+If it stops when your SSH session closes, check for `linger-disabled`. An
+administrator can enable lingering with:
 
-## Using It with T3 Connect
+```sh
+sudo loginctl enable-linger "$(id -un)"
+```
 
-T3 Connect may offer to install the service during setup so the host stays reachable in the
-background. This is only an onboarding shortcut: the service and T3 Connect are managed separately.
+Over SSH, allow sudo to prompt:
 
-Signing out of T3 Connect does not remove the service. Use `t3 service uninstall` when you no longer
-want T3 Code to start in the background.
+```sh
+ssh -t your-server 'sudo loginctl enable-linger "$(id -un)"'
+```
+
+Then retry service setup as your normal user. Run only the `loginctl` command
+with sudo; running T3 Code as root creates a separate installation and Connect
+identity. Without administrator access, run `t3 serve` in a terminal and keep
+that session open.
+
+| Status problem                          | Next step                                                                                                                      |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `linger-unavailable`                    | Run `loginctl show-user "$(id -un)" --property=Linger` and check that systemd-logind is available.                             |
+| `user-manager-unavailable`              | Run `systemctl --user status` in a login session for the service user; check your distribution's systemd user-session support. |
+| `service-disabled` or `service-stopped` | Read the log and `systemctl --user status t3code.service`, then use the repair command printed by T3 Code.                     |
+
+On macOS, check **System Settings → General → Login Items** if the service no
+longer starts at login. If agent work cannot access Desktop, Documents, or
+Downloads, it may need Full Disk Access for the Node executable listed in
+`ProgramArguments` in
+`~/Library/LaunchAgents/com.t3tools.t3code.service.plist`.
+
+For failures after signing in to T3 Connect, see
+[connection troubleshooting](./remote-access.md#t3-connect-troubleshooting).

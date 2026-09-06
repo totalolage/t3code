@@ -25,6 +25,7 @@ import {
 } from "../Errors.ts";
 import * as OrchestrationEngine from "./OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./ProjectionSnapshotQuery.ts";
+import { ThreadDeletionReactor } from "./ThreadDeletionReactor.ts";
 
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 const isOrchestrationCommandInvariantError = Schema.is(OrchestrationCommandInvariantError);
@@ -115,6 +116,7 @@ interface OrchestrationCommandDispatcherDependencies {
   readonly startup: ServerRuntimeStartup.ServerRuntimeStartup["Service"];
   readonly terminalManager: TerminalManager.TerminalManager["Service"];
   readonly vcsStatusBroadcaster: VcsStatusBroadcaster.VcsStatusBroadcaster["Service"];
+  readonly threadDeletionReactor: ThreadDeletionReactor["Service"];
 }
 
 function makeDispatcher(
@@ -129,6 +131,7 @@ function makeDispatcher(
     startup,
     terminalManager,
     vcsStatusBroadcaster,
+    threadDeletionReactor,
   } = dependencies;
 
   const refreshGitStatus = (cwd: string) =>
@@ -268,7 +271,9 @@ function makeDispatcher(
                   threadId: command.threadId,
                 }),
               ),
-              Effect.as(true),
+              Effect.flatMap(({ sequence }) =>
+                threadDeletionReactor.drainThrough(sequence).pipe(Effect.as(true)),
+              ),
               Effect.catchCause((cause) =>
                 Effect.logWarning("bootstrap thread cleanup failed", {
                   threadId: command.threadId,
@@ -438,7 +443,7 @@ function makeDispatcher(
 
       const bootstrapProgram = Effect.gen(function* () {
         if (bootstrap?.createThread) {
-          yield* dispatchCommand({
+          const created = yield* dispatchCommand({
             type: "thread.create",
             commandId: yield* serverCommandId("bootstrap-thread-create"),
             threadId: command.threadId,
@@ -451,7 +456,10 @@ function makeDispatcher(
             worktreePath: bootstrap.createThread.worktreePath,
             createdAt: bootstrap.createThread.createdAt,
           });
+          // The successful create is a fence: prior deletion cleanup must finish
+          // before this thread incarnation can own runtime resources.
           createdThread = true;
+          yield* threadDeletionReactor.drainThrough(created.sequence);
         }
 
         if (bootstrap?.prepareWorktree) {
@@ -473,12 +481,19 @@ function makeDispatcher(
               cwd: projectCwd,
               remoteName: "origin",
             });
-            const resolvedRemoteBase = yield* gitWorkflow.resolveRemoteTrackingCommit({
+            const remoteBaseExists = yield* gitWorkflow.remoteBranchExists({
               cwd: projectCwd,
               refName: bootstrap.prepareWorktree.baseBranch,
-              fallbackRemoteName: "origin",
+              remoteName: "origin",
             });
-            worktreeBaseRef = resolvedRemoteBase.commitSha;
+            if (remoteBaseExists) {
+              const resolvedRemoteBase = yield* gitWorkflow.resolveRemoteTrackingCommit({
+                cwd: projectCwd,
+                refName: bootstrap.prepareWorktree.baseBranch,
+                fallbackRemoteName: "origin",
+              });
+              worktreeBaseRef = resolvedRemoteBase.commitSha;
+            }
           }
           const worktree = yield* gitWorkflow.createWorktree({
             cwd: projectCwd,
@@ -558,13 +573,16 @@ function makeDispatcher(
         ? orchestrationEngine.withBootstrapDispatchLock(
             dispatchBootstrapTurnStart(command, options),
           )
-        : orchestrationEngine
-            .dispatch(command, options)
-            .pipe(
-              Effect.mapError((cause) =>
-                toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-              ),
-            );
+        : orchestrationEngine.dispatch(command, options).pipe(
+            Effect.tap(({ sequence }) =>
+              command.type === "thread.create"
+                ? threadDeletionReactor.drainThrough(sequence)
+                : Effect.void,
+            ),
+            Effect.mapError((cause) =>
+              toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+            ),
+          );
 
     const enqueue = startup
       .enqueueCommand(dispatchEffect)
@@ -591,5 +609,6 @@ export const make = Effect.gen(function* () {
     startup: yield* ServerRuntimeStartup.ServerRuntimeStartup,
     terminalManager: yield* TerminalManager.TerminalManager,
     vcsStatusBroadcaster: yield* VcsStatusBroadcaster.VcsStatusBroadcaster,
+    threadDeletionReactor: yield* ThreadDeletionReactor,
   });
 });

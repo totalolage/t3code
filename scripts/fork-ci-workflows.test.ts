@@ -18,6 +18,28 @@ it("runs the complete CI suite on hosted runners outside the upstream repository
   assert.include(workflow, "blacksmith-8vcpu-ubuntu-2404");
   assert.include(workflow, "blacksmith-6vcpu-macos-26");
   assert.strictEqual(workflow.match(/- name: Setup Bun/gmu)?.length, 2);
+  assert.include(workflow, "Verify s6-overlay service privilege drop");
+  assert.include(workflow, "Test nightly release checks");
+});
+
+it("guards optional APT source files on hosted runners", () => {
+  const workflow = readWorkflow("ci.yml");
+
+  assert.strictEqual(
+    workflow.match(
+      /for apt_file in \/etc\/apt\/blacksmith-ubuntu-mirrors\.txt \/etc\/apt\/sources\.list\.d\/ubuntu\.sources;/gu,
+    )?.length,
+    2,
+  );
+  assert.strictEqual(workflow.match(/if test -f "\$apt_file"; then/g)?.length, 2);
+  assert.strictEqual(
+    workflow.split("sudo sed -i 's|http://|https://|g' \"$apt_file\"").length - 1,
+    2,
+  );
+  assert.notInclude(
+    workflow,
+    "sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources",
+  );
 });
 
 it("keeps upstream-owned deployment workflows disabled in forks", () => {
@@ -34,4 +56,19 @@ it("keeps upstream-owned deployment workflows disabled in forks", () => {
   }
 
   assert.notInclude(readWorkflow("f8y-release.yml"), "github.repository == 'pingdotgg/t3code'");
+});
+
+it("keeps automatic nightly release checks behind the canonical release gate", () => {
+  const workflow = readWorkflow("release.yml");
+
+  assert.include(workflow, 'cron: "8,38 * * * *"');
+  assert.include(workflow, "name: Check automatic nightly release");
+  assert.include(
+    workflow,
+    "github.event_name == 'schedule' && github.repository == 'pingdotgg/t3code'",
+  );
+  assert.include(workflow, "github.repository == 'pingdotgg/t3code' &&");
+  assert.include(workflow, 'GITHUB_EVENT_NAME}" == "schedule" ||');
+  assert.include(workflow, "needs: [check_changes]");
+  assert.include(workflow, "needs: preflight");
 });

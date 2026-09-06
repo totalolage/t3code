@@ -31,6 +31,9 @@ describe("HermesAcpSupport", () => {
     expect(resolveHermesRequestedModelId("custom:vNext/model@2027")).toBe(
       "custom:vNext/model@2027",
     );
+    expect(resolveHermesRequestedModelId("  custom:vNext/model@2027  ")).toBe(
+      "custom:vNext/model@2027",
+    );
   });
 
   it.effect("selects the model before reading and applying its refreshed config catalog", () =>
@@ -192,6 +195,7 @@ describe("HermesAcpSupport", () => {
       for (const runtimeMode of [
         "approval-required",
         "auto-accept-edits",
+        "auto",
         "full-access",
       ] as const) {
         yield* applyHermesRuntimeMode({
@@ -200,7 +204,7 @@ describe("HermesAcpSupport", () => {
           mapError: (cause) => cause,
         });
       }
-      expect(modes).toEqual(["default", "accept_edits", "dont_ask"]);
+      expect(modes).toEqual(["default", "accept_edits", "default", "dont_ask"]);
     }),
   );
 });

@@ -24,6 +24,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as EffectAcpSchema from "effect-acp/schema";
 
+import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeHermesAdapter } from "./HermesAdapter.ts";
 
@@ -41,6 +42,7 @@ const decodeSetSessionModelRequest = Schema.decodeUnknownOption(
 const decodeSetSessionModeRequest = Schema.decodeUnknownOption(
   EffectAcpSchema.SetSessionModeRequest,
 );
+const decodePromptRequest = Schema.decodeUnknownOption(EffectAcpSchema.PromptRequest);
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockAgentPath = NodePath.join(__dirname, "../../../scripts/acp-mock-agent.ts");
 
@@ -105,7 +107,24 @@ const testLayer = ServerConfig.layerTest(process.cwd(), {
 }).pipe(Layer.provideMerge(NodeServices.layer));
 
 it.layer(testLayer)("HermesAdapter ACP", (it) => {
-  it.effect("binds cwd, model, mode, and prompt flow through Hermes ACP", () =>
+  it.effect("rejects sessions addressed to another Hermes provider instance", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("hermes-primary");
+      const adapter = yield* makeHermesAdapter(decodeSettings({}), { instanceId });
+      const error = yield* adapter
+        .startSession({
+          threadId: ThreadId.make("hermes-instance-mismatch-thread"),
+          providerInstanceId: ProviderInstanceId.make("hermes-secondary"),
+          cwd: process.cwd(),
+          runtimeMode: "approval-required",
+        })
+        .pipe(Effect.flip);
+
+      assert.equal(error._tag, "ProviderAdapterValidationError");
+    }),
+  );
+
+  it.effect("keeps prompt events alive after startup fiber completion", () =>
     Effect.gen(function* () {
       const tempDir = yield* Effect.promise(() =>
         NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "hermes-acp-requests-")),
@@ -134,13 +153,16 @@ it.layer(testLayer)("HermesAdapter ACP", (it) => {
         ),
       ).pipe(Effect.forkChild);
 
-      const session = yield* adapter.startSession({
-        threadId,
-        provider: ProviderDriverKind.make("hermes"),
-        cwd: process.cwd(),
-        runtimeMode: "full-access",
-        modelSelection: { instanceId, model: "grok-mock-alt" },
-      });
+      const startSessionFiber = yield* adapter
+        .startSession({
+          threadId,
+          provider: ProviderDriverKind.make("hermes"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: { instanceId, model: "grok-mock-alt" },
+        })
+        .pipe(Effect.forkChild);
+      const session = yield* Fiber.join(startSessionFiber);
       assert.equal(session.model, "grok-mock-alt");
       assert.deepStrictEqual(session.resumeCursor, {
         schemaVersion: 1,
@@ -149,6 +171,7 @@ it.layer(testLayer)("HermesAdapter ACP", (it) => {
       assert.deepStrictEqual(adapter.capabilities, {
         sessionModelSwitch: "in-session",
         turnSteering: "unsupported",
+        supportsConversationRollback: false,
       });
 
       yield* adapter.sendTurn({
@@ -188,6 +211,70 @@ it.layer(testLayer)("HermesAdapter ACP", (it) => {
     }),
   );
 
+  it.effect("keeps generic file paths in text while sending image attachments to ACP", () =>
+    Effect.gen(function* () {
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "hermes-acp-mixed-attachments-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockHermesWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const { attachmentsDir } = yield* ServerConfig;
+      const imageAttachment = {
+        type: "image" as const,
+        id: "hermes-mixed-attachment-12345678-1234-1234-1234-123456789abc",
+        name: "diagram.png",
+        mimeType: "image/png",
+        sizeBytes: 4,
+      };
+      const fileAttachment = {
+        type: "file" as const,
+        id: "hermes-mixed-attachment-22345678-1234-1234-1234-123456789abc",
+        name: "notes.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 4,
+      };
+      for (const attachment of [imageAttachment, fileAttachment]) {
+        const relativePath = attachmentRelativePath(attachment);
+        if (!relativePath) return yield* Effect.die("Expected a valid attachment path.");
+        const attachmentPath = NodePath.join(attachmentsDir, relativePath);
+        yield* Effect.promise(() =>
+          NodeFSP.mkdir(NodePath.dirname(attachmentPath), { recursive: true }),
+        );
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(attachmentPath, Uint8Array.from([1, 2, 3, 4])),
+        );
+      }
+
+      const instanceId = ProviderInstanceId.make("hermes-mixed");
+      const adapter = yield* makeHermesAdapter(decodeSettings({ binaryPath: wrapperPath }), {
+        instanceId,
+      });
+      const threadId = ThreadId.make("hermes-mixed-attachments-thread");
+      yield* adapter.startSession({
+        threadId,
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Review the attached file at /workspace/notes.pdf",
+        attachments: [fileAttachment, imageAttachment],
+      });
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const prompt = decodeRequestParams(
+        requests.find((request) => request.method === "session/prompt"),
+        decodePromptRequest,
+      );
+      assert.deepStrictEqual(prompt?.prompt, [
+        { type: "text", text: "Review the attached file at /workspace/notes.pdf" },
+        { type: "image", data: "AQIDBA==", mimeType: "image/png" },
+      ]);
+    }),
+  );
+
   it.effect("loads a persisted ACP session and switches models on a later turn", () =>
     Effect.gen(function* () {
       const tempDir = yield* Effect.promise(() =>
@@ -210,7 +297,7 @@ it.layer(testLayer)("HermesAdapter ACP", (it) => {
         cwd: process.cwd(),
         runtimeMode: "approval-required",
         resumeCursor: { schemaVersion: 1, sessionId: "existing-hermes-session" },
-        modelSelection: { instanceId, model: "grok-build" },
+        modelSelection: { instanceId, model: "grok-4.6" },
       });
       assert.deepStrictEqual(session.resumeCursor, {
         schemaVersion: 1,
@@ -234,7 +321,7 @@ it.layer(testLayer)("HermesAdapter ACP", (it) => {
       );
       assert.deepEqual(
         switches.map((request) => request.modelId),
-        ["grok-build", "grok-mock-alt"],
+        ["grok-4.6", "grok-mock-alt"],
       );
       const modeChange = decodeRequestParams(
         requests.find((request) => request.method === "session/set_mode"),
@@ -293,7 +380,7 @@ it.layer(testLayer)("HermesAdapter ACP", (it) => {
         threadId,
         cwd: process.cwd(),
         runtimeMode: "approval-required",
-        modelSelection: { instanceId, model: "grok-build" },
+        modelSelection: { instanceId, model: "grok-4.6" },
       });
       const turnFiber = yield* adapter
         .sendTurn({ threadId, input: "run a tool", attachments: [] })
@@ -343,7 +430,7 @@ it.layer(testLayer)("HermesAdapter ACP", (it) => {
         threadId,
         cwd: process.cwd(),
         runtimeMode: "approval-required",
-        modelSelection: { instanceId, model: "grok-build" },
+        modelSelection: { instanceId, model: "grok-4.6" },
       });
       const firstTurnFiber = yield* adapter
         .sendTurn({ threadId, input: "hang until interrupted", attachments: [] })

@@ -92,6 +92,169 @@ class ServiceDefinitionTest(unittest.TestCase):
                 )
 
         self.assertNotIn("--service-environment", _t3_service_args(config, "uninstall"))
+        self.assertNotIn(
+            "--allow-downgrade",
+            _t3_service_args(config, "update"),
+        )
+        self.assertIn(
+            "--allow-downgrade",
+            _t3_service_args(config, "update", allow_downgrade=True),
+        )
+
+    def test_older_binary_help_keeps_the_legacy_service_command(self) -> None:
+        completed = CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        commands: list[list[str]] = []
+
+        def run_command(args, **_kwargs):
+            commands.append(args)
+            if args[-1] == "--help":
+                return CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout="Usage: t3 service install [OPTIONS]\n"
+                    "  --allow-downgrade-legacy  not a supported option\n",
+                    stderr="",
+                )
+            return completed
+
+        with (
+            patch(
+                "integrations.hermes_plugin.service._command",
+                side_effect=run_command,
+            ) as command,
+            patch("integrations.hermes_plugin.service._remove_redundant_s6_svperms"),
+            patch(
+                "integrations.hermes_plugin.service._verify_t3_service_up"
+            ) as verify_service,
+        ):
+            service_module._write_t3_s6_service(
+                self.config,
+                "install",
+                timeout=45,
+                allow_downgrade=True,
+            )
+
+        self.assertEqual(commands[0], [str(self.config.binary_path), "service", "install", "--help"])
+        self.assertEqual(commands[1], _t3_service_args(self.config, "install"))
+        command.assert_has_calls(
+            [
+                call(
+                    [str(self.config.binary_path), "service", "install", "--help"],
+                    timeout=5.0,
+                    check=False,
+                ),
+                call(_t3_service_args(self.config, "install"), timeout=45),
+            ]
+        )
+        verify_service.assert_called_once_with(self.config, reject_pid=None)
+
+    def test_help_probe_failure_does_not_fall_back_to_the_legacy_command(self) -> None:
+        failed_probe = CompletedProcess(
+            args=[],
+            returncode=2,
+            stdout="",
+            stderr="unknown action",
+        )
+
+        with (
+            patch(
+                "integrations.hermes_plugin.service._command",
+                return_value=failed_probe,
+            ) as command,
+            patch("integrations.hermes_plugin.service._verify_t3_service_up") as verify_service,
+            self.assertRaisesRegex(
+                ServiceError,
+                r"could not probe T3 service install help for --allow-downgrade.*"
+                r"status 2.*unknown action",
+            ),
+        ):
+            service_module._write_t3_s6_service(
+                self.config,
+                "install",
+                timeout=45,
+                allow_downgrade=True,
+            )
+
+        command.assert_called_once_with(
+            [str(self.config.binary_path), "service", "install", "--help"],
+            timeout=5.0,
+            check=False,
+        )
+        verify_service.assert_not_called()
+
+    def test_allow_downgrade_probe_is_repeated_after_binary_replacement(self) -> None:
+        root = Path(self.temporary.name)
+        config = replace(
+            self.config,
+            runtime_root=root / "runtime",
+            binary_path=root / "runtime" / "bin" / "t3",
+            data_dir=root / "runtime" / "data",
+            service_dir=root / "service" / "t3code",
+            watchdog_service_dir=root / "service" / "t3code-plugin-watchdog",
+        )
+        config.binary_path.parent.mkdir(parents=True)
+        config.binary_path.write_bytes(b"first runtime")
+        completed = CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        service_commands: list[list[str]] = []
+
+        def run_command(args, **_kwargs):
+            if args[-1] == "--help":
+                supports = config.binary_path.read_bytes() == b"first runtime"
+                return CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout="  --allow-downgrade  permit an older runtime\n"
+                    if supports
+                    else "Usage: t3 service install [OPTIONS]\n",
+                    stderr="",
+                )
+            service_commands.append(args)
+            return completed
+
+        with (
+            patch(
+                "integrations.hermes_plugin.service._command",
+                side_effect=run_command,
+            ) as command,
+            patch("integrations.hermes_plugin.service._remove_redundant_s6_svperms"),
+            patch("integrations.hermes_plugin.service._verify_t3_service_up"),
+        ):
+            service_module._write_t3_s6_service(
+                config,
+                "install",
+                timeout=45,
+                allow_downgrade=True,
+            )
+            config.binary_path.write_bytes(b"second runtime")
+            service_module._write_t3_s6_service(
+                config,
+                "install",
+                timeout=45,
+                allow_downgrade=True,
+            )
+
+        self.assertEqual(
+            service_commands,
+            [
+                _t3_service_args(
+                    config,
+                    "install",
+                    allow_downgrade=True,
+                ),
+                _t3_service_args(config, "install"),
+            ],
+        )
+        self.assertEqual(
+            [
+                recorded_call.kwargs
+                for recorded_call in command.call_args_list
+                if recorded_call.args[0][-1] == "--help"
+            ],
+            [
+                {"timeout": 5.0, "check": False},
+                {"timeout": 5.0, "check": False},
+            ],
+        )
 
     def test_watchdog_definition_tracks_plugin_and_both_services(self) -> None:
         watchdog_path = self.config.watchdog_service_dir / "plugin-watchdog.py"
@@ -170,6 +333,13 @@ class ServiceDefinitionTest(unittest.TestCase):
         completed = CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
         def write_service(args, **_kwargs):
+            if args[1:4] == ["service", "install", "--help"]:
+                return CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout="  --allow-downgrade  permit an older runtime\n",
+                    stderr="",
+                )
             config.service_dir.mkdir(parents=True, exist_ok=True)
             run_path = config.service_dir / "run"
             run_path.write_text(
@@ -200,7 +370,23 @@ class ServiceDefinitionTest(unittest.TestCase):
         ):
             result = install(config)
 
-        command.assert_called_once_with(_t3_service_args(config, "install"), timeout=45)
+        command.assert_has_calls(
+            [
+                call(
+                    [str(config.binary_path), "service", "install", "--help"],
+                    timeout=5.0,
+                    check=False,
+                ),
+                call(
+                    _t3_service_args(
+                        config,
+                        "install",
+                        allow_downgrade=True,
+                    ),
+                    timeout=45,
+                ),
+            ]
+        )
         watchdog.assert_called_once_with(config)
         self.assertEqual(result["release"], "1.2.3")
         self.assertEqual(result["status"]["port"], config.port)
@@ -248,6 +434,13 @@ class ServiceDefinitionTest(unittest.TestCase):
         completed = CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
         def write_service(args, **_kwargs):
+            if args[1:4] == ["service", "update", "--help"]:
+                return CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout="  --allow-downgrade  permit an older runtime\n",
+                    stderr="",
+                )
             config.service_dir.mkdir(parents=True, exist_ok=True)
             run_path = config.service_dir / "run"
             run_path.write_text(
@@ -278,7 +471,23 @@ class ServiceDefinitionTest(unittest.TestCase):
         ):
             result = update(config)
 
-        command.assert_called_once_with(_t3_service_args(config, "update"), timeout=45)
+        command.assert_has_calls(
+            [
+                call(
+                    [str(config.binary_path), "service", "update", "--help"],
+                    timeout=5.0,
+                    check=False,
+                ),
+                call(
+                    _t3_service_args(
+                        config,
+                        "update",
+                        allow_downgrade=True,
+                    ),
+                    timeout=45,
+                ),
+            ]
+        )
         watchdog.assert_called_once_with(config)
         self.assertEqual(result["release"], "1.2.4")
         state = json.loads(config.service_state_path.read_text(encoding="utf-8"))
@@ -317,6 +526,18 @@ class ServiceDefinitionTest(unittest.TestCase):
             config.binary_path.write_bytes(replacement)
             return release
 
+        def fail_service(args, **_kwargs):
+            if args[1:4] == ["service", "update", "--help"]:
+                return CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout="  --allow-downgrade  permit an older runtime\n",
+                    stderr="",
+                )
+            if args[0] == "s6-svstat":
+                return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+            raise ServiceError("s6 activation failed")
+
         with (
             patch(
                 "integrations.hermes_plugin.service.install_release",
@@ -324,7 +545,7 @@ class ServiceDefinitionTest(unittest.TestCase):
             ),
             patch(
                 "integrations.hermes_plugin.service._command",
-                side_effect=ServiceError("s6 activation failed"),
+                side_effect=fail_service,
             ),
             self.assertRaisesRegex(ServiceError, "activation failed"),
         ):
@@ -409,6 +630,13 @@ class ServiceDefinitionTest(unittest.TestCase):
 
         self.assertEqual(result["action"], "recovered")
         command.assert_any_call(_t3_service_args(config, "install"), timeout=45)
+        self.assertFalse(
+            any(
+                "--allow-downgrade" in command_args
+                for recorded_call in command.call_args_list
+                for command_args in [recorded_call.args[0]]
+            )
+        )
         watchdog.assert_called_once_with(config)
         install_release.assert_not_called()
         run_path = config.service_dir / "run"
@@ -457,6 +685,12 @@ class ServiceDefinitionTest(unittest.TestCase):
                 and call.args[0][0] == str(config.binary_path)
                 and call.args[0][1:3] == ["service", "install"]
                 for call in command.call_args_list
+            )
+        )
+        self.assertFalse(
+            any(
+                "--allow-downgrade" in recorded_call.args[0]
+                for recorded_call in command.call_args_list
             )
         )
 
@@ -1419,6 +1653,84 @@ class ServiceDefinitionTest(unittest.TestCase):
 
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "http://10.20.30.40:3773/")
+
+    def test_lower_tag_activation_passes_allow_downgrade_to_the_selected_binary(
+        self,
+    ) -> None:
+        root = Path(self.temporary.name)
+        config = replace(
+            self.config,
+            runtime_root=root / "runtime",
+            binary_path=root / "runtime" / "bin" / "t3",
+            data_dir=root / "runtime" / "data",
+            service_dir=root / "service" / "t3code",
+            watchdog_service_dir=root / "service" / "t3code-plugin-watchdog",
+        )
+        staged = root / "transaction" / "t3"
+        staged.parent.mkdir(parents=True)
+        staged.write_bytes(b"lower-tag runtime")
+        config.service_dir.mkdir(parents=True)
+        (config.service_dir / "run").write_text("run", encoding="utf-8")
+        checksum = hashlib.sha256(staged.read_bytes()).hexdigest()
+        service_commands: list[list[str]] = []
+
+        def run_command(args, **_kwargs):
+            if args[-1] == "--help":
+                self.assertEqual(config.binary_path.read_bytes(), staged.read_bytes())
+                return CompletedProcess(
+                    args=args,
+                    returncode=0,
+                    stdout="  --allow-downgrade  permit an older runtime\n",
+                    stderr="",
+                )
+            if args[0] == "s6-svstat":
+                return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+            if args[0] == str(config.binary_path):
+                service_commands.append(args)
+                return CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected command: {args}")
+
+        with (
+            patch(
+                "integrations.hermes_plugin.service.binary_version",
+                return_value="0.0.30",
+            ),
+            patch("integrations.hermes_plugin.service._prepare_service_dir"),
+            patch(
+                "integrations.hermes_plugin.service._command",
+                side_effect=run_command,
+            ),
+            patch("integrations.hermes_plugin.service._remove_redundant_s6_svperms"),
+            patch(
+                "integrations.hermes_plugin.service._install_watchdog"
+            ) as install_watchdog,
+            patch(
+                "integrations.hermes_plugin.service._verify_t3_service_up",
+                return_value=9621,
+            ),
+            patch("integrations.hermes_plugin.service._verify_product_health") as verify_health,
+        ):
+            result = service_module._activate_staged_product_locked(
+                config,
+                staged_binary=staged,
+                product_version="0.0.30",
+                release_tag="v0.0.30",
+                binary_sha256=checksum,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            service_commands,
+            [
+                _t3_service_args(
+                    config,
+                    "update",
+                    allow_downgrade=True,
+                )
+            ],
+        )
+        install_watchdog.assert_called_once_with(config)
+        verify_health.assert_called_once_with(config, 9621)
 
     def test_coherent_activation_records_version_only_after_full_health(
         self,

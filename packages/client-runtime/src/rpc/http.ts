@@ -102,7 +102,7 @@ const remoteApiBaseUrl = (httpBaseUrl: string): string => {
   return url.toString();
 };
 
-const redactRequestUrl = (requestUrl: string): string => {
+export const redactRequestUrl = (requestUrl: string): string => {
   try {
     const url = new URL(requestUrl);
     for (const key of new Set(url.searchParams.keys())) {
@@ -135,12 +135,6 @@ export const makeEnvironmentHttpApiClient = (
               effect.pipe(Effect.provideService(HttpClient.TracerDisabledWhen, () => true)),
             ),
           ),
-  });
-
-/** Contract-derived request URLs for authentication proofs, tracing, and structured errors. */
-export const makeEnvironmentHttpApiUrlBuilder = (httpBaseUrl: string) =>
-  HttpApiClient.urlBuilder(EnvironmentHttpApi, {
-    baseUrl: remoteApiBaseUrl(httpBaseUrl),
   });
 
 const failRemoteRequest = (
