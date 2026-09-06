@@ -235,7 +235,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     installSteps,
     downloadCount: () => downloadCount,
     allowPrerelease: () => allowPrerelease,
-    feedUrls: () => feedUrls,
+    feedUrls: (): ElectronUpdater.ElectronUpdaterFeedUrl[] => feedUrls,
     fullChangelog: () => fullChangelog,
     updaterChannels: () => updaterChannels,
     listenerCount: () =>
