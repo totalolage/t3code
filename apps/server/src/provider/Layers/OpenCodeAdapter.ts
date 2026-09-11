@@ -27,6 +27,7 @@ import * as Fiber from "effect/Fiber";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
@@ -183,6 +184,10 @@ interface OpenCodeTurnSnapshot {
   readonly id: TurnId;
   readonly items: Array<unknown>;
 }
+
+type OpenCodeRuntimeEventEntry =
+  | { readonly _tag: "event"; readonly event: ProviderRuntimeEvent }
+  | { readonly _tag: "barrier"; readonly deferred: Deferred.Deferred<void> };
 
 type OpenCodeSubscribedEvent =
   Awaited<ReturnType<OpencodeClient["event"]["subscribe"]>> extends {
@@ -1270,10 +1275,10 @@ const abortOpenCodeSessionForTeardown = Effect.fn("abortOpenCodeSessionForTeardo
   // the adapter reads the tree.
   yield* runOpenCodeSdk("session.abort", (signal) =>
     context.client.session.abort({ sessionID: context.openCodeSessionId }, { signal }),
-  ).pipe(Effect.timeout("1 second"), Effect.ignore({ log: true }));
+  ).pipe(Effect.timeout("1 second"), Effect.ignoreCause({ log: true }));
   yield* abortOpenCodeDescendants(context).pipe(
     Effect.timeout("1 second"),
-    Effect.ignore({ log: true }),
+    Effect.ignoreCause({ log: true }),
   );
 });
 
@@ -1315,43 +1320,6 @@ const closeStartingOpenCodeContext = Effect.fn("closeStartingOpenCodeContext")(f
   yield* Scope.close(context.sessionScope, Exit.void).pipe(Effect.ignore);
 });
 
-const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
-  context: OpenCodeSessionContext,
-) {
-  // Race-safe one-shot: first caller flips the flag, everyone else no-ops.
-  if (yield* Ref.getAndSet(context.stopped, true)) {
-    return false;
-  }
-  yield* Deferred.fail(
-    context.firstConnection,
-    new ProviderAdapterRequestError({
-      provider: PROVIDER,
-      method: "event.subscribe",
-      detail: "OpenCode session stopped before the event stream connected.",
-    }),
-  ).pipe(Effect.ignore);
-  yield* cancelPendingOpenCodePrompt(context);
-  const cancellation = context.cancellation;
-  context.cancellation = undefined;
-  if (cancellation) {
-    yield* Deferred.succeed(cancellation.completion, undefined).pipe(Effect.ignore);
-  }
-  context.promptAdmission = undefined;
-  // Best-effort remote abort. The scope close below tears down the local
-  // handles (event-pump fiber, server-exit fiber, event-subscribe fetch),
-  // but we still want to tell OpenCode that this session is done.
-  yield* abortOpenCodeSessionForTeardown(context);
-  if (context.settleChildTasksOnStop) {
-    yield* context.settleChildTasksOnStop();
-  }
-
-  // Closing the session scope interrupts every fiber forked into it and
-  // runs each finalizer we registered — the `AbortController.abort()` call,
-  // the child-process termination, etc.
-  yield* Scope.close(context.sessionScope, Exit.void);
-  return true;
-});
-
 export function makeOpenCodeAdapter(
   openCodeSettings: OpenCodeSettings,
   options?: OpenCodeAdapterLiveOptions,
@@ -1376,13 +1344,17 @@ export function makeOpenCodeAdapter(
     // `options.nativeEventLogger`, they own its lifecycle.
     const managedNativeEventLogger =
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
-    const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+    const runtimeEvents = yield* Queue.unbounded<OpenCodeRuntimeEventEntry, Cause.Done>();
     const sessions = new Map<ThreadId, OpenCodeSessionContext>();
+    const inFlightContextStops = new Map<OpenCodeSessionContext, Deferred.Deferred<void>>();
     const deleteContextIfCurrent = (context: OpenCodeSessionContext) => {
       if (sessions.get(context.session.threadId) === context) {
         sessions.delete(context.session.threadId);
       }
     };
+    const snapshotOpenCodeContexts = () => [
+      ...new Set([...sessions.values(), ...inFlightContextStops.keys()]),
+    ];
     const awaitOpenCodeContextReady = Effect.fn("awaitOpenCodeContextReady")(function* (
       context: OpenCodeSessionContext,
     ) {
@@ -1462,42 +1434,128 @@ export function makeOpenCodeAdapter(
         })),
       );
 
-    // Layer-level finalizer: when the adapter layer shuts down, stop every
-    // session. Each session's `Scope.close` tears down its spawned OpenCode
-    // server (via the `ChildProcessSpawner` finalizer installed in
-    // `startOpenCodeServerProcess`) and interrupts the forked event/exit
-    // fibers. Consumers that can't reason about Effect scopes therefore
-    // cannot leak OpenCode child processes by forgetting to call `stopAll`.
-    yield* Effect.addFinalizer(() =>
-      Effect.gen(function* () {
-        const contexts = [...sessions.values()];
-        sessions.clear();
-        // `ignoreCause` swallows both typed failures (none here) and defects
-        // from throwing scope finalizers so a sibling's death can't interrupt
-        // the remaining cleanups.
-        yield* Effect.forEach(
-          contexts,
-          (context) => Effect.ignoreCause(stopOpenCodeContext(context)),
-          { concurrency: "unbounded", discard: true },
-        );
-        // Close the logger AFTER session teardown so any final lifecycle
-        // events emitted during shutdown still get written. `close` flushes
-        // the `Logger.batched` window and closes each per-thread
-        // `RotatingFileSink` handle owned by the logger's internal scope.
-        if (managedNativeEventLogger !== undefined) {
-          yield* managedNativeEventLogger.close();
-        }
-      }).pipe(Effect.ensuring(Queue.shutdown(runtimeEvents))),
-    );
-
     const emit = (event: ProviderRuntimeEvent) =>
-      Queue.offer(runtimeEvents, event).pipe(Effect.asVoid);
+      Queue.offer(runtimeEvents, { _tag: "event", event }).pipe(Effect.asVoid);
+
+    const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
+      context: OpenCodeSessionContext,
+      mode: "stop" | "replace" = "stop",
+    ) {
+      const registration = yield* Effect.sync(() => {
+        const existing = inFlightContextStops.get(context);
+        if (existing) {
+          return { completion: existing, owner: false as const };
+        }
+        const completion = Deferred.makeUnsafe<void>();
+        inFlightContextStops.set(context, completion);
+        return { completion, owner: true as const };
+      });
+      if (!registration.owner) {
+        yield* Deferred.await(registration.completion);
+        return false;
+      }
+
+      let shouldEmitExit = false;
+      let turnId: TurnId | undefined;
+      const result = yield* Effect.gen(function* () {
+        // Race-safe one-shot: the owner flips the flag, everyone else awaits it above.
+        if (yield* Ref.getAndSet(context.stopped, true)) {
+          return false;
+        }
+        shouldEmitExit = true;
+        turnId = context.activeTurnId;
+        return yield* Effect.gen(function* () {
+          yield* Deferred.fail(
+            context.firstConnection,
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "event.subscribe",
+              detail: "OpenCode session stopped before the event stream connected.",
+            }),
+          ).pipe(Effect.ignoreCause({ log: true }));
+          yield* cancelPendingOpenCodePrompt(context).pipe(Effect.ignoreCause({ log: true }));
+          const cancellation = context.cancellation;
+          context.cancellation = undefined;
+          if (cancellation) {
+            yield* Deferred.succeed(cancellation.completion, undefined).pipe(
+              Effect.ignoreCause({ log: true }),
+            );
+          }
+          context.promptAdmission = undefined;
+          // Best-effort remote abort. The scope close below tears down the local
+          // handles (event-pump fiber, server-exit fiber, event-subscribe fetch),
+          // but we still want to tell OpenCode that this session is done.
+          yield* abortOpenCodeSessionForTeardown(context);
+          if (context.settleChildTasksOnStop) {
+            yield* context.settleChildTasksOnStop().pipe(Effect.ignoreCause({ log: true }));
+          }
+          return true;
+        }).pipe(
+          // Closing the session scope interrupts every fiber forked into it and
+          // runs each finalizer we registered — the `AbortController.abort()` call,
+          // the child-process termination, etc. Keep it as an ensuring so cleanup
+          // defects cannot skip the close for an elected live-context stop.
+          Effect.ensuring(
+            Scope.close(context.sessionScope, Exit.void).pipe(Effect.ignoreCause({ log: true })),
+          ),
+        );
+      }).pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            if (shouldEmitExit) {
+              const eventBase = yield* buildEventBase({
+                threadId: context.session.threadId,
+                turnId,
+              });
+              yield* Effect.sync(() => {
+                // Startup cleanup can outlive a held native stop while a replacement
+                // already owns this thread; do not publish the old context's exit.
+                const current = sessions.get(context.session.threadId);
+                if (current === undefined || current === context) {
+                  emitUnsafe({
+                    ...eventBase,
+                    type: "session.exited",
+                    payload: {
+                      reason: mode === "replace" ? "Session replaced." : "Session stopped.",
+                      recoverable: mode === "replace",
+                      exitKind: "graceful",
+                    },
+                  });
+                }
+              });
+            }
+          }).pipe(
+            Effect.ignoreCause({ log: true }),
+            Effect.ensuring(
+              Effect.gen(function* () {
+                yield* Deferred.succeed(registration.completion, undefined).pipe(Effect.ignore);
+                yield* Effect.sync(() => {
+                  inFlightContextStops.delete(context);
+                  deleteContextIfCurrent(context);
+                });
+              }),
+            ),
+          ),
+        ),
+      );
+      return result;
+    }, Effect.uninterruptible);
+
     // Synchronous publish for callers that must not yield between a state
     // check and the enqueue, e.g. reopening an approval only if its terminal
     // event has not landed yet.
     const emitUnsafe = (event: ProviderRuntimeEvent) => {
-      Queue.offerUnsafe(runtimeEvents, event);
+      Queue.offerUnsafe(runtimeEvents, { _tag: "event", event });
     };
+    const drainEvents = Effect.fn("drainEvents")(function* () {
+      const deferred = yield* Deferred.make<void>();
+      const accepted = yield* Queue.offer(runtimeEvents, { _tag: "barrier", deferred });
+      if (!accepted) {
+        return false;
+      }
+      yield* Deferred.await(deferred);
+      return true;
+    });
     const writeNativeEvent = (
       threadId: ThreadId,
       event: {
@@ -1512,6 +1570,31 @@ export function makeOpenCodeAdapter(
         readonly event: Record<string, unknown>;
       },
     ) => writeNativeEvent(threadId, event).pipe(Effect.catchCause(() => Effect.void));
+
+    // Layer-level finalizer: when the adapter layer shuts down, stop every
+    // session. Each session's `Scope.close` tears down its spawned OpenCode
+    // server (via the `ChildProcessSpawner` finalizer installed in
+    // `startOpenCodeServerProcess`) and interrupts the forked event/exit
+    // fibers. Consumers that can't reason about Effect scopes therefore
+    // cannot leak OpenCode child processes by forgetting to call `stopAll`.
+    yield* Effect.addFinalizer(() =>
+      Effect.gen(function* () {
+        const contexts = snapshotOpenCodeContexts();
+        // Log cleanup defects while allowing a sibling session to finish.
+        yield* Effect.forEach(
+          contexts,
+          (context) => stopOpenCodeContext(context).pipe(Effect.ignoreCause({ log: true })),
+          { concurrency: "unbounded", discard: true },
+        );
+        // Close the logger AFTER session teardown so any final lifecycle
+        // events emitted during shutdown still get written. `close` flushes
+        // the `Logger.batched` window and closes each per-thread
+        // `RotatingFileSink` handle owned by the logger's internal scope.
+        if (managedNativeEventLogger !== undefined) {
+          yield* managedNativeEventLogger.close();
+        }
+      }).pipe(Effect.ensuring(Queue.end(runtimeEvents))),
+    );
 
     const childTaskLinkage = (context: OpenCodeSessionContext, task: OpenCodeChildTask) => ({
       taskType: "subagent",
@@ -4529,7 +4612,7 @@ export function makeOpenCodeAdapter(
           if (existing.session.status === "connecting" && !(yield* Ref.get(existing.stopped))) {
             return (yield* awaitOpenCodeContextReady(existing)).session;
           }
-          yield* stopOpenCodeContext(existing);
+          yield* stopOpenCodeContext(existing, "replace");
           deleteContextIfCurrent(existing);
         }
 
@@ -5471,25 +5554,23 @@ export function makeOpenCodeAdapter(
       function* (threadId) {
         const context = sessions.get(threadId);
         if (!context) {
+          const inFlightStops = [...inFlightContextStops.entries()]
+            .filter(([candidate]) => candidate.session.threadId === threadId)
+            .map(([, completion]) => completion);
+          if (inFlightStops.length > 0) {
+            yield* Effect.forEach(inFlightStops, (completion) => Deferred.await(completion), {
+              concurrency: "unbounded",
+              discard: true,
+            });
+            return;
+          }
           return yield* new ProviderAdapterSessionNotFoundError({
             provider: PROVIDER,
             threadId,
           });
         }
-        const stopped = yield* stopOpenCodeContext(context);
+        yield* stopOpenCodeContext(context);
         deleteContextIfCurrent(context);
-        if (!stopped) {
-          return;
-        }
-        yield* emit({
-          ...(yield* buildEventBase({ threadId })),
-          type: "session.exited",
-          payload: {
-            reason: "Session stopped.",
-            recoverable: false,
-            exitKind: "graceful",
-          },
-        });
       },
     );
 
@@ -5552,15 +5633,11 @@ export function makeOpenCodeAdapter(
 
     const stopAll: OpenCodeAdapterShape["stopAll"] = () =>
       Effect.gen(function* () {
-        const contexts = [...sessions.values()];
-        sessions.clear();
-        // `stopOpenCodeContext` is typed as never-failing — SDK aborts are
-        // already `Effect.ignore`'d inside it. `ignoreCause` here also
-        // swallows defects from throwing finalizers so one bad close can't
-        // interrupt the sibling fibers. Same pattern as the layer finalizer.
+        const contexts = snapshotOpenCodeContexts();
+        // Log cleanup defects while allowing a sibling session to finish.
         yield* Effect.forEach(
           contexts,
-          (context) => Effect.ignoreCause(stopOpenCodeContext(context)),
+          (context) => stopOpenCodeContext(context).pipe(Effect.ignoreCause({ log: true })),
           { concurrency: "unbounded", discard: true },
         );
       });
@@ -5583,8 +5660,16 @@ export function makeOpenCodeAdapter(
       readThread,
       rollbackThread,
       stopAll,
+      drainEvents,
       get streamEvents() {
-        return Stream.fromQueue(runtimeEvents);
+        return Stream.fromQueue(runtimeEvents).pipe(
+          Stream.rechunk(1),
+          Stream.filterMapEffect((entry) =>
+            entry._tag === "event"
+              ? Effect.succeed(Result.succeed(entry.event))
+              : Deferred.succeed(entry.deferred, undefined).pipe(Effect.as(Result.fail(entry))),
+          ),
+        );
       },
     } satisfies OpenCodeAdapterShape;
   });

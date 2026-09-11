@@ -24,7 +24,9 @@ import type * as PubSub from "effect/PubSub";
 import type * as Scope from "effect/Scope";
 import type * as Stream from "effect/Stream";
 
+import type { ProviderAdapterError } from "../Errors.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
+import type { ProviderAdapterShape } from "./ProviderAdapter.ts";
 
 export interface ProviderInstanceRegistryShape {
   /**
@@ -79,6 +81,16 @@ export interface ProviderInstanceRegistryShape {
    * between "fiber scheduled" and "fiber starts running".
    */
   readonly subscribeChanges: Effect.Effect<PubSub.Subscription<void>, never, Scope.Scope>;
+  readonly registerRetirementHooks: (hooks: {
+    readonly beforeClose: (
+      instanceId: ProviderInstanceId,
+      adapter: ProviderAdapterShape<ProviderAdapterError>,
+    ) => Effect.Effect<void>;
+    readonly afterClose: (
+      instanceId: ProviderInstanceId,
+      adapter: ProviderAdapterShape<ProviderAdapterError>,
+    ) => Effect.Effect<void>;
+  }) => Effect.Effect<void, never, Scope.Scope>;
 }
 
 export class ProviderInstanceRegistry extends Context.Service<

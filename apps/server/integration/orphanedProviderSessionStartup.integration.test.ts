@@ -28,6 +28,7 @@ import { OrchestrationLayerLive } from "../src/orchestration/runtimeLayer.ts";
 import * as OrchestrationEngine from "../src/orchestration/Services/OrchestrationEngine.ts";
 import * as OrchestrationReactor from "../src/orchestration/Services/OrchestrationReactor.ts";
 import * as ProjectionSnapshotQuery from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ProviderRuntimeIngestion from "../src/orchestration/Services/ProviderRuntimeIngestion.ts";
 import { makeSqlitePersistenceLive } from "../src/persistence/Layers/Sqlite.ts";
 import * as ProviderSessionRuntime from "../src/persistence/ProviderSessionRuntime.ts";
 import * as ExternalLauncher from "../src/process/externalLauncher.ts";
@@ -121,6 +122,8 @@ const startupDependencies = Layer.mergeAll(
     getInstanceInfo: () => Effect.die("unused"),
     rollbackConversation: () => Effect.die("unused"),
     uploadFeedback: () => Effect.die("unused"),
+    registerRuntimeEventConsumer: () => Effect.void,
+    stopAll: () => Effect.void,
     streamEvents: Stream.empty,
   }),
 );
@@ -257,6 +260,12 @@ it.effect(
       const startupLayer = ServerRuntimeStartup.layer.pipe(
         Layer.provideMerge(secondRuntime),
         Layer.provideMerge(startupDependencies),
+        Layer.provideMerge(
+          Layer.succeed(ProviderRuntimeIngestion.ProviderRuntimeIngestionService, {
+            start: () => Effect.void,
+            drain: Effect.void,
+          }),
+        ),
       );
 
       const result = yield* Effect.gen(function* () {

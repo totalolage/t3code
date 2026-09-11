@@ -21,11 +21,15 @@ import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Data from "effect/Data";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { formatTokens } from "@t3tools/shared/usageFormat";
@@ -113,10 +117,17 @@ type TurnStartRequestedDomainEvent = Extract<
   { type: "thread.turn-start-requested" }
 >;
 
-type RuntimeIngestionInput =
+class ProviderRuntimeIngestionClosedError extends Data.TaggedError(
+  "ProviderRuntimeIngestionClosedError",
+)<{
+  readonly message: string;
+}> {}
+
+type RuntimeIngestionInput<ReceiptError> =
   | {
       source: "runtime";
       event: ProviderRuntimeEvent;
+      receipt?: Deferred.Deferred<void, ReceiptError>;
     }
   | {
       source: "domain";
@@ -1506,6 +1517,13 @@ const make = Effect.gen(function* () {
 
       const conflictsWithActiveTurn =
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
+      if (
+        STRICT_PROVIDER_LIFECYCLE_GUARD &&
+        event.type === "session.exited" &&
+        conflictsWithActiveTurn
+      ) {
+        return;
+      }
       const missingTurnForActiveTurn = activeTurnId !== null && eventTurnId === undefined;
 
       // A turn.started that conflicts with the active turn is legitimate when
@@ -1571,7 +1589,9 @@ const make = Effect.gen(function* () {
             case "turn.started":
               return "running";
             case "session.exited":
-              return "stopped";
+              return event.payload.exitKind === "graceful" && event.payload.recoverable === true
+                ? "ready"
+                : "stopped";
             case "turn.aborted":
               return "interrupted";
             case "turn.completed":
@@ -1833,7 +1853,7 @@ const make = Effect.gen(function* () {
         });
       }
 
-      if (isTerminalTurn) {
+      if (isTerminalTurn || (event.type === "session.exited" && eventTurnId !== undefined)) {
         const turnId = toTurnId(event.turnId);
         if (turnId) {
           const userInputActivities =
@@ -2144,11 +2164,26 @@ const make = Effect.gen(function* () {
 
   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
 
-  const processInput = (input: RuntimeIngestionInput) =>
+  const processInput = <ReceiptError>(input: RuntimeIngestionInput<ReceiptError>) =>
     input.source === "runtime" ? processRuntimeEvent(input.event) : processDomainEvent(input.event);
 
-  const processInputSafely = (input: RuntimeIngestionInput) =>
-    processInput(input).pipe(
+  type RuntimeIngestionProcessingError = Effect.Error<ReturnType<typeof processInput>>;
+  type RuntimeIngestionReceiptError =
+    | RuntimeIngestionProcessingError
+    | ProviderRuntimeIngestionClosedError;
+
+  const processInputSafely = (input: RuntimeIngestionInput<RuntimeIngestionReceiptError>) => {
+    const receipt = input.source === "runtime" ? input.receipt : undefined;
+    const processing =
+      receipt === undefined
+        ? processInput(input)
+        : Effect.gen(function* () {
+            const exit = yield* Effect.exit(processInput(input));
+            yield* Deferred.done(receipt, exit);
+            return yield* exit;
+          });
+
+    return processing.pipe(
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
           return Effect.failCause(cause);
@@ -2161,15 +2196,95 @@ const make = Effect.gen(function* () {
         });
       }),
     );
+  };
 
-  const worker = yield* makeDrainableWorker(processInputSafely);
+  const closedIngestionFailure = new ProviderRuntimeIngestionClosedError({
+    message: "Provider runtime ingestion is closed",
+  });
+  const closedDeferred = yield* Deferred.make<void>();
+  const pendingExitReceipts = new Set<Deferred.Deferred<void, RuntimeIngestionReceiptError>>();
+  let accepting = true;
+
+  const workerScope = yield* Effect.acquireRelease(Scope.make("sequential"), (scope) =>
+    Effect.gen(function* () {
+      const pendingReceipts = yield* Effect.sync(() => {
+        accepting = false;
+        const receipts = Array.from(pendingExitReceipts);
+        pendingExitReceipts.clear();
+        return receipts;
+      });
+      yield* Effect.forEach(
+        pendingReceipts,
+        (receipt) => Deferred.fail(receipt, closedIngestionFailure),
+        { concurrency: 1 },
+      ).pipe(Effect.asVoid);
+      yield* Deferred.succeed(closedDeferred, undefined);
+      yield* Scope.close(scope, Exit.void);
+    }),
+  );
+  const worker = yield* Scope.provide(workerScope)(makeDrainableWorker(processInputSafely));
+
+  const enqueueOrdinaryRuntimeEvent = (event: ProviderRuntimeEvent) =>
+    Effect.gen(function* () {
+      if (!accepting) {
+        return yield* Effect.fail(closedIngestionFailure);
+      }
+      yield* worker.enqueue({ source: "runtime", event });
+      if (!accepting) {
+        return yield* Effect.fail(closedIngestionFailure);
+      }
+    });
+
+  const consumeRuntimeEvent = (event: ProviderRuntimeEvent) =>
+    event.type === "session.exited"
+      ? Effect.acquireUseRelease(
+          Effect.sync(() => {
+            if (!accepting) {
+              return undefined;
+            }
+            const receipt = Deferred.makeUnsafe<void, RuntimeIngestionReceiptError>();
+            pendingExitReceipts.add(receipt);
+            return receipt;
+          }),
+          (receipt) =>
+            receipt === undefined
+              ? Effect.fail(closedIngestionFailure)
+              : Effect.gen(function* () {
+                  if (!accepting) {
+                    return yield* Effect.fail(closedIngestionFailure);
+                  }
+                  yield* worker.enqueue({ source: "runtime", event, receipt });
+                  if (!accepting) {
+                    return yield* Effect.fail(closedIngestionFailure);
+                  }
+                  yield* Deferred.await(receipt);
+                }),
+          (receipt) =>
+            receipt === undefined
+              ? Effect.void
+              : Effect.sync(() => {
+                  pendingExitReceipts.delete(receipt);
+                }),
+        )
+      : enqueueOrdinaryRuntimeEvent(event);
+
+  const failWhenClosed = Effect.die(closedIngestionFailure);
+  const drain: ProviderRuntimeIngestionShape["drain"] = Effect.suspend(() =>
+    accepting
+      ? Effect.raceFirst(
+          worker.drain,
+          Deferred.await(closedDeferred).pipe(Effect.flatMap(() => failWhenClosed)),
+        ).pipe(Effect.flatMap(() => (accepting ? Effect.void : failWhenClosed)))
+      : failWhenClosed,
+  );
 
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
       yield* forkParked(
-        Stream.runForEach(providerService.streamEvents, (event) =>
-          worker.enqueue({ source: "runtime", event }),
-        ),
+        Effect.gen(function* () {
+          yield* providerService.registerRuntimeEventConsumer(consumeRuntimeEvent);
+          return yield* Effect.never;
+        }),
       );
       yield* forkParked(
         Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
@@ -2183,7 +2298,7 @@ const make = Effect.gen(function* () {
 
   return {
     start,
-    drain: worker.drain,
+    drain,
   } satisfies ProviderRuntimeIngestionShape;
 });
 

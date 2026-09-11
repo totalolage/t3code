@@ -45,7 +45,9 @@ import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -55,6 +57,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
+  ProviderSessionSupersededError,
   ProviderUnsupportedError,
   ProviderValidationError,
   ProviderWorkspaceMissingError,
@@ -78,6 +81,7 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
 const serverConfigTestLayer = ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(
@@ -103,6 +107,8 @@ const claudeAgentInstanceId = ProviderInstanceId.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
+const OPENCODE_DRIVER = ProviderDriverKind.make("opencode");
+const isProviderValidationError = Schema.is(ProviderValidationError);
 
 const assistantQuoteText = 'Keep the shared parser for "résumé".\nPreserve line breaks.';
 const assistantCitation = {
@@ -395,8 +401,454 @@ function makeStaticInstanceRegistry(
     subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
       PubSub.subscribe(pubsub),
     ),
+    registerRetirementHooks: () => Effect.void,
   };
 }
+
+type OpenCodeRuntimeEventEntry =
+  | { readonly _tag: "event"; readonly event: ProviderRuntimeEvent }
+  | { readonly _tag: "barrier"; readonly deferred: Deferred.Deferred<void> };
+
+/**
+ * The OpenCode producer uses a queued barrier rather than observing queue
+ * length. Keeping that protocol in this fake makes service tests exercise the
+ * same ordering boundary as the native adapter.
+ */
+const makeFakeOpenCodeAdapter = Effect.fn("makeFakeOpenCodeAdapter")(function* (
+  instanceId: ProviderInstanceId,
+) {
+  const sessions = new Map<ThreadId, ProviderSession>();
+  const runtimeEvents = yield* Queue.unbounded<OpenCodeRuntimeEventEntry, Cause.Done>();
+  const streamSubscribed = yield* Deferred.make<void>();
+  const streamEnded = yield* Deferred.make<void>();
+  const startStarted = yield* Deferred.make<void>();
+  const startRelease = yield* Deferred.make<void>();
+  const stopStarted = yield* Deferred.make<void>();
+  const stopRelease = yield* Deferred.make<void>();
+  const stopAllStarted = yield* Deferred.make<void>();
+  const compactionStarted = yield* Deferred.make<void>();
+  const compactionRelease = yield* Deferred.make<void>();
+  const exitEvents: Array<ProviderRuntimeEvent> = [];
+  let turnNumber = 0;
+  let streamSubscriptionCount = 0;
+  let holdNextStart = false;
+  let holdNextStop = false;
+  let holdNextCompaction = false;
+
+  const makeSession = (input: ProviderSessionStartInput): ProviderSession => ({
+    provider: OPENCODE_DRIVER,
+    providerInstanceId: instanceId,
+    status: "ready",
+    runtimeMode: input.runtimeMode,
+    threadId: input.threadId,
+    ...(input.modelSelection?.model ? { model: input.modelSelection.model } : {}),
+    resumeCursor: input.resumeCursor ?? { opaque: `resume-${String(input.threadId)}` },
+    cwd: input.cwd ?? process.cwd(),
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  });
+
+  const putSession = (input: ProviderSessionStartInput): ProviderSession => {
+    const session = makeSession(input);
+    sessions.set(input.threadId, session);
+    return session;
+  };
+
+  const startSessionImpl = (input: ProviderSessionStartInput) =>
+    Effect.gen(function* () {
+      if (holdNextStart) {
+        holdNextStart = false;
+        yield* Deferred.succeed(startStarted, undefined);
+        yield* Effect.uninterruptible(Deferred.await(startRelease));
+      }
+      return yield* Effect.sync(() => putSession(input));
+    });
+  const startSession = vi.fn(startSessionImpl);
+
+  const emit = (event: ProviderRuntimeEvent) =>
+    Queue.offer(runtimeEvents, { _tag: "event", event }).pipe(Effect.asVoid);
+
+  const sendTurnImpl = (
+    input: ProviderSendTurnInput,
+  ): Effect.Effect<ProviderTurnStartResult, ProviderAdapterError> =>
+    Effect.gen(function* () {
+      const session = yield* Effect.sync(() => sessions.get(input.threadId));
+      if (session === undefined) {
+        return yield* new ProviderAdapterSessionNotFoundError({
+          provider: OPENCODE_DRIVER,
+          threadId: input.threadId,
+        });
+      }
+      const turnId = asTurnId(`turn-${String(instanceId)}-${++turnNumber}`);
+      yield* Effect.sync(() => {
+        sessions.set(input.threadId, {
+          ...session,
+          status: "running",
+          ...(input.modelSelection?.model ? { model: input.modelSelection.model } : {}),
+          activeTurnId: turnId,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        });
+      });
+      return {
+        threadId: input.threadId,
+        turnId,
+        resumeCursor: session.resumeCursor,
+      };
+    });
+  const sendTurn = vi.fn(sendTurnImpl);
+
+  const stopSessionImpl = (threadId: ThreadId): Effect.Effect<void, ProviderAdapterError> =>
+    Effect.gen(function* () {
+      const captured = yield* Effect.sync(() => sessions.get(threadId));
+      if (captured === undefined) return;
+      if (holdNextStop) {
+        holdNextStop = false;
+        yield* Deferred.succeed(stopStarted, undefined);
+        yield* Effect.uninterruptible(Deferred.await(stopRelease));
+      }
+      if (sessions.get(threadId) !== captured) return;
+      yield* Effect.sync(() => sessions.delete(threadId));
+      const event = {
+        type: "session.exited",
+        eventId: asEventId(`evt-${String(instanceId)}-${String(threadId)}-session-exited`),
+        provider: OPENCODE_DRIVER,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId,
+        ...(captured.activeTurnId === undefined ? {} : { turnId: captured.activeTurnId }),
+        payload: {
+          reason: "Session stopped.",
+          recoverable: false,
+          exitKind: "graceful",
+        },
+      } satisfies ProviderRuntimeEvent;
+      exitEvents.push(event);
+      yield* emit(event);
+    });
+  const stopSession = vi.fn(stopSessionImpl);
+
+  const compactThreadImpl = (
+    threadId: ThreadId,
+    _modelSelection?: ProviderSendTurnInput["modelSelection"],
+  ): Effect.Effect<void, ProviderAdapterError> =>
+    Effect.gen(function* () {
+      if (holdNextCompaction) {
+        holdNextCompaction = false;
+        yield* Deferred.succeed(compactionStarted, undefined);
+        yield* Effect.uninterruptible(Deferred.await(compactionRelease));
+      }
+      yield* emit({
+        type: "thread.state.changed",
+        eventId: asEventId(`evt-${String(instanceId)}-${String(threadId)}-compacted`),
+        provider: OPENCODE_DRIVER,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId,
+        payload: { state: "compacted" },
+      });
+    });
+  const compactThread = vi.fn(compactThreadImpl);
+
+  const stopAllImpl = (): Effect.Effect<void, ProviderAdapterError> =>
+    Effect.gen(function* () {
+      yield* Deferred.succeed(stopAllStarted, undefined);
+      const threadIds = yield* Effect.sync(() => Array.from(sessions.keys()));
+      yield* Effect.forEach(threadIds, (threadId) => stopSession(threadId), {
+        concurrency: 1,
+        discard: true,
+      });
+    });
+  const stopAll = vi.fn(stopAllImpl);
+
+  const drainEventsImpl = Effect.gen(function* () {
+    const deferred = yield* Deferred.make<void>();
+    const accepted = yield* Queue.offer(runtimeEvents, { _tag: "barrier", deferred });
+    if (!accepted) return false;
+    yield* Deferred.await(deferred);
+    return true;
+  });
+  const drainEvents = vi.fn(() => drainEventsImpl);
+
+  const makeStreamEvents = () =>
+    Stream.unwrap(
+      Effect.sync(() => {
+        streamSubscriptionCount += 1;
+      }).pipe(
+        Effect.andThen(
+          Deferred.succeed(streamSubscribed, undefined).pipe(
+            Effect.as(
+              Stream.fromQueue(runtimeEvents).pipe(
+                Stream.rechunk(1),
+                Stream.filterMapEffect((entry) =>
+                  entry._tag === "event"
+                    ? Effect.succeed(Result.succeed(entry.event))
+                    : Deferred.succeed(entry.deferred, undefined).pipe(
+                        Effect.as(Result.fail(entry)),
+                      ),
+                ),
+                Stream.ensuring(Deferred.succeed(streamEnded, undefined).pipe(Effect.asVoid)),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+  const adapter: ProviderAdapterShape<ProviderAdapterError> = {
+    provider: OPENCODE_DRIVER,
+    capabilities: {
+      sessionModelSwitch: "in-session",
+      promptlessTurnContinuation: true,
+    },
+    startSession,
+    sendTurn,
+    compaction: { type: "native", start: compactThread },
+    interruptTurn: vi.fn(
+      (_threadId: ThreadId, _turnId?: TurnId): Effect.Effect<void, ProviderAdapterError> =>
+        Effect.void,
+    ),
+    respondToRequest: vi.fn(
+      (
+        _threadId: ThreadId,
+        _requestId: string,
+        _decision: ProviderApprovalDecision,
+      ): Effect.Effect<void, ProviderAdapterError> => Effect.void,
+    ),
+    respondToUserInput: vi.fn(
+      (
+        _threadId: ThreadId,
+        _requestId: string,
+        _answers: Record<string, unknown>,
+      ): Effect.Effect<void, ProviderAdapterError> => Effect.void,
+    ),
+    stopSession,
+    listSessions: vi.fn(() => Effect.succeed(Array.from(sessions.values()))),
+    hasSession: vi.fn((threadId: ThreadId) => Effect.succeed(sessions.has(threadId))),
+    readThread: vi.fn((threadId: ThreadId) =>
+      Effect.succeed({ threadId, turns: [] as ReadonlyArray<{ id: TurnId; items: readonly [] }> }),
+    ),
+    rollbackThread: vi.fn((threadId: ThreadId, _numTurns: number) =>
+      Effect.succeed({ threadId, turns: [] as readonly [] }),
+    ),
+    stopAll,
+    drainEvents,
+    get streamEvents() {
+      return makeStreamEvents();
+    },
+  };
+
+  return {
+    adapter,
+    compactThread,
+    compactThreadImpl,
+    compactionRelease,
+    compactionStarted,
+    drainEvents,
+    emit,
+    endEvents: Queue.end(runtimeEvents).pipe(Effect.asVoid),
+    exitEvents,
+    putSession,
+    sessions,
+    startSession,
+    startSessionImpl,
+    streamSubscriptionCount: () => streamSubscriptionCount,
+    holdNextCompaction: () => {
+      holdNextCompaction = true;
+    },
+    holdNextStart: () => {
+      holdNextStart = true;
+    },
+    holdNextStop: () => {
+      holdNextStop = true;
+    },
+    stopAll,
+    stopAllImpl,
+    stopAllStarted,
+    stopSession,
+    stopSessionImpl,
+    startRelease,
+    startStarted,
+    stopRelease,
+    stopStarted,
+    streamEnded,
+    streamSubscribed,
+  };
+});
+
+type ProviderRetirementHooks = Parameters<
+  ProviderAdapterRegistry.ProviderAdapterRegistry["Service"]["registerRetirementHooks"]
+>[0];
+
+function makeMutableInstanceRegistry(
+  entries: ReadonlyArray<readonly [ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>]>,
+  changes: PubSub.PubSub<void>,
+) {
+  const adapters = new Map(entries);
+  let retirementHooks: ProviderRetirementHooks | undefined;
+  const unsupported = (instanceId: ProviderInstanceId) =>
+    new ProviderUnsupportedError({ provider: ProviderDriverKind.make(instanceId) });
+
+  const registry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"] = {
+    getByInstance: (instanceId) => {
+      const adapter = adapters.get(instanceId);
+      return adapter ? Effect.succeed(adapter) : Effect.fail(unsupported(instanceId));
+    },
+    getInstanceInfo: (instanceId) => {
+      const adapter = adapters.get(instanceId);
+      return adapter
+        ? Effect.succeed({
+            instanceId,
+            driverKind: adapter.provider,
+            displayName: undefined,
+            enabled: true,
+            continuationIdentity: {
+              driverKind: adapter.provider,
+              continuationKey: `${adapter.provider}:instance:${instanceId}`,
+            },
+          })
+        : Effect.fail(unsupported(instanceId));
+    },
+    listInstances: () => Effect.succeed(Array.from(adapters.keys())),
+    subscribeChanges: PubSub.subscribe(changes),
+    registerRetirementHooks: (hooks) =>
+      Effect.sync(() => {
+        retirementHooks = hooks;
+      }),
+  };
+
+  return {
+    registry,
+    get retirementHooks() {
+      return retirementHooks;
+    },
+    remove: (instanceId: ProviderInstanceId) => {
+      adapters.delete(instanceId);
+    },
+    replace: (
+      instanceId: ProviderInstanceId,
+      adapter: ProviderAdapterShape<ProviderAdapterError>,
+    ) => {
+      adapters.set(instanceId, adapter);
+    },
+    publish: () => PubSub.publish(changes, undefined).pipe(Effect.asVoid),
+  };
+}
+
+function makeProviderServiceRuntimeLayer(input: {
+  readonly registry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"];
+  readonly serverSettingsLayer?: typeof defaultServerSettingsLayer;
+  readonly serviceOptions?: Parameters<typeof makeProviderServiceLive>[0];
+}) {
+  const providerAdapterLayer = Layer.succeed(
+    ProviderAdapterRegistry.ProviderAdapterRegistry,
+    input.registry,
+  );
+  const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+  const providerLayer = makeProviderServiceLive(input.serviceOptions).pipe(
+    Layer.provide(NodeServices.layer),
+    Layer.provide(providerAdapterLayer),
+    Layer.provide(directoryLayer),
+    Layer.provide(input.serverSettingsLayer ?? defaultServerSettingsLayer),
+    Layer.provide(serverConfigTestLayer),
+    Layer.provide(AnalyticsService.layerTest),
+    Layer.provide(
+      Layer.succeed(
+        ProviderEventLoggers.ProviderEventLoggers,
+        ProviderEventLoggers.NoOpProviderEventLoggers,
+      ),
+    ),
+  );
+
+  return {
+    layer: Layer.mergeAll(
+      providerLayer,
+      directoryLayer,
+      runtimeRepositoryLayer,
+      NodeServices.layer,
+    ),
+    directoryLayer,
+    runtimeRepositoryLayer,
+  };
+}
+
+const buildProviderServiceRuntime = Effect.fn("buildProviderServiceRuntime")(function* (input: {
+  readonly registry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"];
+  readonly serverSettingsLayer?: typeof defaultServerSettingsLayer;
+  readonly serviceOptions?: Parameters<typeof makeProviderServiceLive>[0];
+}) {
+  const setup = makeProviderServiceRuntimeLayer(input);
+  const scope = yield* Scope.make();
+  const services = yield* Layer.build(setup.layer).pipe(Scope.provide(scope));
+  return {
+    scope,
+    services,
+    provider: yield* ProviderService.ProviderService.pipe(Effect.provide(services)),
+    directory: yield* ProviderSessionDirectory.ProviderSessionDirectory.pipe(
+      Effect.provide(services),
+    ),
+    runtimeRepository: yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository.pipe(
+      Effect.provide(services),
+    ),
+  };
+});
+
+function makeRecordingMcpCredentials() {
+  const credentials = new Map<ThreadId, McpProviderSession.McpProviderSessionConfig>();
+  let credentialNumber = 0;
+  const issueMcpCredential = (input: {
+    readonly threadId: ThreadId;
+    readonly providerInstanceId: ProviderInstanceId;
+  }) =>
+    Effect.sync(() => {
+      const config = {
+        environmentId: EnvironmentId.make("provider-service-test-environment"),
+        threadId: input.threadId,
+        providerSessionId: `provider-service-test-session-${++credentialNumber}`,
+        providerInstanceId: input.providerInstanceId,
+        endpoint: "http://127.0.0.1:1/mcp",
+        authorizationHeader: `Bearer provider-service-test-${credentialNumber}`,
+      } satisfies McpProviderSession.McpProviderSessionConfig;
+      credentials.set(input.threadId, config);
+      return { config };
+    });
+  const revokeMcpCredential = (threadId: ThreadId) =>
+    Effect.sync(() => {
+      credentials.delete(threadId);
+    });
+
+  return { credentials, issueMcpCredential, revokeMcpCredential };
+}
+
+const makeOpenCodeStartInput = (
+  instanceId: ProviderInstanceId,
+  threadId: ThreadId,
+  model: string,
+): ProviderSessionStartInput => ({
+  provider: OPENCODE_DRIVER,
+  providerInstanceId: instanceId,
+  threadId,
+  cwd: fixtureCwd(`lifecycle-${String(instanceId)}-${String(threadId)}-${model}`),
+  modelSelection: createModelSelection(instanceId, model),
+  runtimeMode: "full-access",
+});
+
+const makeOpenCodeExitEvent = (
+  instanceId: ProviderInstanceId,
+  threadId: ThreadId,
+  suffix: string,
+): ProviderRuntimeEvent => ({
+  type: "session.exited",
+  eventId: asEventId(`evt-${String(instanceId)}-${String(threadId)}-${suffix}`),
+  provider: OPENCODE_DRIVER,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  threadId,
+  payload: {
+    reason: "Session stopped.",
+    recoverable: false,
+    exitKind: "graceful",
+  },
+});
 
 const advanceTestClock = (ms: number) =>
   TestClock.adjust(`${ms} millis`).pipe(Effect.andThen(Effect.yieldNow));
@@ -864,6 +1316,7 @@ it.effect(
         subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
           PubSub.subscribe(pubsub),
         ),
+        registerRetirementHooks: () => Effect.void,
       };
       const providerAdapterLayer = Layer.succeed(
         ProviderAdapterRegistry.ProviderAdapterRegistry,
@@ -943,6 +1396,7 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
       subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
         PubSub.subscribe(pubsub),
       ),
+      registerRetirementHooks: () => Effect.void,
     };
     const providerAdapterLayer = Layer.succeed(
       ProviderAdapterRegistry.ProviderAdapterRegistry,
@@ -1108,15 +1562,49 @@ declaredCompaction.layer("ProviderService declared compaction", (it) => {
   it.effect("rejects compaction for adapters without a declared strategy", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
       const threadId = asThreadId("custom-unsupported-compaction");
+      const settledExits: Array<Exit.Exit<void, unknown>> = [];
       yield* provider.startSession(threadId, {
         providerInstanceId: unsupportedCompactionInstanceId,
         threadId,
         runtimeMode: "full-access",
       });
-      const failure = yield* provider.compactThread(threadId).pipe(Effect.flip);
+      const failure = yield* provider
+        .compactThread(threadId, undefined, undefined, (exit) =>
+          Effect.gen(function* () {
+            yield* Effect.sync(() => settledExits.push(exit));
+            const binding = yield* directory.getBinding(threadId);
+            assert.isTrue(Option.isSome(binding));
+            if (Option.isSome(binding)) {
+              yield* directory.upsert({
+                ...binding.value,
+                runtimePayload: { compactionSettled: exit._tag },
+              });
+            }
+          }),
+        )
+        .pipe(Effect.flip);
       assert.instanceOf(failure, ProviderValidationError);
       assert.include(failure.message, "does not support context compaction");
+      assert.equal(settledExits.length, 1);
+      const settledExit = settledExits[0];
+      assert.isDefined(settledExit);
+      if (settledExit !== undefined) {
+        assert.isTrue(Exit.isFailure(settledExit));
+      }
+      const binding = yield* directory.getBinding(threadId);
+      assert.isTrue(Option.isSome(binding));
+      if (Option.isSome(binding)) {
+        const payload = binding.value.runtimePayload;
+        assert.isTrue(payload !== null && typeof payload === "object" && !Array.isArray(payload));
+        if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+          assert.equal(
+            "compactionSettled" in payload ? payload.compactionSettled : undefined,
+            "Failure",
+          );
+        }
+      }
       assert.equal(unsupportedCompaction.sendTurn.mock.calls.length, 0);
       assert.equal(unsupportedCompaction.compactThread.mock.calls.length, 0);
       yield* provider.stopSession({ threadId });
@@ -1243,9 +1731,16 @@ it.effect(
     Effect.gen(function* () {
       const original = makeFakeCodexAdapter();
       const replacement = makeFakeCodexAdapter();
+      const oldEvents = yield* Queue.unbounded<ProviderRuntimeEvent, Cause.Done>();
+      const originalAdapter: ProviderAdapterShape<ProviderAdapterError> = {
+        ...original.adapter,
+        streamEvents: Stream.fromQueue(oldEvents),
+      };
       const baseRegistry = makeAdapterRegistryMock({ [CODEX_DRIVER]: original.adapter });
       let swapAfterFirstLookup = false;
       let feedbackLookupCount = 0;
+      let activeAdapter: ProviderAdapterShape<ProviderAdapterError> = originalAdapter;
+      let retirementHooks: ProviderRetirementHooks | undefined;
       const registry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"] = {
         ...baseRegistry,
         getByInstance: (instanceId) => {
@@ -1253,8 +1748,37 @@ it.effect(
             return baseRegistry.getByInstance(instanceId);
           }
           const useReplacement = swapAfterFirstLookup && feedbackLookupCount++ > 0;
-          return Effect.succeed(useReplacement ? replacement.adapter : original.adapter);
+          if (!useReplacement) return Effect.succeed(activeAdapter);
+
+          // The registry's withdrawal is itself observable by ProviderService:
+          // fence the old source, close its stream, then let the retirement
+          // hook finish before returning the replacement identity. Clear the
+          // one-shot flag first because source-ended reconciliation can look
+          // up this instance again while the hooks are running.
+          swapAfterFirstLookup = false;
+          activeAdapter = replacement.adapter;
+          return Effect.gen(function* () {
+            const hooks = retirementHooks;
+            if (hooks === undefined) {
+              return yield* Effect.die("ProviderService did not register retirement hooks");
+            }
+            yield* hooks.beforeClose(codexInstanceId, originalAdapter);
+            yield* Queue.end(oldEvents).pipe(Effect.asVoid);
+            yield* hooks.afterClose(codexInstanceId, originalAdapter);
+            return replacement.adapter;
+          });
         },
+        registerRetirementHooks: (hooks) =>
+          Effect.acquireRelease(
+            Effect.sync(() => {
+              retirementHooks = hooks;
+              return hooks;
+            }),
+            (registered) =>
+              Effect.sync(() => {
+                if (retirementHooks === registered) retirementHooks = undefined;
+              }),
+          ).pipe(Effect.asVoid),
       };
       const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
         Layer.provide(SqlitePersistenceMemory),
@@ -1878,7 +2402,35 @@ routing.layer("ProviderServiceLive routing", (it) => {
   it.effect("serializes native compaction and quarantines timed-out completions", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
       const threadId = asThreadId("thread-compact-timeout");
+      const settledLabels: Array<string> = [];
+      const settledExits: Array<Exit.Exit<void, unknown>> = [];
+      const onSettled = (label: string) => (exit: Exit.Exit<void, unknown>) =>
+        Effect.gen(function* () {
+          yield* Effect.sync(() => {
+            settledLabels.push(label);
+            settledExits.push(exit);
+          });
+          const binding = yield* directory.getBinding(threadId);
+          assert.isTrue(Option.isSome(binding));
+          if (Option.isSome(binding)) {
+            yield* directory.upsert({
+              ...binding.value,
+              runtimePayload: { compactionSettled: label, compactionExit: exit._tag },
+            });
+          }
+        });
+      const assertSettledFailure = (index: number) => {
+        const exit = settledExits[index];
+        assert.isDefined(exit);
+        if (exit !== undefined) {
+          assert.isTrue(Exit.isFailure(exit));
+          if (Exit.isFailure(exit)) {
+            assert.instanceOf(Cause.squash(exit.cause), ProviderAdapterRequestError);
+          }
+        }
+      };
       yield* provider.startSession(threadId, {
         provider: CODEX_DRIVER,
         providerInstanceId: codexInstanceId,
@@ -1889,12 +2441,16 @@ routing.layer("ProviderServiceLive routing", (it) => {
       routing.codex.compactThread.mockImplementationOnce(() => Effect.never);
 
       const resultFiber = yield* provider
-        .compactThread(threadId)
+        .compactThread(threadId, undefined, undefined, onSettled("initial-timeout"))
         .pipe(Effect.result, Effect.forkChild);
       yield* advanceTestClock(50);
-      const concurrent = yield* provider.compactThread(threadId).pipe(Effect.result);
+      const concurrent = yield* provider
+        .compactThread(threadId, undefined, undefined, onSettled("pending-claim"))
+        .pipe(Effect.result);
       assert.equal(concurrent._tag, "Failure");
       assert.equal(routing.codex.compactThread.mock.calls.length, 1);
+      assert.deepEqual(settledLabels, ["pending-claim"]);
+      assertSettledFailure(0);
 
       routing.cursor.emit({
         type: "thread.state.changed",
@@ -1913,10 +2469,40 @@ routing.layer("ProviderServiceLive routing", (it) => {
       if (result._tag === "Failure") {
         assert.equal(result.failure._tag, "ProviderAdapterRequestError");
       }
+      assert.deepEqual(settledLabels, ["pending-claim", "initial-timeout"]);
+      assertSettledFailure(1);
+      const afterTimeoutBinding = yield* directory.getBinding(threadId);
+      assert.isTrue(Option.isSome(afterTimeoutBinding));
+      if (Option.isSome(afterTimeoutBinding)) {
+        const payload = afterTimeoutBinding.value.runtimePayload;
+        assert.isTrue(payload !== null && typeof payload === "object" && !Array.isArray(payload));
+        if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+          assert.equal(
+            "compactionSettled" in payload ? payload.compactionSettled : undefined,
+            "initial-timeout",
+          );
+        }
+      }
 
-      const blockedRetry = yield* provider.compactThread(threadId).pipe(Effect.result);
+      const blockedRetry = yield* provider
+        .compactThread(threadId, undefined, undefined, onSettled("quarantined-retry"))
+        .pipe(Effect.result);
       assert.equal(blockedRetry._tag, "Failure");
       assert.equal(routing.codex.compactThread.mock.calls.length, 1);
+      assert.deepEqual(settledLabels, ["pending-claim", "initial-timeout", "quarantined-retry"]);
+      assertSettledFailure(2);
+      const afterRetryBinding = yield* directory.getBinding(threadId);
+      assert.isTrue(Option.isSome(afterRetryBinding));
+      if (Option.isSome(afterRetryBinding)) {
+        const payload = afterRetryBinding.value.runtimePayload;
+        assert.isTrue(payload !== null && typeof payload === "object" && !Array.isArray(payload));
+        if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+          assert.equal(
+            "compactionSettled" in payload ? payload.compactionSettled : undefined,
+            "quarantined-retry",
+          );
+        }
+      }
 
       routing.codex.emit({
         type: "thread.state.changed",
@@ -4608,5 +5194,869 @@ describe("agent browser access", () => {
       const issued = yield* startSessionWith(false, threadId, true);
       assert.deepEqual(issued, [threadId]);
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
+
+describe("ProviderService lifecycle ownership", () => {
+  it.effect(
+    "holds native stop completion behind runtime delivery and reports receiver failures",
+    () =>
+      Effect.gen(function* () {
+        const instanceId = ProviderInstanceId.make("lifecycle-delivery-instance");
+        const threadId = asThreadId("lifecycle-delivery-thread");
+        const failedThreadId = asThreadId("lifecycle-delivery-failed-thread");
+        const adapter = yield* makeFakeOpenCodeAdapter(instanceId);
+        const mcp = makeRecordingMcpCredentials();
+        const runtime = yield* buildProviderServiceRuntime({
+          registry: makeStaticInstanceRegistry([[instanceId, adapter.adapter]]),
+          serverSettingsLayer: ServerSettings.ServerSettingsService.layerTest({
+            enableAgentBrowserAccess: true,
+          }),
+          serviceOptions: {
+            issueMcpCredential: mcp.issueMcpCredential,
+            revokeMcpCredential: mcp.revokeMcpCredential,
+          },
+        });
+        const receiverError = new Error("runtime receiver failed");
+        const receiverSeen = yield* Deferred.make<void>();
+        const receiverRelease = yield* Deferred.make<void>();
+        const stopFinished = yield* Deferred.make<void>();
+        const settled = yield* Deferred.make<Exit.Exit<void, unknown>>();
+        let failReceiver = false;
+
+        yield* runtime.provider.registerRuntimeEventConsumer((event) => {
+          if (event.type !== "session.exited") return Effect.void;
+          if (failReceiver) return Effect.fail(receiverError);
+          return Deferred.succeed(receiverSeen, undefined).pipe(
+            Effect.andThen(Deferred.await(receiverRelease)),
+            Effect.asVoid,
+          );
+        });
+
+        const publicEvent = yield* runtime.provider.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId && event.type === "session.exited"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        yield* Deferred.await(adapter.streamSubscribed);
+        yield* runtime.provider.startSession(
+          threadId,
+          makeOpenCodeStartInput(instanceId, threadId, "delivery-model"),
+        );
+
+        adapter.holdNextStop();
+        const stop = yield* Effect.exit(
+          runtime.provider
+            .stopSession({ threadId })
+            .pipe(Effect.ensuring(Deferred.succeed(stopFinished, undefined).pipe(Effect.asVoid))),
+        ).pipe(Effect.forkChild);
+        yield* Deferred.await(adapter.stopStarted);
+
+        yield* Deferred.succeed(adapter.stopRelease, undefined);
+        yield* Deferred.await(receiverSeen);
+        assert.isFalse(yield* Deferred.isDone(stopFinished));
+        yield* Deferred.succeed(receiverRelease, undefined);
+
+        const delivered = yield* Fiber.join(publicEvent);
+        assert.isTrue(Option.isSome(delivered));
+        if (Option.isSome(delivered)) {
+          assert.equal(delivered.value.type, "session.exited");
+          assert.equal(delivered.value.threadId, threadId);
+          assert.equal(delivered.value.providerInstanceId, instanceId);
+        }
+        const stopExit = yield* Fiber.join(stop);
+        assert.isTrue(Exit.isSuccess(stopExit));
+        // Session start and stop each flush the same source generation.
+        assert.equal(adapter.drainEvents.mock.calls.length, 2);
+
+        failReceiver = true;
+        yield* runtime.provider.startSession(
+          failedThreadId,
+          makeOpenCodeStartInput(instanceId, failedThreadId, "failed-delivery-model"),
+        );
+        const failedStop = yield* Effect.exit(
+          runtime.provider.stopSession({ threadId: failedThreadId }, (exit) =>
+            Deferred.succeed(settled, exit).pipe(Effect.asVoid),
+          ),
+        );
+        assert.isTrue(Exit.isFailure(failedStop));
+        const settledExit = yield* Deferred.await(settled);
+        assert.isTrue(Exit.isFailure(settledExit));
+        if (Exit.isFailure(settledExit)) {
+          const settledFailure = Cause.squash(settledExit.cause);
+          assert.isTrue(isProviderValidationError(settledFailure));
+          if (isProviderValidationError(settledFailure)) {
+            assert.equal(settledFailure.cause, receiverError);
+          }
+        }
+
+        yield* Scope.close(runtime.scope, Exit.void);
+        McpProviderSession.clearAllMcpProviderSessions();
+      }),
+  );
+
+  it.effect("guards start, stop, and compaction callbacks by session generation", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("lifecycle-callback-instance");
+      const threadId = asThreadId("lifecycle-callback-thread");
+      const adapter = yield* makeFakeOpenCodeAdapter(instanceId);
+      const mcp = makeRecordingMcpCredentials();
+      const runtime = yield* buildProviderServiceRuntime({
+        registry: makeStaticInstanceRegistry([[instanceId, adapter.adapter]]),
+        serverSettingsLayer: ServerSettings.ServerSettingsService.layerTest({
+          enableAgentBrowserAccess: true,
+        }),
+        serviceOptions: {
+          issueMcpCredential: mcp.issueMcpCredential,
+          revokeMcpCredential: mcp.revokeMcpCredential,
+        },
+      });
+      const startedCalls = { value: 0 };
+      const stopSettledCalls = { value: 0 };
+      const compactSettledCalls = { value: 0 };
+      const stopExitTags: Array<string> = [];
+      const compactExitTags: Array<string> = [];
+
+      const writeCallbackMarker = (marker: string) =>
+        Effect.gen(function* () {
+          const binding = yield* runtime.directory.getBinding(threadId);
+          if (Option.isNone(binding)) return;
+          yield* runtime.directory.upsert({
+            ...binding.value,
+            runtimePayload: { callbackMarker: marker },
+          });
+        });
+
+      const first = yield* runtime.provider.startSession(
+        threadId,
+        makeOpenCodeStartInput(instanceId, threadId, "callback-old-model"),
+        (session) =>
+          Effect.gen(function* () {
+            startedCalls.value += 1;
+            assert.equal(session.model, "callback-old-model");
+            yield* writeCallbackMarker("started-current");
+          }),
+      );
+      assert.equal(first.model, "callback-old-model");
+      assert.equal(startedCalls.value, 1);
+
+      adapter.holdNextStop();
+      const oldStop = yield* runtime.provider
+        .stopSession({ threadId }, (exit) =>
+          Effect.gen(function* () {
+            stopSettledCalls.value += 1;
+            stopExitTags.push(exit._tag);
+            yield* writeCallbackMarker("old-stop");
+          }),
+        )
+        .pipe(Effect.exit, Effect.forkChild);
+      yield* Deferred.await(adapter.stopStarted);
+
+      const replacementStarted = yield* Deferred.make<void>();
+      adapter.startSession.mockImplementationOnce((input) =>
+        adapter
+          .startSessionImpl(input)
+          .pipe(Effect.tap(() => Deferred.succeed(replacementStarted, undefined))),
+      );
+      const replacement = yield* runtime.provider
+        .startSession(threadId, makeOpenCodeStartInput(instanceId, threadId, "callback-new-model"))
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(replacementStarted);
+      yield* Fiber.join(replacement);
+      yield* Deferred.succeed(adapter.stopRelease, undefined);
+      const oldStopExit = yield* Fiber.join(oldStop);
+      assert.isTrue(Exit.isSuccess(oldStopExit));
+      assert.equal(stopSettledCalls.value, 0);
+      assert.deepEqual(stopExitTags, []);
+
+      adapter.holdNextCompaction();
+      const compaction = yield* runtime.provider
+        .compactThread(
+          threadId,
+          createModelSelection(instanceId, "callback-new-model"),
+          MessageId.make("callback-compaction-request"),
+          (exit) =>
+            Effect.gen(function* () {
+              compactSettledCalls.value += 1;
+              compactExitTags.push(exit._tag);
+              yield* writeCallbackMarker("old-compaction");
+            }),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(adapter.compactionStarted);
+
+      const latestStarted = yield* Deferred.make<void>();
+      adapter.startSession.mockImplementationOnce((input) =>
+        adapter
+          .startSessionImpl(input)
+          .pipe(Effect.tap(() => Deferred.succeed(latestStarted, undefined))),
+      );
+      const latest = yield* runtime.provider
+        .startSession(
+          threadId,
+          makeOpenCodeStartInput(instanceId, threadId, "callback-latest-model"),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(latestStarted);
+      yield* Fiber.join(latest);
+
+      yield* Deferred.succeed(adapter.compactionRelease, undefined);
+      yield* Effect.exit(Fiber.join(compaction));
+
+      const binding = yield* runtime.directory.getBinding(threadId);
+      assert.isTrue(Option.isSome(binding));
+      if (Option.isSome(binding)) {
+        const payload = binding.value.runtimePayload;
+        assert.isTrue(payload !== null && typeof payload === "object" && !Array.isArray(payload));
+        if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+          assert.deepEqual("modelSelection" in payload ? payload.modelSelection : undefined, {
+            instanceId,
+            model: "callback-latest-model",
+          });
+        }
+        const marker =
+          payload !== null && typeof payload === "object" && !Array.isArray(payload)
+            ? "callbackMarker" in payload
+              ? payload.callbackMarker
+              : undefined
+            : undefined;
+        assert.notEqual(marker, "old-stop");
+        assert.notEqual(marker, "old-compaction");
+      }
+      assert.equal(stopSettledCalls.value, 0);
+      assert.equal(compactSettledCalls.value, 0);
+      assert.deepEqual(stopExitTags, []);
+      assert.deepEqual(compactExitTags, []);
+      assert.equal(
+        McpProviderSession.readMcpProviderSession(threadId)?.providerInstanceId,
+        instanceId,
+      );
+
+      yield* Scope.close(runtime.scope, Exit.void);
+      McpProviderSession.clearAllMcpProviderSessions();
+    }),
+  );
+
+  it.effect("does not settle a timed-out compaction callback after replacement", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("lifecycle-compaction-stale-callback");
+      const threadId = asThreadId("lifecycle-compaction-stale-callback-thread");
+      const adapter = yield* makeFakeOpenCodeAdapter(instanceId);
+      const runtime = yield* buildProviderServiceRuntime({
+        registry: makeStaticInstanceRegistry([[instanceId, adapter.adapter]]),
+      });
+      const compactionStarted = yield* Deferred.make<void>();
+      let settledCalls = 0;
+
+      yield* Deferred.await(adapter.streamSubscribed);
+      yield* runtime.provider.startSession(
+        threadId,
+        makeOpenCodeStartInput(instanceId, threadId, "stale-old-model"),
+      );
+
+      adapter.compactThread.mockImplementationOnce(() =>
+        Deferred.succeed(compactionStarted, undefined).pipe(Effect.andThen(Effect.never)),
+      );
+      const compaction = yield* runtime.provider
+        .compactThread(threadId, undefined, undefined, (exit) =>
+          Effect.gen(function* () {
+            yield* Effect.sync(() => {
+              settledCalls += 1;
+            });
+            const binding = yield* runtime.directory.getBinding(threadId);
+            assert.isTrue(Option.isSome(binding));
+            if (Option.isSome(binding)) {
+              yield* runtime.directory.upsert({
+                ...binding.value,
+                runtimePayload: { staleCompactionSettled: exit._tag },
+              });
+            }
+          }),
+        )
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Deferred.await(compactionStarted);
+
+      yield* runtime.provider.startSession(
+        threadId,
+        makeOpenCodeStartInput(instanceId, threadId, "stale-replacement-model"),
+      );
+      const replacementBinding = yield* runtime.directory.getBinding(threadId);
+      assert.isTrue(Option.isSome(replacementBinding));
+      if (Option.isSome(replacementBinding)) {
+        const payload = replacementBinding.value.runtimePayload;
+        assert.isTrue(payload !== null && typeof payload === "object" && !Array.isArray(payload));
+        if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+          assert.deepEqual("modelSelection" in payload ? payload.modelSelection : undefined, {
+            instanceId,
+            model: "stale-replacement-model",
+          });
+        }
+      }
+
+      yield* advanceTestClock(600_001);
+      const compactionResult = yield* Fiber.join(compaction);
+      assert.equal(compactionResult._tag, "Failure");
+      assert.equal(settledCalls, 0);
+      assert.equal(adapter.sessions.get(threadId)?.model, "stale-replacement-model");
+
+      const finalBinding = yield* runtime.directory.getBinding(threadId);
+      assert.isTrue(Option.isSome(finalBinding));
+      if (Option.isSome(finalBinding)) {
+        const payload = finalBinding.value.runtimePayload;
+        assert.isTrue(payload !== null && typeof payload === "object" && !Array.isArray(payload));
+        if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+          assert.isFalse("staleCompactionSettled" in payload);
+        }
+      }
+
+      yield* Scope.close(runtime.scope, Exit.void);
+      McpProviderSession.clearAllMcpProviderSessions();
+    }),
+  );
+
+  it.effect("keeps retiring adapter identities ordered while unrelated instances continue", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("lifecycle-retiring-instance");
+      const replacementInstanceId = instanceId;
+      const otherInstanceId = ProviderInstanceId.make("lifecycle-unrelated-instance");
+      const threadId = asThreadId("lifecycle-retiring-thread");
+      const otherThreadId = asThreadId("lifecycle-unrelated-thread");
+      const oldAdapter = yield* makeFakeOpenCodeAdapter(instanceId);
+      const replacementAdapter = yield* makeFakeOpenCodeAdapter(replacementInstanceId);
+      const otherAdapter = yield* makeFakeOpenCodeAdapter(otherInstanceId);
+      const changes = yield* PubSub.unbounded<void>();
+      const registryState = makeMutableInstanceRegistry(
+        [
+          [instanceId, oldAdapter.adapter],
+          [otherInstanceId, otherAdapter.adapter],
+        ],
+        changes,
+      );
+      const runtime = yield* buildProviderServiceRuntime({
+        registry: registryState.registry,
+        serverSettingsLayer: ServerSettings.ServerSettingsService.layerTest({
+          enableAgentBrowserAccess: true,
+        }),
+      });
+      const oldEventStarted = yield* Deferred.make<void>();
+      const oldEventRelease = yield* Deferred.make<void>();
+      const otherEventSeen = yield* Deferred.make<void>();
+      const oldReaderClosed = yield* Deferred.make<void>();
+
+      yield* runtime.provider.registerRuntimeEventConsumer((event) => {
+        if (event.threadId === otherThreadId) {
+          return Deferred.succeed(otherEventSeen, undefined).pipe(Effect.asVoid);
+        }
+        if (event.threadId !== threadId) return Effect.void;
+        return Deferred.succeed(oldEventStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(oldEventRelease)),
+          Effect.asVoid,
+        );
+      });
+      yield* Deferred.await(oldAdapter.streamSubscribed);
+      yield* Deferred.await(otherAdapter.streamSubscribed);
+
+      const hooks = registryState.retirementHooks;
+      assert.isDefined(hooks);
+      if (hooks === undefined)
+        return yield* Effect.die("ProviderService did not register retirement hooks");
+
+      yield* oldAdapter.emit(makeOpenCodeExitEvent(instanceId, threadId, "held"));
+      yield* Deferred.await(oldEventStarted);
+
+      registryState.remove(instanceId);
+      yield* registryState.publish();
+      // The registry no longer routes this instance, but the hook must retain
+      // the exact old adapter identity until its reader and callbacks finish.
+      yield* hooks.beforeClose(instanceId, oldAdapter.adapter);
+      const afterClose = yield* hooks.afterClose(instanceId, oldAdapter.adapter).pipe(
+        Effect.tap(() => Deferred.succeed(oldReaderClosed, undefined)),
+        Effect.forkChild,
+      );
+
+      registryState.replace(instanceId, replacementAdapter.adapter);
+      yield* registryState.publish();
+      const replacementOrRetirement = yield* Effect.raceFirst(
+        Deferred.await(replacementAdapter.streamSubscribed).pipe(Effect.as("replacement" as const)),
+        Deferred.await(oldReaderClosed).pipe(Effect.as("retired" as const)),
+      ).pipe(Effect.forkChild);
+
+      yield* otherAdapter.emit(makeOpenCodeExitEvent(otherInstanceId, otherThreadId, "unrelated"));
+      yield* Deferred.await(otherEventSeen);
+
+      yield* Deferred.succeed(oldEventRelease, undefined);
+      yield* oldAdapter.endEvents;
+      const retirementResult = yield* Fiber.join(afterClose);
+      assert.isUndefined(retirementResult);
+      assert.equal(yield* Fiber.join(replacementOrRetirement), "retired");
+      yield* Deferred.await(replacementAdapter.streamSubscribed);
+      assert.equal(oldAdapter.streamSubscriptionCount(), 1);
+      assert.equal(replacementAdapter.streamSubscriptionCount(), 1);
+
+      yield* otherAdapter.endEvents;
+      yield* Scope.close(runtime.scope, Exit.void);
+      McpProviderSession.clearAllMcpProviderSessions();
+    }),
+  );
+
+  it.effect("does not let an old stop remove a replacement or abort its compaction", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("lifecycle-replacement-instance");
+      const threadId = asThreadId("lifecycle-replacement-thread");
+      const adapter = yield* makeFakeOpenCodeAdapter(instanceId);
+      const mcp = makeRecordingMcpCredentials();
+      const runtime = yield* buildProviderServiceRuntime({
+        registry: makeStaticInstanceRegistry([[instanceId, adapter.adapter]]),
+        serverSettingsLayer: ServerSettings.ServerSettingsService.layerTest({
+          enableAgentBrowserAccess: true,
+        }),
+        serviceOptions: {
+          issueMcpCredential: mcp.issueMcpCredential,
+          revokeMcpCredential: mcp.revokeMcpCredential,
+        },
+      });
+      const oldStopSettled = { value: 0 };
+      const replacementStarted = yield* Deferred.make<void>();
+      const compactionFinished = yield* Deferred.make<void>();
+
+      yield* runtime.provider.startSession(
+        threadId,
+        makeOpenCodeStartInput(instanceId, threadId, "old-model"),
+      );
+      adapter.holdNextStop();
+      const oldStop = yield* runtime.provider
+        .stopSession({ threadId }, () =>
+          Effect.sync(() => {
+            oldStopSettled.value += 1;
+          }),
+        )
+        .pipe(Effect.exit, Effect.forkChild);
+      yield* Deferred.await(adapter.stopStarted);
+
+      adapter.startSession.mockImplementationOnce((input) =>
+        adapter
+          .startSessionImpl(input)
+          .pipe(Effect.tap(() => Deferred.succeed(replacementStarted, undefined))),
+      );
+      const replacement = yield* runtime.provider
+        .startSession(threadId, makeOpenCodeStartInput(instanceId, threadId, "replacement-model"))
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(replacementStarted);
+      const replacementSession = yield* Fiber.join(replacement);
+
+      adapter.holdNextCompaction();
+      const compaction = yield* runtime.provider
+        .compactThread(
+          threadId,
+          createModelSelection(instanceId, "replacement-model"),
+          MessageId.make("replacement-compaction-request"),
+        )
+        .pipe(
+          Effect.ensuring(Deferred.succeed(compactionFinished, undefined).pipe(Effect.asVoid)),
+          Effect.forkChild,
+        );
+      yield* Deferred.await(adapter.compactionStarted);
+
+      yield* Deferred.succeed(adapter.stopRelease, undefined);
+      const oldStopExit = yield* Fiber.join(oldStop);
+      assert.isTrue(Exit.isSuccess(oldStopExit));
+      assert.equal(oldStopSettled.value, 0);
+      assert.equal(adapter.exitEvents.length, 0);
+      assert.equal(adapter.sessions.get(threadId)?.model, replacementSession.model);
+      assert.isFalse(yield* Deferred.isDone(compactionFinished));
+      assert.equal(
+        McpProviderSession.readMcpProviderSession(threadId)?.providerInstanceId,
+        instanceId,
+      );
+
+      yield* Deferred.succeed(adapter.compactionRelease, undefined);
+      const compactionExit = yield* Effect.exit(Fiber.join(compaction));
+      assert.isTrue(Exit.isSuccess(compactionExit));
+
+      const binding = yield* runtime.directory.getBinding(threadId);
+      assert.isTrue(Option.isSome(binding));
+      if (Option.isSome(binding)) {
+        assert.equal(binding.value.status, "running");
+        const payload = binding.value.runtimePayload;
+        assert.isTrue(payload !== null && typeof payload === "object" && !Array.isArray(payload));
+        if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+          assert.deepEqual("modelSelection" in payload ? payload.modelSelection : undefined, {
+            instanceId,
+            model: "replacement-model",
+          });
+        }
+      }
+      assert.equal(adapter.sessions.has(threadId), true);
+
+      yield* Scope.close(runtime.scope, Exit.void);
+      McpProviderSession.clearAllMcpProviderSessions();
+    }),
+  );
+
+  it.effect("closes stopAll admission before SDK calls and drains late starts", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("lifecycle-stop-all-instance");
+      const activeThreadId = asThreadId("lifecycle-stop-all-active-thread");
+      const lateThreadId = asThreadId("lifecycle-stop-all-late-thread");
+      const rejectedThreadId = asThreadId("lifecycle-stop-all-rejected-thread");
+      const adapter = yield* makeFakeOpenCodeAdapter(instanceId);
+      const mcp = makeRecordingMcpCredentials();
+      const runtime = yield* buildProviderServiceRuntime({
+        registry: makeStaticInstanceRegistry([[instanceId, adapter.adapter]]),
+        serverSettingsLayer: ServerSettings.ServerSettingsService.layerTest({
+          enableAgentBrowserAccess: true,
+        }),
+        serviceOptions: {
+          issueMcpCredential: mcp.issueMcpCredential,
+          revokeMcpCredential: mcp.revokeMcpCredential,
+        },
+      });
+      const activeExitSeen = yield* Deferred.make<void>();
+      const activeExitRelease = yield* Deferred.make<void>();
+      const lateExitSeen = yield* Deferred.make<void>();
+      const stopAllFinished = yield* Deferred.make<void>();
+
+      yield* runtime.provider.registerRuntimeEventConsumer((event) => {
+        if (event.threadId === lateThreadId && event.type === "session.exited") {
+          return Deferred.succeed(lateExitSeen, undefined).pipe(Effect.asVoid);
+        }
+        if (event.threadId !== activeThreadId || event.type !== "session.exited") {
+          return Effect.void;
+        }
+        return Deferred.succeed(activeExitSeen, undefined).pipe(
+          Effect.andThen(Deferred.await(activeExitRelease)),
+          Effect.asVoid,
+        );
+      });
+      yield* Deferred.await(adapter.streamSubscribed);
+      yield* runtime.provider.startSession(
+        activeThreadId,
+        makeOpenCodeStartInput(instanceId, activeThreadId, "active-model"),
+      );
+
+      adapter.holdNextStart();
+      const lateStart = yield* runtime.provider
+        .startSession(lateThreadId, makeOpenCodeStartInput(instanceId, lateThreadId, "late-model"))
+        .pipe(Effect.exit, Effect.forkChild);
+      yield* Deferred.await(adapter.startStarted);
+
+      const stopAll = yield* runtime.provider
+        .stopAll()
+        .pipe(
+          Effect.ensuring(Deferred.succeed(stopAllFinished, undefined).pipe(Effect.asVoid)),
+          Effect.exit,
+          Effect.forkChild,
+        );
+      yield* Deferred.await(adapter.stopAllStarted);
+
+      const blockedStart = yield* Effect.exit(
+        runtime.provider.startSession(
+          rejectedThreadId,
+          makeOpenCodeStartInput(instanceId, rejectedThreadId, "rejected-model"),
+        ),
+      );
+      assert.isTrue(Exit.isFailure(blockedStart));
+      if (Exit.isFailure(blockedStart)) {
+        assert.instanceOf(Cause.squash(blockedStart.cause), ProviderSessionSupersededError);
+      }
+
+      const blockedSend = yield* Effect.exit(
+        runtime.provider.sendTurn({
+          threadId: activeThreadId,
+          input: "must be rejected while stopping",
+          attachments: [],
+        }),
+      );
+      assert.isTrue(Exit.isFailure(blockedSend));
+      if (Exit.isFailure(blockedSend)) {
+        assert.instanceOf(Cause.squash(blockedSend.cause), ProviderSessionSupersededError);
+      }
+
+      yield* Deferred.await(activeExitSeen);
+      const stopAllPendingCheck = yield* Effect.raceFirst(
+        Deferred.await(stopAllFinished).pipe(Effect.as("finished" as const)),
+        Deferred.await(activeExitRelease).pipe(Effect.as("released" as const)),
+      ).pipe(Effect.forkChild);
+      yield* Deferred.succeed(activeExitRelease, undefined);
+      assert.equal(yield* Fiber.join(stopAllPendingCheck), "released");
+      yield* advanceTestClock(5_000);
+
+      yield* Deferred.succeed(adapter.startRelease, undefined);
+      const lateStartExit = yield* Fiber.join(lateStart);
+      assert.isTrue(Exit.isFailure(lateStartExit));
+      if (Exit.isFailure(lateStartExit)) {
+        assert.instanceOf(Cause.squash(lateStartExit.cause), ProviderSessionSupersededError);
+      }
+      yield* Deferred.await(lateExitSeen);
+
+      const stopAllExit = yield* Fiber.join(stopAll);
+      assert.isTrue(Exit.isSuccess(stopAllExit));
+      const secondStopAll = yield* Effect.exit(runtime.provider.stopAll());
+      assert.isTrue(Exit.isSuccess(secondStopAll));
+      assert.equal(adapter.stopAll.mock.calls.length, 1);
+      assert.equal(adapter.sessions.size, 0);
+
+      const activeBinding = yield* runtime.directory.getBinding(activeThreadId);
+      assert.isTrue(Option.isSome(activeBinding));
+      if (Option.isSome(activeBinding)) assert.notEqual(activeBinding.value.status, "running");
+      const lateBinding = yield* runtime.directory.getBinding(lateThreadId);
+      if (Option.isSome(lateBinding)) assert.notEqual(lateBinding.value.status, "running");
+
+      yield* Scope.close(runtime.scope, Exit.void);
+      McpProviderSession.clearAllMcpProviderSessions();
+    }),
+  );
+
+  it.effect("shares one concurrent stopAll operation and finalizes its binding once", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("lifecycle-stop-all-shared-instance");
+      const threadId = asThreadId("lifecycle-stop-all-shared-thread");
+      const adapter = yield* makeFakeOpenCodeAdapter(instanceId);
+      const mcp = makeRecordingMcpCredentials();
+      const runtime = yield* buildProviderServiceRuntime({
+        registry: makeStaticInstanceRegistry([[instanceId, adapter.adapter]]),
+        serverSettingsLayer: ServerSettings.ServerSettingsService.layerTest({
+          enableAgentBrowserAccess: true,
+        }),
+        serviceOptions: {
+          issueMcpCredential: mcp.issueMcpCredential,
+          revokeMcpCredential: mcp.revokeMcpCredential,
+        },
+      });
+      const receiverSeen = yield* Deferred.make<void>();
+      const receiverRelease = yield* Deferred.make<void>();
+      const stopAll1Finished = yield* Deferred.make<void>();
+      const stopAll2Finished = yield* Deferred.make<void>();
+
+      yield* runtime.provider.registerRuntimeEventConsumer((event) => {
+        if (event.type !== "session.exited") return Effect.void;
+        return Deferred.succeed(receiverSeen, undefined).pipe(
+          Effect.andThen(Deferred.await(receiverRelease)),
+          Effect.asVoid,
+        );
+      });
+      yield* Deferred.await(adapter.streamSubscribed);
+      yield* runtime.provider.startSession(
+        threadId,
+        makeOpenCodeStartInput(instanceId, threadId, "stop-all-shared-model"),
+      );
+
+      adapter.holdNextStop();
+      const stopAll1 = yield* runtime.provider
+        .stopAll()
+        .pipe(
+          Effect.ensuring(Deferred.succeed(stopAll1Finished, undefined).pipe(Effect.asVoid)),
+          Effect.exit,
+          Effect.forkChild,
+        );
+      yield* Deferred.await(adapter.stopAllStarted);
+      yield* Deferred.await(adapter.stopStarted);
+      yield* Deferred.succeed(adapter.stopRelease, undefined);
+      yield* Deferred.await(receiverSeen);
+
+      const stopAll2 = yield* runtime.provider
+        .stopAll()
+        .pipe(
+          Effect.ensuring(Deferred.succeed(stopAll2Finished, undefined).pipe(Effect.asVoid)),
+          Effect.exit,
+          Effect.forkChild,
+        );
+      assert.isFalse(yield* Deferred.isDone(stopAll1Finished));
+      assert.isFalse(yield* Deferred.isDone(stopAll2Finished));
+
+      yield* Deferred.succeed(receiverRelease, undefined);
+      const stopAll1Exit = yield* Fiber.join(stopAll1);
+      const stopAll2Exit = yield* Fiber.join(stopAll2);
+      assert.isTrue(Exit.isSuccess(stopAll1Exit));
+      assert.isTrue(Exit.isSuccess(stopAll2Exit));
+      assert.equal(adapter.stopAll.mock.calls.length, 1);
+
+      const repeatedStopAll = yield* Effect.exit(runtime.provider.stopAll());
+      assert.isTrue(Exit.isSuccess(repeatedStopAll));
+      assert.equal(adapter.stopAll.mock.calls.length, 1);
+
+      const binding = yield* runtime.directory.getBinding(threadId);
+      assert.isTrue(Option.isSome(binding));
+      if (Option.isSome(binding)) {
+        assert.equal(binding.value.status, "stopped");
+        const payload = binding.value.runtimePayload;
+        assert.isTrue(payload !== null && typeof payload === "object" && !Array.isArray(payload));
+        if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+          assert.equal("activeTurnId" in payload ? payload.activeTurnId : undefined, null);
+        }
+      }
+
+      yield* Scope.close(runtime.scope, Exit.void);
+      assert.equal(adapter.stopAll.mock.calls.length, 1);
+      McpProviderSession.clearAllMcpProviderSessions();
+    }),
+  );
+
+  it.effect("does not let a held sibling stopAll block healthy OpenCode teardown", () =>
+    Effect.gen(function* () {
+      const badInstanceId = ProviderInstanceId.make("lifecycle-stop-all-held-sibling");
+      const healthyInstanceId = ProviderInstanceId.make("lifecycle-stop-all-healthy-sibling");
+      const badThreadId = asThreadId("lifecycle-stop-all-held-thread");
+      const healthyThreadId = asThreadId("lifecycle-stop-all-healthy-thread");
+      const bad = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+      const healthy = yield* makeFakeOpenCodeAdapter(healthyInstanceId);
+      const badStopStarted = yield* Deferred.make<void>();
+      const badStopRelease = yield* Deferred.make<void>();
+      const badStopFinished = yield* Deferred.make<void>();
+      const badStop = Effect.uninterruptible(
+        Effect.gen(function* () {
+          yield* Deferred.succeed(badStopStarted, undefined);
+          yield* Deferred.await(badStopRelease);
+          yield* bad.stopAll();
+        }),
+      ).pipe(Effect.ensuring(Deferred.succeed(badStopFinished, undefined).pipe(Effect.asVoid)));
+      const badAdapter: ProviderAdapterShape<ProviderAdapterError> = {
+        ...bad.adapter,
+        stopAll: () => badStop,
+      };
+      const runtime = yield* buildProviderServiceRuntime({
+        registry: makeStaticInstanceRegistry([
+          [badInstanceId, badAdapter],
+          [healthyInstanceId, healthy.adapter],
+        ]),
+      });
+      const healthyExitSeen = yield* Deferred.make<void>();
+      const shutdownFinished = yield* Deferred.make<Exit.Exit<void, unknown>>();
+
+      yield* runtime.provider.registerRuntimeEventConsumer((event) => {
+        if (event.provider !== OPENCODE_DRIVER || event.type !== "session.exited") {
+          return Effect.void;
+        }
+        return Deferred.succeed(healthyExitSeen, undefined).pipe(Effect.asVoid);
+      });
+      yield* Deferred.await(healthy.streamSubscribed);
+      yield* runtime.provider.startSession(badThreadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: badInstanceId,
+        threadId: badThreadId,
+        cwd: fixtureCwd(`lifecycle-${String(badInstanceId)}-${String(badThreadId)}`),
+        runtimeMode: "full-access",
+      });
+      yield* runtime.provider.startSession(
+        healthyThreadId,
+        makeOpenCodeStartInput(healthyInstanceId, healthyThreadId, "healthy-stop-all-model"),
+      );
+
+      const shutdown = yield* runtime.provider.stopAll().pipe(
+        Effect.exit,
+        Effect.tap((exit) => Deferred.succeed(shutdownFinished, exit).pipe(Effect.asVoid)),
+        Effect.forkChild,
+      );
+      const badAttempt = yield* Deferred.await(badStopStarted).pipe(
+        Effect.timeoutOption("10 seconds"),
+        Effect.forkChild,
+      );
+      const healthyAttempt = yield* Deferred.await(healthy.stopAllStarted).pipe(
+        Effect.timeoutOption("10 seconds"),
+        Effect.forkChild,
+      );
+      const healthyDelivery = yield* Deferred.await(healthyExitSeen).pipe(
+        Effect.timeoutOption("10 seconds"),
+        Effect.forkChild,
+      );
+
+      // The service's documented shutdown stage deadline is at most ten
+      // seconds. Advance virtual time only after all native-attempt and
+      // delivery waits are installed so a sequential cleanup cannot hang this
+      // test while the bad sibling owns its uninterruptible gate.
+      yield* advanceTestClock(10_000);
+      const badAttempted = yield* Fiber.join(badAttempt);
+      const healthyAttempted = yield* Fiber.join(healthyAttempt);
+      const healthyDelivered = yield* Fiber.join(healthyDelivery);
+      const badHeldBeforeRelease = !(yield* Deferred.isDone(badStopFinished));
+      let shutdownExitBeforeRelease: Option.Option<Exit.Exit<void, unknown>> = Option.none();
+      if (yield* Deferred.isDone(shutdownFinished)) {
+        shutdownExitBeforeRelease = Option.some(yield* Deferred.await(shutdownFinished));
+      }
+
+      // The normal path has already observed the bounded failure above. The
+      // release also makes a RED run against an older sequential implementation
+      // clean up its deliberately uninterruptible sibling before assertions.
+      yield* Deferred.succeed(badStopRelease, undefined);
+      if (Option.isSome(badAttempted) || (yield* Deferred.isDone(badStopStarted))) {
+        yield* Deferred.await(badStopFinished);
+      }
+      const shutdownExit = yield* Fiber.join(shutdown);
+
+      assert.isTrue(Option.isSome(badAttempted));
+      assert.isTrue(Option.isSome(healthyAttempted));
+      assert.isTrue(Option.isSome(healthyDelivered));
+      assert.isTrue(badHeldBeforeRelease);
+      assert.isTrue(Option.isSome(shutdownExitBeforeRelease));
+      assert.isTrue(Exit.isFailure(shutdownExit));
+      if (Option.isSome(shutdownExitBeforeRelease)) {
+        assert.isTrue(Exit.isFailure(shutdownExitBeforeRelease.value));
+      }
+      assert.equal(healthy.stopAll.mock.calls.length, 1);
+      assert.equal(bad.stopAll.mock.calls.length, 1);
+
+      yield* Scope.close(runtime.scope, Exit.void);
+      McpProviderSession.clearAllMcpProviderSessions();
+    }),
+  );
+
+  it.effect("bounds shutdown metadata before stopping native sessions", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("lifecycle-stop-all-metadata-timeout");
+      const threadId = asThreadId("lifecycle-stop-all-metadata-timeout-thread");
+      const adapter = yield* makeFakeOpenCodeAdapter(instanceId);
+      const runtime = yield* buildProviderServiceRuntime({
+        registry: makeStaticInstanceRegistry([[instanceId, adapter.adapter]]),
+      });
+      const snapshotEntered = yield* Deferred.make<void>();
+      const exitSeen = yield* Deferred.make<void>();
+
+      yield* runtime.provider.registerRuntimeEventConsumer((event) => {
+        if (event.type !== "session.exited" || event.threadId !== threadId) {
+          return Effect.void;
+        }
+        return Deferred.succeed(exitSeen, undefined).pipe(Effect.asVoid);
+      });
+      yield* Deferred.await(adapter.streamSubscribed);
+      yield* runtime.provider.startSession(
+        threadId,
+        makeOpenCodeStartInput(instanceId, threadId, "metadata-timeout-model"),
+      );
+
+      const listSessions = vi.mocked(adapter.adapter.listSessions);
+      listSessions.mockImplementationOnce(() =>
+        Deferred.succeed(snapshotEntered, undefined).pipe(Effect.andThen(Effect.never)),
+      );
+
+      const shutdown = yield* runtime.provider.stopAll().pipe(Effect.exit, Effect.forkChild);
+      yield* Deferred.await(snapshotEntered);
+      yield* advanceTestClock(2_000);
+
+      assert.isTrue(yield* Deferred.isDone(adapter.stopAllStarted));
+      assert.isTrue(yield* Deferred.isDone(exitSeen));
+      assert.equal(adapter.sessions.size, 0);
+      assert.equal(adapter.exitEvents.length, 1);
+      assert.equal(listSessions.mock.calls.length, 1);
+
+      const shutdownExit = yield* Fiber.join(shutdown);
+      assert.isTrue(Exit.isFailure(shutdownExit));
+      if (Exit.isFailure(shutdownExit)) {
+        const failure = Cause.squash(shutdownExit.cause);
+        assert.isTrue(isProviderValidationError(failure));
+        if (isProviderValidationError(failure)) {
+          assert.equal(failure.operation, "ProviderService.stopAll");
+          assert.equal(
+            failure.issue,
+            "Shutdown metadata stage 'list-sessions' did not finish within 2 seconds.",
+          );
+        }
+      }
+      assert.equal(adapter.stopAll.mock.calls.length, 1);
+
+      const closeExit = yield* Scope.close(runtime.scope, Exit.void).pipe(Effect.exit);
+      assert.isTrue(Exit.isSuccess(closeExit));
+      assert.equal(adapter.stopAll.mock.calls.length, 1);
+      McpProviderSession.clearAllMcpProviderSessions();
+    }),
   );
 });

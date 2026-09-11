@@ -34,6 +34,7 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationReactor from "./orchestration/Services/OrchestrationReactor.ts";
+import * as ProviderRuntimeIngestion from "./orchestration/Services/ProviderRuntimeIngestion.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
@@ -118,6 +119,10 @@ export const makeCommandGate = Effect.gen(function* () {
   return {
     awaitCommandReady: Deferred.await(commandReady),
     signalCommandReady: Effect.gen(function* () {
+      const readinessState = yield* Ref.get(commandReadinessState);
+      if (readinessState !== "pending") {
+        return;
+      }
       yield* Ref.set(commandReadinessState, "ready");
       yield* Deferred.succeed(commandReady, undefined).pipe(Effect.orDie);
     }),
@@ -138,8 +143,19 @@ export const makeCommandGate = Effect.gen(function* () {
 
         const result = yield* Deferred.make<A, E | ServerRuntimeStartupError>();
         yield* Queue.offer(commandQueue, {
-          run: Deferred.await(commandReady).pipe(
-            Effect.flatMap(() => effect),
+          run: Effect.gen(function* () {
+            yield* Deferred.await(commandReady);
+            const readinessState = yield* Ref.get(commandReadinessState);
+            if (readinessState === "ready") {
+              return yield* effect;
+            }
+            if (readinessState !== "pending") {
+              return yield* readinessState;
+            }
+            return yield* Effect.die(
+              "command readiness remained pending after its Deferred resolved",
+            );
+          }).pipe(
             Effect.exit,
             Effect.flatMap((exit) => settleQueuedCommand(result, exit)),
           ),
@@ -147,6 +163,51 @@ export const makeCommandGate = Effect.gen(function* () {
         return yield* Deferred.await(result);
       }),
   } satisfies CommandGate;
+});
+
+export const shutdownServerRuntime = Effect.fn("shutdownServerRuntime")(function* <
+  EStop,
+  EDrain,
+>(input: {
+  readonly commandGate: {
+    readonly failCommandReady: (error: ServerRuntimeStartupError) => Effect.Effect<void>;
+  };
+  readonly shutdownError: ServerRuntimeStartupError;
+  readonly reactorScope: Scope.Closeable;
+  readonly stopProviders: Effect.Effect<void, EStop>;
+  readonly drainIngestion: Effect.Effect<void, EDrain>;
+}) {
+  yield* Effect.gen(function* () {
+    yield* input.commandGate.failCommandReady(input.shutdownError);
+    yield* input.stopProviders.pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("provider service shutdown failed", { cause }),
+      ),
+    );
+    yield* input.drainIngestion.pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("provider runtime ingestion drain failed", { cause }),
+      ),
+      Effect.timeout("15 seconds"),
+    );
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("server runtime shutdown did not finish before the deadline", {
+        cause,
+      }),
+    ),
+    Effect.ensuring(
+      Scope.close(input.reactorScope, Exit.void).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("server reactor scope shutdown failed", { cause }),
+        ),
+      ),
+    ),
+  );
 });
 
 export const recordStartupHeartbeat = Effect.gen(function* () {
@@ -810,6 +871,9 @@ export const make = (options?: StartupOptions) =>
     const serverConfig = yield* ServerConfig.ServerConfig;
     const keybindings = yield* Keybindings.Keybindings;
     const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
+    const providerService = yield* ProviderService.ProviderService;
+    const providerRuntimeIngestion =
+      yield* ProviderRuntimeIngestion.ProviderRuntimeIngestionService;
     const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
     const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -822,6 +886,12 @@ export const make = (options?: StartupOptions) =>
     const commandGate = yield* makeCommandGate;
     const httpListening = yield* Deferred.make<void>();
     const reactorScope = yield* Scope.make("sequential");
+    const shutdownError = new ServerRuntimeStartupError({
+      mode: serverConfig.mode,
+      host: serverConfig.host ?? null,
+      port: serverConfig.port,
+      cause: new Error("Server is shutting down."),
+    });
 
     const syncAutoPullProjects = projectionSnapshotQuery.getShellSnapshot().pipe(
       Effect.flatMap((snapshot) =>
@@ -834,7 +904,15 @@ export const make = (options?: StartupOptions) =>
       ),
     );
 
-    yield* Effect.addFinalizer(() => Scope.close(reactorScope, Exit.void));
+    yield* Effect.addFinalizer(() =>
+      shutdownServerRuntime({
+        commandGate,
+        shutdownError,
+        reactorScope,
+        stopProviders: Effect.suspend(() => providerService.stopAll()),
+        drainIngestion: providerRuntimeIngestion.drain,
+      }),
+    );
     yield* serviceUpdateCoordinator.changes.pipe(
       Stream.runForEach((payload) =>
         lifecycleEvents

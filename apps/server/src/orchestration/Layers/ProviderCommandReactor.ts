@@ -22,6 +22,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -39,6 +40,7 @@ import { QueuedProviderTurnStartRepository } from "../../persistence/Services/Qu
 import {
   ProviderAdapterRequestError,
   ProviderAdapterValidationError,
+  ProviderSessionSupersededError,
   ProviderUnsupportedError,
   ProviderWorkspaceMissingError,
 } from "../../provider/Errors.ts";
@@ -66,6 +68,7 @@ const isProviderUnsupportedError = Schema.is(ProviderUnsupportedError);
 const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
 const isProviderWorkspaceMissingError = Schema.is(ProviderWorkspaceMissingError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
+const isProviderSessionSupersededError = Schema.is(ProviderSessionSupersededError);
 
 type ProviderIntentEvent = Extract<
   OrchestrationEvent,
@@ -241,6 +244,12 @@ function providerErrorLabel(value: string | undefined): string {
   return normalized && normalized.length > 0 ? normalized : "unknown";
 }
 
+function isProviderSessionSupersededCause(cause: Cause.Cause<unknown>): boolean {
+  return cause.reasons.some(
+    (reason) => Cause.isFailReason(reason) && isProviderSessionSupersededError(reason.error),
+  );
+}
+
 export function providerErrorLabelFromInstanceHint(input: {
   readonly instanceId?: string | undefined;
   readonly modelSelectionInstanceId?: string | undefined;
@@ -356,8 +365,18 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
-  const compactingThreadIds = new Set<ThreadId>();
-  const stoppingThreadIds = new Set<ThreadId>();
+  const compactingThreadIds = new Map<ThreadId, object>();
+  const stoppingThreadIds = new Map<ThreadId, object>();
+
+  const clearOperationToken = (
+    operations: Map<ThreadId, object>,
+    threadId: ThreadId,
+    token: object,
+  ): void => {
+    if (operations.get(threadId) === token) {
+      operations.delete(threadId);
+    }
+  };
 
   const deleteQueuedTurnStart = (eventSequence: number) =>
     queuedProviderTurnStartRepository.delete({ eventSequence }).pipe(
@@ -478,9 +497,23 @@ const make = Effect.gen(function* () {
     });
   });
 
-  const restoreCompaction = Effect.fnUntraced(function* (threadId: ThreadId, fromRunning = false) {
+  const restoreCompaction = Effect.fnUntraced(function* (
+    threadId: ThreadId,
+    fromRunning = false,
+    compactionToken?: object,
+  ) {
+    const currentCompactionToken = compactingThreadIds.get(threadId);
+    if (
+      compactionToken !== undefined &&
+      currentCompactionToken !== undefined &&
+      currentCompactionToken !== compactionToken
+    ) {
+      return;
+    }
     if (stoppingThreadIds.has(threadId)) {
-      compactingThreadIds.delete(threadId);
+      if (compactionToken !== undefined && currentCompactionToken === compactionToken) {
+        clearOperationToken(compactingThreadIds, threadId, compactionToken);
+      }
       return;
     }
     const thread = yield* resolveThreadShell(threadId);
@@ -492,8 +525,18 @@ const make = Effect.gen(function* () {
     )
       return;
     const completedAt = DateTime.formatIso(yield* DateTime.now);
+    const latestCompactionToken = compactingThreadIds.get(threadId);
+    if (
+      compactionToken !== undefined &&
+      latestCompactionToken !== undefined &&
+      latestCompactionToken !== compactionToken
+    ) {
+      return;
+    }
     if (stoppingThreadIds.has(threadId)) {
-      compactingThreadIds.delete(threadId);
+      if (compactionToken !== undefined && latestCompactionToken === compactionToken) {
+        clearOperationToken(compactingThreadIds, threadId, compactionToken);
+      }
       return;
     }
     yield* setThreadSession({
@@ -749,23 +792,6 @@ const make = Effect.gen(function* () {
           .pipe(Effect.forkDetach)
       : Effect.void;
 
-    const startProviderSession = (input?: {
-      readonly resumeCursor?: unknown;
-      readonly provider?: ProviderDriverKind;
-    }) =>
-      providerService
-        .startSession(threadId, {
-          threadId,
-          ...(preferredProvider ? { provider: preferredProvider } : {}),
-          providerInstanceId: desiredInstanceId,
-          ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-          ...(thread.title ? { title: thread.title } : {}),
-          modelSelection: desiredModelSelection,
-          ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-          runtimeMode: desiredRuntimeMode,
-        })
-        .pipe(Effect.tap(() => refreshWorkspaceSnapshot));
-
     const bindSessionToThread = (session: ProviderSession) =>
       Effect.gen(function* () {
         if (session.providerInstanceId === undefined) {
@@ -794,6 +820,27 @@ const make = Effect.gen(function* () {
           createdAt,
         });
       });
+
+    const startProviderSession = (input?: {
+      readonly resumeCursor?: unknown;
+      readonly provider?: ProviderDriverKind;
+    }) =>
+      providerService
+        .startSession(
+          threadId,
+          {
+            threadId,
+            ...(preferredProvider ? { provider: preferredProvider } : {}),
+            providerInstanceId: desiredInstanceId,
+            ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+            ...(thread.title ? { title: thread.title } : {}),
+            modelSelection: desiredModelSelection,
+            ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+            runtimeMode: desiredRuntimeMode,
+          },
+          bindSessionToThread,
+        )
+        .pipe(Effect.tap(() => refreshWorkspaceSnapshot));
 
     const existingSessionThreadId =
       thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
@@ -859,12 +906,10 @@ const make = Effect.gen(function* () {
         runtimeMode: restartedSession.runtimeMode,
         cwd: restartedSession.cwd,
       });
-      yield* bindSessionToThread(restartedSession);
       return restartedSession.threadId;
     }
 
     const startedSession = yield* startProviderSession(undefined);
-    yield* bindSessionToThread(startedSession);
     return startedSession.threadId;
   });
 
@@ -1261,6 +1306,9 @@ const make = Effect.gen(function* () {
         return Effect.void;
       }
       const detail = formatFailureDetail(cause);
+      if (isProviderSessionSupersededCause(cause)) {
+        return appendTurnStartFailure("Provider turn start failed", detail).pipe(Effect.asVoid);
+      }
       return setThreadSessionErrorOnTurnStartFailure({
         threadId: event.payload.threadId,
         detail,
@@ -1373,6 +1421,9 @@ const make = Effect.gen(function* () {
         return Effect.void;
       }
       const detail = formatFailureDetail(cause);
+      if (isProviderSessionSupersededCause(cause)) {
+        return appendTurnStartFailure("Context compaction failed", detail).pipe(Effect.asVoid);
+      }
       if (!compactionSessionEnsured) {
         return setThreadSessionErrorOnTurnStartFailure({
           threadId: event.payload.threadId,
@@ -1383,19 +1434,7 @@ const make = Effect.gen(function* () {
           Effect.asVoid,
         );
       }
-      return appendTurnStartFailure("Context compaction failed", detail).pipe(
-        Effect.ensuring(
-          restoreCompaction(event.payload.threadId).pipe(
-            Effect.catchCause((restoreCause) =>
-              Effect.logWarning("failed to restore provider session after compaction failure", {
-                threadId: event.payload.threadId,
-                cause: Cause.pretty(restoreCause),
-              }),
-            ),
-          ),
-        ),
-        Effect.asVoid,
-      );
+      return appendTurnStartFailure("Context compaction failed", detail).pipe(Effect.asVoid);
     };
     const recoverCompactionFailure = (cause: Cause.Cause<unknown>) =>
       Cause.hasInterruptsOnly(cause)
@@ -1437,7 +1476,8 @@ const make = Effect.gen(function* () {
         yield* deleteQueuedTurnStart(event.sequence);
         return;
       }
-      compactingThreadIds.add(event.payload.threadId);
+      const compactionToken = {};
+      compactingThreadIds.set(event.payload.threadId, compactionToken);
       yield* registerInFlightTurnStart(key);
       yield* Effect.gen(function* () {
         yield* ensureSessionForThread(
@@ -1455,9 +1495,14 @@ const make = Effect.gen(function* () {
           event.payload.threadId,
           event.payload.modelSelection,
           event.payload.messageId,
+          (exit) =>
+            Exit.isSuccess(exit)
+              ? restoreCompaction(event.payload.threadId, true, compactionToken)
+              : Cause.hasInterruptsOnly(exit.cause) || isProviderSessionSupersededCause(exit.cause)
+                ? Effect.void
+                : restoreCompaction(event.payload.threadId, false, compactionToken),
         );
       }).pipe(
-        Effect.andThen(restoreCompaction(event.payload.threadId, true)),
         Effect.matchCauseEffect({
           onFailure: (cause) =>
             Cause.hasInterruptsOnly(cause)
@@ -1468,9 +1513,9 @@ const make = Effect.gen(function* () {
           onSuccess: () => deleteQueuedTurnStart(event.sequence),
         }),
         Effect.ensuring(
-          Effect.sync(() => void compactingThreadIds.delete(event.payload.threadId)).pipe(
-            Effect.andThen(releaseInFlightTurnStart(key)),
-          ),
+          Effect.sync(() =>
+            clearOperationToken(compactingThreadIds, event.payload.threadId, compactionToken),
+          ).pipe(Effect.andThen(releaseInFlightTurnStart(key))),
         ),
         Effect.forkScoped,
       );
@@ -1558,53 +1603,62 @@ const make = Effect.gen(function* () {
           return;
         }
 
-        yield* providerService.stopSession({ threadId: event.payload.threadId }).pipe(
-          Effect.catchCause((stopCause) => {
-            if (Cause.hasInterruptsOnly(stopCause)) {
-              return Effect.interrupt;
-            }
-            return Effect.logWarning(
-              "provider command reactor failed to stop session after interrupt failure",
-              {
-                threadId: event.payload.threadId,
-                cause: Cause.pretty(stopCause),
-                originalCause: Cause.pretty(cause),
-              },
-            );
-          }),
-        );
-        const stoppedThread = yield* resolveThreadShell(event.payload.threadId);
-        const stoppedSession = stoppedThread?.session;
-        if (
-          !stoppedSession ||
-          stoppedSession.status === "stopped" ||
-          stoppedSession.status === "ready" ||
-          (event.payload.turnId !== undefined &&
-            stoppedSession.activeTurnId !== null &&
-            stoppedSession.activeTurnId !== event.payload.turnId)
-        ) {
-          return;
-        }
+        const settleStopAfterInterruptFailure = (exit: Exit.Exit<void, ProviderServiceError>) =>
+          Exit.isFailure(exit) &&
+          (Cause.hasInterruptsOnly(exit.cause) || isProviderSessionSupersededCause(exit.cause))
+            ? Effect.void
+            : Effect.gen(function* () {
+                const stoppedThread = yield* resolveThreadShell(event.payload.threadId);
+                const stoppedSession = stoppedThread?.session;
+                if (
+                  !stoppedSession ||
+                  stoppedSession.status === "stopped" ||
+                  stoppedSession.status === "ready" ||
+                  (event.payload.turnId !== undefined &&
+                    stoppedSession.activeTurnId !== null &&
+                    stoppedSession.activeTurnId !== event.payload.turnId)
+                ) {
+                  return;
+                }
 
-        yield* setThreadSession({
-          threadId: event.payload.threadId,
-          session: {
-            ...stoppedSession,
-            status: "stopped",
-            activeTurnId: null,
-            lastError: detail,
-            updatedAt: event.payload.createdAt,
-          },
-          createdAt: event.payload.createdAt,
-        });
-        yield* appendProviderFailureActivity({
-          threadId: event.payload.threadId,
-          kind: "provider.turn.interrupt.failed",
-          summary: "Provider turn interrupt failed",
-          detail,
-          turnId: event.payload.turnId ?? null,
-          createdAt: event.payload.createdAt,
-        });
+                yield* setThreadSession({
+                  threadId: event.payload.threadId,
+                  session: {
+                    ...stoppedSession,
+                    status: "stopped",
+                    activeTurnId: null,
+                    lastError: detail,
+                    updatedAt: event.payload.createdAt,
+                  },
+                  createdAt: event.payload.createdAt,
+                });
+                yield* appendProviderFailureActivity({
+                  threadId: event.payload.threadId,
+                  kind: "provider.turn.interrupt.failed",
+                  summary: "Provider turn interrupt failed",
+                  detail,
+                  turnId: event.payload.turnId ?? null,
+                  createdAt: event.payload.createdAt,
+                });
+              });
+
+        yield* providerService
+          .stopSession({ threadId: event.payload.threadId }, settleStopAfterInterruptFailure)
+          .pipe(
+            Effect.catchCause((stopCause) => {
+              if (Cause.hasInterruptsOnly(stopCause)) {
+                return Effect.interrupt;
+              }
+              return Effect.logWarning(
+                "provider command reactor failed to stop session after interrupt failure",
+                {
+                  threadId: event.payload.threadId,
+                  cause: Cause.pretty(stopCause),
+                  originalCause: Cause.pretty(cause),
+                },
+              );
+            }),
+          );
       });
     };
 
@@ -1745,41 +1799,16 @@ const make = Effect.gen(function* () {
     }
 
     const now = event.payload.createdAt;
-    const wasCompacting = compactingThreadIds.has(thread.id);
-    stoppingThreadIds.add(thread.id);
-    const clearStopping = Effect.sync(() => void stoppingThreadIds.delete(thread.id));
-    yield* (
-      thread.session && thread.session.status !== "stopped"
-        ? providerService.stopSession({ threadId: thread.id })
-        : Effect.void
-    ).pipe(
-      Effect.matchCauseEffect({
-        onFailure: (cause) => {
-          if (Cause.hasInterruptsOnly(cause)) {
-            return Effect.interrupt;
-          }
-          const detail = formatFailureDetail(cause);
-          return Effect.sync(() => {
-            stoppingThreadIds.delete(thread.id);
-            return wasCompacting && !compactingThreadIds.has(thread.id);
-          }).pipe(
-            Effect.flatMap((compactionSettled) =>
-              compactionSettled ? restoreCompaction(thread.id) : Effect.void,
-            ),
-            Effect.andThen(
-              appendProviderFailureActivity({
-                threadId: thread.id,
-                kind: "provider.session.stop.failed",
-                summary: "Provider session stop failed",
-                detail,
-                turnId: null,
-                createdAt: now,
-              }),
-            ),
-          );
-        },
-        onSuccess: () =>
-          setThreadSession({
+    const compactionToken = compactingThreadIds.get(thread.id);
+    const stoppingToken = {};
+    stoppingThreadIds.set(thread.id, stoppingToken);
+    const clearStopping = Effect.sync(() =>
+      clearOperationToken(stoppingThreadIds, thread.id, stoppingToken),
+    );
+    const settleStop = (exit: Exit.Exit<void, ProviderServiceError>) =>
+      Effect.gen(function* () {
+        if (Exit.isSuccess(exit)) {
+          yield* setThreadSession({
             threadId: thread.id,
             session: {
               threadId: thread.id,
@@ -1794,7 +1823,40 @@ const make = Effect.gen(function* () {
               updatedAt: now,
             },
             createdAt: now,
-          }),
+          });
+          return;
+        }
+
+        if (Cause.hasInterruptsOnly(exit.cause) || isProviderSessionSupersededCause(exit.cause)) {
+          return;
+        }
+
+        yield* clearStopping;
+        if (
+          compactionToken !== undefined &&
+          compactingThreadIds.get(thread.id) !== compactionToken
+        ) {
+          yield* restoreCompaction(thread.id, false, compactionToken);
+        }
+      });
+
+    yield* providerService.stopSession({ threadId: thread.id }, settleStop).pipe(
+      Effect.matchCauseEffect({
+        onFailure: (cause) => {
+          if (Cause.hasInterruptsOnly(cause)) {
+            return Effect.interrupt;
+          }
+          const detail = formatFailureDetail(cause);
+          return appendProviderFailureActivity({
+            threadId: thread.id,
+            kind: "provider.session.stop.failed",
+            summary: "Provider session stop failed",
+            detail,
+            turnId: null,
+            createdAt: now,
+          });
+        },
+        onSuccess: () => Effect.void,
       }),
       Effect.ensuring(clearStopping),
     );

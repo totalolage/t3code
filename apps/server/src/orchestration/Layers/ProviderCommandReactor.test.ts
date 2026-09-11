@@ -10,6 +10,9 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSetupError,
+  type ProviderSendTurnInput,
+  type ProviderSessionStartInput,
+  type ProviderStopSessionInput,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import {
@@ -32,6 +35,7 @@ import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -42,7 +46,17 @@ import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { serviceUpdateCoordinator } from "../../cloud/serviceUpdateCoordinator.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 import {
+  ProviderAdapterProcessError,
   ProviderAdapterRequestError,
+  ProviderAdapterSessionClosedError,
+  ProviderAdapterSessionNotFoundError,
+  ProviderAdapterValidationError,
+  ProviderInstanceNotFoundError,
+  ProviderSessionDirectoryPersistenceError,
+  ProviderSessionNotFoundError,
+  ProviderSessionSupersededError,
+  ProviderUnsupportedError,
+  ProviderValidationError,
   ProviderWorkspaceMissingError,
   type ProviderServiceError,
 } from "../../provider/Errors.ts";
@@ -83,6 +97,45 @@ const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
+
+const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
+const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
+const isProviderAdapterSessionClosedError = Schema.is(ProviderAdapterSessionClosedError);
+const isProviderAdapterSessionNotFoundError = Schema.is(ProviderAdapterSessionNotFoundError);
+const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
+const isProviderInstanceNotFoundError = Schema.is(ProviderInstanceNotFoundError);
+const isProviderSessionDirectoryPersistenceError = Schema.is(
+  ProviderSessionDirectoryPersistenceError,
+);
+const isProviderSessionNotFoundError = Schema.is(ProviderSessionNotFoundError);
+const isProviderSessionSupersededError = Schema.is(ProviderSessionSupersededError);
+const isProviderUnsupportedError = Schema.is(ProviderUnsupportedError);
+const isProviderValidationError = Schema.is(ProviderValidationError);
+const isProviderWorkspaceMissingError = Schema.is(ProviderWorkspaceMissingError);
+
+const normalizeProviderServiceError = (operation: string, cause: unknown): ProviderServiceError => {
+  if (
+    isProviderAdapterProcessError(cause) ||
+    isProviderAdapterRequestError(cause) ||
+    isProviderAdapterSessionClosedError(cause) ||
+    isProviderAdapterSessionNotFoundError(cause) ||
+    isProviderAdapterValidationError(cause) ||
+    isProviderInstanceNotFoundError(cause) ||
+    isProviderSessionDirectoryPersistenceError(cause) ||
+    isProviderSessionNotFoundError(cause) ||
+    isProviderSessionSupersededError(cause) ||
+    isProviderUnsupportedError(cause) ||
+    isProviderValidationError(cause) ||
+    isProviderWorkspaceMissingError(cause)
+  ) {
+    return cause;
+  }
+  return new ProviderValidationError({
+    operation,
+    issue: cause instanceof Error ? cause.message : String(cause),
+    cause,
+  });
+};
 
 const assistantQuoteText = "Retain the reconnect backoff.";
 const assistantCitation = {
@@ -188,6 +241,8 @@ describe("ProviderCommandReactor", () => {
     readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly compactThreadEffect?: () => ReturnType<ProviderServiceShape["compactThread"]>;
     readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
+    readonly suppressCompactSettledHook?: (exit: Exit.Exit<void, ProviderServiceError>) => boolean;
+    readonly suppressStopSettledHook?: (exit: Exit.Exit<void, ProviderServiceError>) => boolean;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderServiceError>;
@@ -212,67 +267,109 @@ describe("ProviderCommandReactor", () => {
       model: "gpt-5-codex",
     };
     const startSessionEffect = input?.startSessionEffect;
-    const startSession = vi.fn((_: unknown, input: unknown) => {
-      const sessionIndex = nextSessionIndex++;
-      const resumeCursor =
-        typeof input === "object" && input !== null && "resumeCursor" in input
-          ? input.resumeCursor
-          : undefined;
-      const threadId =
-        typeof input === "object" &&
-        input !== null &&
-        "threadId" in input &&
-        typeof input.threadId === "string"
-          ? ThreadId.make(input.threadId)
-          : ThreadId.make(`thread-${sessionIndex}`);
-      const inputModelSelection =
-        typeof input === "object" && input !== null && "modelSelection" in input
-          ? (input.modelSelection as ModelSelection | undefined)
-          : undefined;
-      const providerInstanceId =
-        typeof input === "object" && input !== null && "providerInstanceId" in input
-          ? (input.providerInstanceId as ProviderInstanceId | undefined)
-          : inputModelSelection?.instanceId;
-      const provider =
-        typeof input === "object" &&
-        input !== null &&
-        "provider" in input &&
-        typeof input.provider === "string"
-          ? (input.provider as ProviderSession["provider"])
-          : ProviderDriverKind.make(inputModelSelection?.instanceId ?? modelSelection.instanceId);
-      const session: ProviderSession = {
-        provider,
-        ...(providerInstanceId ? { providerInstanceId } : {}),
-        status: "ready" as const,
-        runtimeMode:
+    const runSettledHook = <E>(
+      effect: Effect.Effect<void, ProviderServiceError>,
+      onSettled:
+        | ((exit: Exit.Exit<void, ProviderServiceError>) => Effect.Effect<void, E>)
+        | undefined,
+      suppressHook: ((exit: Exit.Exit<void, ProviderServiceError>) => boolean) | undefined,
+      operation: string,
+    ): Effect.Effect<void, ProviderServiceError> =>
+      effect.pipe(
+        Effect.exit,
+        Effect.flatMap((exit) => {
+          const continueWithExit = Exit.isSuccess(exit)
+            ? Effect.void
+            : Effect.failCause(exit.cause);
+          if (onSettled === undefined || suppressHook?.(exit) === true) {
+            return continueWithExit;
+          }
+          return onSettled(exit).pipe(
+            Effect.mapError((cause) => normalizeProviderServiceError(operation, cause)),
+            Effect.matchCauseEffect({
+              onFailure: (hookCause) =>
+                Exit.isFailure(exit) ? Effect.failCause(exit.cause) : Effect.failCause(hookCause),
+              onSuccess: () => continueWithExit,
+            }),
+          );
+        }),
+      );
+    const startSession = vi.fn<ProviderServiceShape["startSession"]>(
+      <E>(
+        _: ThreadId,
+        input: ProviderSessionStartInput,
+        onStarted?: (session: ProviderSession) => Effect.Effect<void, E>,
+      ) => {
+        const sessionIndex = nextSessionIndex++;
+        const resumeCursor =
+          typeof input === "object" && input !== null && "resumeCursor" in input
+            ? input.resumeCursor
+            : undefined;
+        const threadId =
           typeof input === "object" &&
           input !== null &&
-          "runtimeMode" in input &&
-          (input.runtimeMode === "approval-required" || input.runtimeMode === "full-access")
-            ? input.runtimeMode
-            : "full-access",
-        ...(typeof input === "object" &&
-        input !== null &&
-        "cwd" in input &&
-        typeof input.cwd === "string"
-          ? { cwd: input.cwd }
-          : {}),
-        ...((inputModelSelection?.model ?? modelSelection.model)
-          ? { model: inputModelSelection?.model ?? modelSelection.model }
-          : {}),
-        threadId,
-        resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
-        createdAt: now,
-        updatedAt: now,
-      };
-      return (startSessionEffect?.(session) ?? Effect.succeed(session)).pipe(
-        Effect.tap((startedSession) =>
-          Effect.sync(() => {
-            runtimeSessions.push(startedSession);
-          }),
-        ),
-      );
-    });
+          "threadId" in input &&
+          typeof input.threadId === "string"
+            ? ThreadId.make(input.threadId)
+            : ThreadId.make(`thread-${sessionIndex}`);
+        const inputModelSelection =
+          typeof input === "object" && input !== null && "modelSelection" in input
+            ? (input.modelSelection as ModelSelection | undefined)
+            : undefined;
+        const providerInstanceId =
+          typeof input === "object" && input !== null && "providerInstanceId" in input
+            ? (input.providerInstanceId as ProviderInstanceId | undefined)
+            : inputModelSelection?.instanceId;
+        const provider =
+          typeof input === "object" &&
+          input !== null &&
+          "provider" in input &&
+          typeof input.provider === "string"
+            ? (input.provider as ProviderSession["provider"])
+            : ProviderDriverKind.make(inputModelSelection?.instanceId ?? modelSelection.instanceId);
+        const session: ProviderSession = {
+          provider,
+          ...(providerInstanceId ? { providerInstanceId } : {}),
+          status: "ready" as const,
+          runtimeMode:
+            typeof input === "object" &&
+            input !== null &&
+            "runtimeMode" in input &&
+            (input.runtimeMode === "approval-required" || input.runtimeMode === "full-access")
+              ? input.runtimeMode
+              : "full-access",
+          ...(typeof input === "object" &&
+          input !== null &&
+          "cwd" in input &&
+          typeof input.cwd === "string"
+            ? { cwd: input.cwd }
+            : {}),
+          ...((inputModelSelection?.model ?? modelSelection.model)
+            ? { model: inputModelSelection?.model ?? modelSelection.model }
+            : {}),
+          threadId,
+          resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
+          createdAt: now,
+          updatedAt: now,
+        };
+        return (startSessionEffect?.(session) ?? Effect.succeed(session)).pipe(
+          Effect.tap((startedSession) =>
+            Effect.sync(() => {
+              runtimeSessions.push(startedSession);
+            }),
+          ),
+          Effect.tap((startedSession) =>
+            onStarted === undefined
+              ? Effect.void
+              : onStarted(startedSession).pipe(
+                  Effect.mapError((cause) =>
+                    normalizeProviderServiceError("ProviderService.startSession.onStarted", cause),
+                  ),
+                ),
+          ),
+        );
+      },
+    );
     const sendTurn = vi.fn<ProviderServiceShape["sendTurn"]>(
       () =>
         input?.sendTurnEffect?.() ??
@@ -285,28 +382,43 @@ describe("ProviderCommandReactor", () => {
       () => input?.interruptTurnEffect?.() ?? Effect.void,
     );
     const compactThread = vi.fn<ProviderServiceShape["compactThread"]>(
-      () => input?.compactThreadEffect?.() ?? Effect.void,
+      <E>(
+        _threadId: ThreadId,
+        _modelSelection?: ProviderSendTurnInput["modelSelection"],
+        _requestId?: MessageId,
+        onSettled?: (exit: Exit.Exit<void, ProviderServiceError>) => Effect.Effect<void, E>,
+      ) =>
+        runSettledHook(
+          input?.compactThreadEffect?.() ?? Effect.void,
+          onSettled,
+          input?.suppressCompactSettledHook,
+          "ProviderService.compactThread.onSettled",
+        ),
     );
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
     const respondToUserInput = vi.fn<ProviderServiceShape["respondToUserInput"]>(() => Effect.void);
-    const stopSession = vi.fn((stopInput: unknown) =>
-      (input?.stopSessionEffect?.() ?? Effect.void).pipe(
-        Effect.tap(() =>
-          Effect.sync(() => {
-            const threadId =
-              typeof stopInput === "object" && stopInput !== null && "threadId" in stopInput
-                ? (stopInput as { threadId?: ThreadId }).threadId
-                : undefined;
-            if (!threadId) {
-              return;
-            }
-            const index = runtimeSessions.findIndex((session) => session.threadId === threadId);
-            if (index >= 0) {
-              runtimeSessions.splice(index, 1);
-            }
-          }),
+    const stopSession = vi.fn<ProviderServiceShape["stopSession"]>(
+      <E>(
+        stopInput: ProviderStopSessionInput,
+        onSettled?: (exit: Exit.Exit<void, ProviderServiceError>) => Effect.Effect<void, E>,
+      ) =>
+        runSettledHook(
+          (input?.stopSessionEffect?.() ?? Effect.void).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                const index = runtimeSessions.findIndex(
+                  (session) => session.threadId === stopInput.threadId,
+                );
+                if (index >= 0) {
+                  runtimeSessions.splice(index, 1);
+                }
+              }),
+            ),
+          ),
+          onSettled,
+          input?.suppressStopSettledHook,
+          "ProviderService.stopSession.onSettled",
         ),
-      ),
     );
     const renameBranch = vi.fn((input: unknown) =>
       Effect.succeed({
@@ -374,13 +486,14 @@ describe("ProviderCommandReactor", () => {
 
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
     const service: ProviderServiceShape = {
-      startSession: startSession as ProviderServiceShape["startSession"],
+      startSession,
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
-      compactThread: compactThread as ProviderServiceShape["compactThread"],
+      compactThread,
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
-      stopSession: stopSession as ProviderServiceShape["stopSession"],
+      stopSession,
+      stopAll: () => unsupported(),
       listSessions: () => Effect.succeed(runtimeSessions),
       getCapabilities: (_provider) =>
         Effect.succeed({
@@ -414,6 +527,7 @@ describe("ProviderCommandReactor", () => {
       },
       rollbackConversation: () => unsupported(),
       uploadFeedback: () => unsupported(),
+      registerRuntimeEventConsumer: () => Effect.void,
       get streamEvents() {
         return Stream.fromPubSub(runtimeEventPubSub);
       },
@@ -1708,6 +1822,213 @@ describe("ProviderCommandReactor", () => {
         (entry) => entry.id === threadId,
       );
       expect(runningThread?.session?.status).toBe("running");
+    }),
+  );
+  effectIt.effect("does not restore a replacement session after a stale compaction completes", () =>
+    Effect.gen(function* () {
+      const compactionStarted = yield* Deferred.make<void>();
+      const releaseCompaction = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          compactThreadEffect: () =>
+            Deferred.succeed(compactionStarted, undefined).pipe(
+              Effect.asVoid,
+              Effect.andThen(Deferred.await(releaseCompaction)),
+            ),
+          suppressCompactSettledHook: () => true,
+        }),
+      );
+      const threadId = ThreadId.make("thread-1");
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-stale-compaction-context"),
+        threadId,
+        message: {
+          messageId: asMessageId("message-stale-compaction-context"),
+          role: "user",
+          text: "existing context",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+      yield* Effect.promise(() => harness.drain());
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-stale-compaction-ready"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-stale-compaction"),
+        threadId,
+        message: {
+          messageId: asMessageId("message-stale-compaction"),
+          role: "user",
+          text: "/compact",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+      yield* Deferred.await(compactionStarted);
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-replacement-session"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex-replacement"),
+          runtimeMode: "full-access",
+          activeTurnId: asTurnId("replacement-turn"),
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+        createdAt: "2026-01-01T00:00:01.000Z",
+      });
+      yield* Deferred.succeed(releaseCompaction, undefined);
+      yield* Effect.promise(() => harness.drain());
+
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(thread?.session).toMatchObject({
+        status: "running",
+        providerInstanceId: ProviderInstanceId.make("codex-replacement"),
+        runtimeMode: "full-access",
+        activeTurnId: asTurnId("replacement-turn"),
+      });
+    }),
+  );
+
+  effectIt.effect("does not let a stale stop completion stop a replacement session", () =>
+    Effect.gen(function* () {
+      const stopStarted = yield* Deferred.make<void>();
+      const releaseStop = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          stopSessionEffect: () =>
+            Deferred.succeed(stopStarted, undefined).pipe(
+              Effect.asVoid,
+              Effect.andThen(Deferred.await(releaseStop)),
+            ),
+          suppressStopSettledHook: () => true,
+        }),
+      );
+      const threadId = ThreadId.make("thread-1");
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-stale-stop-old-session"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-stale-stop"),
+        threadId,
+        createdAt: now,
+      });
+      yield* Deferred.await(stopStarted);
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-stale-stop-replacement"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex-replacement"),
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+        createdAt: "2026-01-01T00:00:01.000Z",
+      });
+      yield* Deferred.succeed(releaseStop, undefined);
+      yield* Effect.promise(() => harness.drain());
+
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(thread?.session).toMatchObject({
+        status: "ready",
+        providerInstanceId: ProviderInstanceId.make("codex-replacement"),
+        runtimeMode: "full-access",
+      });
+    }),
+  );
+  effectIt.effect("does not mark a superseded turn start as a session error", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          startSessionEffect: () =>
+            Effect.fail(
+              new ProviderSessionSupersededError({
+                operation: "ProviderSessionOperations.start",
+                threadId: "thread-1",
+                detail: "replacement session owns the thread",
+              }),
+            ),
+        }),
+      );
+      const threadId = ThreadId.make("thread-1");
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-superseded-turn-start"),
+        threadId,
+        message: {
+          messageId: asMessageId("message-superseded-turn-start"),
+          role: "user",
+          text: "retry after replacement",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+      yield* Effect.promise(() => harness.drain());
+
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(thread?.session).toMatchObject({ status: "starting", lastError: null });
+      expect(thread?.activities).toContainEqual(
+        expect.objectContaining({ kind: "provider.turn.start.failed", tone: "error" }),
+      );
     }),
   );
   effectIt.effect("projects starting before a slow provider session finishes", () =>
@@ -3998,7 +4319,9 @@ describe("ProviderCommandReactor", () => {
           summary: "Provider turn interrupt failed",
           payload: { detail: "provider session disappeared" },
         });
-        expect(harness.stopSession).toHaveBeenCalledWith({ threadId: ThreadId.make("thread-1") });
+        expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({
+          threadId: ThreadId.make("thread-1"),
+        });
       }),
   );
 
@@ -4051,7 +4374,9 @@ describe("ProviderCommandReactor", () => {
         activeTurnId: null,
         lastError: "provider session disappeared",
       });
-      expect(harness.stopSession).toHaveBeenCalledWith({ threadId: ThreadId.make("thread-1") });
+      expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({
+        threadId: ThreadId.make("thread-1"),
+      });
       expect(
         thread?.activities.find((activity) => activity.kind === "provider.turn.interrupt.failed"),
       ).toMatchObject({ payload: { detail: "provider session disappeared" } });
@@ -4131,6 +4456,92 @@ describe("ProviderCommandReactor", () => {
         updatedAt: completedAt,
       });
       expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(
+        thread?.activities.some((activity) => activity.kind === "provider.turn.interrupt.failed"),
+      ).toBe(false);
+    }),
+  );
+
+  effectIt.effect("does not let a stale interrupt cleanup stop a replacement session", () =>
+    Effect.gen(function* () {
+      const stopStarted = yield* Deferred.make<void>();
+      const releaseStop = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          interruptTurnEffect: () =>
+            Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: "codex",
+                method: "thread.interrupt",
+                detail: "provider session disappeared",
+              }),
+            ),
+          stopSessionEffect: () =>
+            Deferred.succeed(stopStarted, undefined).pipe(
+              Effect.asVoid,
+              Effect.andThen(Deferred.await(releaseStop)),
+            ),
+          suppressStopSettledHook: () => true,
+        }),
+      );
+      const threadId = ThreadId.make("thread-1");
+      const turnId = asTurnId("turn-1");
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-stale-interrupt-old-session"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-stale-interrupt"),
+        threadId,
+        turnId,
+        createdAt: now,
+      });
+      yield* Deferred.await(stopStarted);
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-stale-interrupt-replacement"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex-replacement"),
+          runtimeMode: "full-access",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+        createdAt: "2026-01-01T00:00:01.000Z",
+      });
+      yield* Deferred.succeed(releaseStop, undefined);
+      yield* Effect.promise(() => harness.drain());
+
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(thread?.session).toMatchObject({
+        status: "running",
+        providerInstanceId: ProviderInstanceId.make("codex-replacement"),
+        runtimeMode: "full-access",
+        activeTurnId: turnId,
+        lastError: null,
+      });
       expect(
         thread?.activities.some((activity) => activity.kind === "provider.turn.interrupt.failed"),
       ).toBe(false);
@@ -4593,6 +5004,32 @@ describe("ProviderCommandReactor", () => {
       }),
   );
 
+  effectIt.effect("routes an inactive thread stop through the provider service", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() => createHarness());
+      const threadId = ThreadId.make("thread-1");
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-session-stop-inactive"),
+        threadId,
+        createdAt: now,
+      });
+      yield* Effect.promise(() => harness.drain());
+
+      expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId });
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(thread?.session).toMatchObject({
+        status: "stopped",
+        providerName: null,
+        activeTurnId: null,
+      });
+    }),
+  );
+
   effectIt.effect("stops a provider session without reading unrelated message bodies", () =>
     Effect.gen(function* () {
       const harness = yield* Effect.promise(() => createHarness({ unreadableHistory: true }));
@@ -4623,7 +5060,9 @@ describe("ProviderCommandReactor", () => {
       });
 
       yield* Effect.promise(() => harness.drain());
-      expect(harness.stopSession).toHaveBeenCalledWith({ threadId: ThreadId.make("thread-1") });
+      expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({
+        threadId: ThreadId.make("thread-1"),
+      });
       const thread = yield* harness.snapshotQuery
         .getThreadShellById(ThreadId.make("thread-1"))
         .pipe(Effect.map(Option.getOrThrow));

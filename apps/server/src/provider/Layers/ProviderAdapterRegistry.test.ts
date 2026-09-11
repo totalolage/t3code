@@ -144,6 +144,7 @@ const fakeInstanceRegistryLayer = Layer.succeed(ProviderInstanceRegistry.Provide
   // Tests never drive changes through this fake; acquire a throwaway
   // subscription on an unused PubSub so the shape is satisfied.
   subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) => PubSub.subscribe(pubsub)),
+  registerRetirementHooks: () => Effect.void,
 });
 
 const layer = Layer.mergeAll(

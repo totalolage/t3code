@@ -57,6 +57,16 @@ export interface ProviderAdapterRegistryShape {
    * and watcher startup should use this, then fork `Stream.fromSubscription`.
    */
   readonly subscribeChanges: Effect.Effect<PubSub.Subscription<void>, never, Scope.Scope>;
+  readonly registerRetirementHooks: (hooks: {
+    readonly beforeClose: (
+      instanceId: ProviderInstanceId,
+      adapter: ProviderAdapterShape<ProviderAdapterError>,
+    ) => Effect.Effect<void>;
+    readonly afterClose: (
+      instanceId: ProviderInstanceId,
+      adapter: ProviderAdapterShape<ProviderAdapterError>,
+    ) => Effect.Effect<void>;
+  }) => Effect.Effect<void, never, Scope.Scope>;
 }
 
 /**
