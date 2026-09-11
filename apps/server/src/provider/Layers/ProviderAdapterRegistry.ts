@@ -72,6 +72,7 @@ const makeProviderAdapterRegistry = Effect.fn("makeProviderAdapterRegistry")(fun
     getInstanceInfo,
     listInstances,
     subscribeChanges: registry.subscribeChanges,
+    registerRetirementHooks: registry.registerRetirementHooks,
   } satisfies ProviderAdapterRegistryShape;
 });
 

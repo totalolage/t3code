@@ -138,6 +138,8 @@ function createProviderServiceHarness(
       }),
     rollbackConversation,
     uploadFeedback: () => unsupported(),
+    registerRuntimeEventConsumer: () => Effect.void,
+    stopAll: () => Effect.void,
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },

@@ -886,6 +886,16 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const abortStarted = promiseWithResolvers<void>();
       const abortRelease = promiseWithResolvers<void>();
       runtimeMock.state.createdSessionIds.push("ses_old", "ses_replacement");
+      const lifecycleFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type === "session.started" || event.type === "session.exited"),
+        ),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
 
       const oldSession = yield* adapter.startSession({
         provider: ProviderDriverKind.make("opencode"),
@@ -899,19 +909,27 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const oldStop = yield* adapter.stopSession(threadId).pipe(Effect.forkChild);
       yield* Effect.promise(() => abortStarted.promise);
 
-      const replacement = yield* adapter.startSession({
-        provider: ProviderDriverKind.make("opencode"),
-        threadId,
-        runtimeMode: "full-access",
-      });
+      const replacementFiber = yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
       NodeAssert.deepEqual(oldSession.resumeCursor, { schemaVersion: 1, sessionId: "ses_old" });
+
+      abortRelease.resolve(undefined);
+      yield* Fiber.join(oldStop);
+      const replacement = yield* Fiber.join(replacementFiber);
+      const lifecycle = Array.from(yield* Fiber.join(lifecycleFiber));
+      NodeAssert.deepEqual(
+        lifecycle.map((event) => event.type),
+        ["session.started", "session.exited", "session.started"],
+      );
       NodeAssert.deepEqual(replacement.resumeCursor, {
         schemaVersion: 1,
         sessionId: "ses_replacement",
       });
-
-      abortRelease.resolve(undefined);
-      yield* Fiber.join(oldStop);
       const current = (yield* adapter.listSessions()).find(
         (session) => session.threadId === threadId,
       );
@@ -961,6 +979,20 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         schemaVersion: 1,
         sessionId: "ses_connecting_replacement",
       });
+      const newTurn = yield* adapter.sendTurn({
+        threadId,
+        input: "Continue after replacement",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("opencode"),
+          "opencode/kimi-k3",
+        ),
+      });
+      const exitedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId && event.type === "session.exited"),
+        Stream.takeUntil((event) => event.turnId === newTurn.turnId),
+        Stream.runCollect,
+        Effect.forkChild({ startImmediately: true }),
+      );
 
       abortRelease.resolve(undefined);
       const oldStartResult = yield* Fiber.join(oldStart);
@@ -970,8 +1002,113 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         (session) => session.threadId === threadId,
       );
       NodeAssert.deepEqual(current?.resumeCursor, replacement.resumeCursor);
+      NodeAssert.equal(current?.status, "running");
+      NodeAssert.equal(current?.activeTurnId, newTurn.turnId);
 
       yield* adapter.stopSession(threadId);
+      const exits = Array.from(yield* Fiber.join(exitedFiber));
+      NodeAssert.equal(exits.length, 1);
+      NodeAssert.deepEqual(
+        exits[0]?.type === "session.exited"
+          ? {
+              turnId: exits[0].turnId,
+              exitKind: exits[0].payload.exitKind,
+              recoverable: exits[0].payload.recoverable,
+            }
+          : undefined,
+        {
+          turnId: newTurn.turnId,
+          exitKind: "graceful",
+          recoverable: false,
+        },
+      );
+    }),
+  );
+
+  it.effect("joins a second stop after a connecting session fails startup", () =>
+    Effect.gen(function* () {
+      const adapterScope = yield* Scope.make("sequential");
+      const eventSubscribeObserved = promiseWithResolvers<void>();
+      const abortStarted = promiseWithResolvers<void>();
+      const abortRelease = promiseWithResolvers<void>();
+      const secondStopDone = yield* Deferred.make<void>();
+      let adapterScopeClosed = false;
+
+      try {
+        const adapterLayer = Layer.effect(
+          OpenCodeAdapter,
+          makeOpenCodeAdapter(openCodeAdapterTestSettings),
+        ).pipe(
+          Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        );
+        const context = yield* Layer.buildWithScope(adapterLayer, adapterScope);
+        const adapter = yield* Effect.service(OpenCodeAdapter).pipe(Effect.provide(context));
+        const threadId = asThreadId("thread-opencode-stopped-connecting-double-stop");
+        const rootSessionId = "http://127.0.0.1:9999/session";
+        runtimeMock.state.autoConnect = false;
+        runtimeMock.state.eventSubscribeObserved = () => eventSubscribeObserved.resolve(undefined);
+        runtimeMock.state.abortImplementation = async (sessionID) => {
+          if (sessionID === rootSessionId) {
+            abortStarted.resolve(undefined);
+            await abortRelease.promise;
+          }
+        };
+        const eventsFiber = yield* adapter.streamEvents.pipe(Stream.runCollect, Effect.forkChild);
+
+        const startFiber = yield* adapter
+          .startSession({
+            provider: ProviderDriverKind.make("opencode"),
+            threadId,
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+        yield* Effect.promise(() => eventSubscribeObserved.promise);
+
+        const firstStopFiber = yield* adapter
+          .stopSession(threadId)
+          .pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+        yield* Effect.promise(() => abortStarted.promise);
+
+        const startResult = yield* Fiber.join(startFiber);
+        NodeAssert.equal(startResult._tag, "Failure");
+        NodeAssert.equal(yield* adapter.hasSession(threadId), false);
+
+        const secondStopFiber = yield* adapter
+          .stopSession(threadId)
+          .pipe(
+            Effect.result,
+            Effect.ensuring(Deferred.succeed(secondStopDone, undefined).pipe(Effect.ignore)),
+            Effect.forkChild({ startImmediately: true }),
+          );
+        yield* Effect.yieldNow;
+        NodeAssert.equal(yield* Deferred.isDone(secondStopDone), false);
+
+        abortRelease.resolve(undefined);
+        const [firstStop, secondStop] = yield* Effect.all([
+          Fiber.join(firstStopFiber),
+          Fiber.join(secondStopFiber),
+        ]);
+        NodeAssert.equal(firstStop._tag, "Success");
+        NodeAssert.equal(secondStop._tag, "Success");
+        NodeAssert.deepEqual(runtimeMock.state.closeCalls, ["http://127.0.0.1:9999"]);
+        NodeAssert.deepEqual(yield* adapter.listSessions(), []);
+
+        yield* Scope.close(adapterScope, Exit.void);
+        adapterScopeClosed = true;
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const exited = events.filter((event) => event.type === "session.exited");
+        NodeAssert.equal(exited.length, 1);
+        NodeAssert.equal(exited[0]?.threadId, threadId);
+      } finally {
+        abortRelease.resolve(undefined);
+        if (!adapterScopeClosed) {
+          yield* Scope.close(adapterScope, Exit.void).pipe(Effect.ignore);
+        }
+      }
     }),
   );
 
@@ -1340,6 +1477,500 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect.each([
+    { teardown: "stopSession" },
+    { teardown: "stopAll" },
+    { teardown: "scope.close" },
+  ] as const)("emits one session.exited with the active turnId during $teardown", ({ teardown }) =>
+    Effect.gen(function* () {
+      const adapterScope = yield* Scope.make("sequential");
+      let adapterScopeClosed = false;
+
+      try {
+        const adapterLayer = Layer.effect(
+          OpenCodeAdapter,
+          makeOpenCodeAdapter(openCodeAdapterTestSettings),
+        ).pipe(
+          Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        );
+        const context = yield* Layer.buildWithScope(adapterLayer, adapterScope);
+        const adapter = yield* Effect.service(OpenCodeAdapter).pipe(Effect.provide(context));
+        const threadId = asThreadId(`thread-opencode-active-turn-${teardown}`);
+        const startedFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId && event.type === "turn.started"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const activeTurn = yield* adapter.sendTurn({
+          threadId,
+          input: "Keep working",
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("opencode"),
+            "opencode/kimi-k3",
+          ),
+        });
+        const started = Option.getOrThrow(yield* Fiber.join(startedFiber));
+        NodeAssert.equal(started.turnId, activeTurn.turnId);
+
+        // Start this collector after the turn gate so it owns every event
+        // emitted by teardown and can drain the queue when its adapter scope closes.
+        const eventsFiber = yield* adapter.streamEvents.pipe(Stream.runCollect, Effect.forkChild);
+
+        if (teardown === "stopSession") {
+          yield* adapter.stopSession(threadId);
+        } else if (teardown === "stopAll") {
+          yield* adapter.stopAll();
+          yield* adapter.stopAll();
+        } else {
+          yield* Scope.close(adapterScope, Exit.void);
+          adapterScopeClosed = true;
+        }
+
+        NodeAssert.deepEqual(yield* adapter.listSessions(), []);
+        NodeAssert.deepEqual(runtimeMock.state.abortCalls, ["http://127.0.0.1:9999/session"]);
+
+        if (!adapterScopeClosed) {
+          yield* Scope.close(adapterScope, Exit.void);
+          adapterScopeClosed = true;
+        }
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const exited = events.filter((event) => event.type === "session.exited");
+        NodeAssert.equal(exited.length, 1);
+        NodeAssert.equal(exited[0]?.turnId, activeTurn.turnId);
+        NodeAssert.equal(
+          exited[0]?.type === "session.exited" ? exited[0].payload.recoverable : undefined,
+          false,
+        );
+      } finally {
+        if (!adapterScopeClosed) {
+          yield* Scope.close(adapterScope, Exit.void).pipe(Effect.ignore);
+        }
+      }
+    }),
+  );
+
+  it.effect("joins an in-flight stop before closing the adapter scope", () =>
+    Effect.gen(function* () {
+      const adapterScope = yield* Scope.make("sequential");
+      const abortStarted = promiseWithResolvers<void>();
+      const abortRelease = promiseWithResolvers<void>();
+      const rootSessionId = "http://127.0.0.1:9999/session";
+      let adapterScopeClosed = false;
+
+      try {
+        const adapterLayer = Layer.effect(
+          OpenCodeAdapter,
+          makeOpenCodeAdapter(openCodeAdapterTestSettings),
+        ).pipe(
+          Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        );
+        const context = yield* Layer.buildWithScope(adapterLayer, adapterScope);
+        const adapter = yield* Effect.service(OpenCodeAdapter).pipe(Effect.provide(context));
+        const threadId = asThreadId("thread-opencode-stop-scope-race");
+        const startedFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId && event.type === "turn.started"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const activeTurn = yield* adapter.sendTurn({
+          threadId,
+          input: "Keep working",
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("opencode"),
+            "opencode/kimi-k3",
+          ),
+        });
+        const started = Option.getOrThrow(yield* Fiber.join(startedFiber));
+        NodeAssert.equal(started.turnId, activeTurn.turnId);
+
+        const eventsFiber = yield* adapter.streamEvents.pipe(Stream.runCollect, Effect.forkChild);
+        runtimeMock.state.abortImplementation = async (sessionID) => {
+          if (sessionID === rootSessionId) {
+            abortStarted.resolve(undefined);
+            await abortRelease.promise;
+          }
+        };
+        const stopFiber = yield* adapter.stopSession(threadId).pipe(Effect.forkChild);
+        yield* Effect.promise(() => abortStarted.promise);
+
+        const scopeCloseFiber = yield* Scope.close(adapterScope, Exit.void).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        abortRelease.resolve(undefined);
+        yield* Fiber.join(stopFiber);
+        yield* Fiber.join(scopeCloseFiber);
+        adapterScopeClosed = true;
+
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const exited = events.filter((event) => event.type === "session.exited");
+        NodeAssert.equal(exited.length, 1);
+        NodeAssert.equal(exited[0]?.threadId, threadId);
+        NodeAssert.equal(exited[0]?.turnId, activeTurn.turnId);
+        NodeAssert.deepEqual(yield* adapter.listSessions(), []);
+        NodeAssert.deepEqual(runtimeMock.state.abortCalls, [rootSessionId]);
+      } finally {
+        abortRelease.resolve(undefined);
+        if (!adapterScopeClosed) {
+          yield* Scope.close(adapterScope, Exit.void).pipe(Effect.ignore);
+        }
+      }
+    }),
+  );
+
+  it.effect("keeps an interrupted stop owner in charge through child cleanup", () =>
+    Effect.gen(function* () {
+      const adapterScope = yield* Scope.make("sequential");
+      const parentAbortStarted = promiseWithResolvers<void>();
+      const parentAbortRelease = promiseWithResolvers<void>();
+      const childAbortStarted = promiseWithResolvers<void>();
+      const childAbortRelease = promiseWithResolvers<void>();
+      const rootSessionId = "http://127.0.0.1:9999/session";
+      const childSessionId = "ses_interrupt_child";
+      let adapterScopeClosed = false;
+
+      try {
+        const adapterLayer = Layer.effect(
+          OpenCodeAdapter,
+          makeOpenCodeAdapter(openCodeAdapterTestSettings),
+        ).pipe(
+          Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        );
+        const context = yield* Layer.buildWithScope(adapterLayer, adapterScope);
+        const adapter = yield* Effect.service(OpenCodeAdapter).pipe(Effect.provide(context));
+        const threadId = asThreadId("thread-opencode-interrupted-stop-owner");
+        runtimeMock.state.sessionChildrenById.set(rootSessionId, [{ id: childSessionId }]);
+        runtimeMock.state.abortImplementation = async (sessionID) => {
+          if (sessionID === rootSessionId) {
+            parentAbortStarted.resolve(undefined);
+            await parentAbortRelease.promise;
+          }
+          if (sessionID === childSessionId) {
+            childAbortStarted.resolve(undefined);
+            await childAbortRelease.promise;
+          }
+        };
+
+        const exitObserved = yield* Deferred.make<void>();
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) =>
+            event.type === "session.exited"
+              ? Deferred.succeed(exitObserved, undefined).pipe(Effect.ignore)
+              : Effect.void,
+          ),
+          Stream.runCollect,
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const turn = yield* adapter.sendTurn({
+          threadId,
+          input: "Keep working",
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("opencode"),
+            "opencode/kimi-k3",
+          ),
+        });
+
+        const stopFiber = yield* adapter
+          .stopSession(threadId)
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.promise(() => parentAbortStarted.promise);
+        const interruptionFiber = yield* Fiber.interrupt(stopFiber).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        const secondStopFiber = yield* adapter
+          .stopSession(threadId)
+          .pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+        const scopeCloseFiber = yield* Scope.close(adapterScope, Exit.void).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+
+        parentAbortRelease.resolve(undefined);
+        yield* Effect.promise(() => childAbortStarted.promise);
+        yield* Effect.yieldNow;
+        NodeAssert.equal(yield* Deferred.isDone(exitObserved), false);
+        NodeAssert.deepEqual(runtimeMock.state.abortCalls, [rootSessionId, childSessionId]);
+        NodeAssert.deepEqual(runtimeMock.state.closeCalls, []);
+        const sessionsDuringCleanup = yield* adapter.listSessions();
+        const sessionDuringCleanup = sessionsDuringCleanup.find(
+          (session) => session.threadId === threadId,
+        );
+        NodeAssert.equal(sessionDuringCleanup?.status, "running");
+        NodeAssert.equal(sessionDuringCleanup?.activeTurnId, turn.turnId);
+
+        childAbortRelease.resolve(undefined);
+        yield* Fiber.join(interruptionFiber);
+        const stopExit = yield* Fiber.await(stopFiber);
+        NodeAssert.equal(Exit.hasInterrupts(stopExit), true);
+        const secondStop = yield* Fiber.join(secondStopFiber);
+        yield* Fiber.join(scopeCloseFiber);
+        adapterScopeClosed = true;
+
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const exited = events.filter((event) => event.type === "session.exited");
+        NodeAssert.equal(exited.length, 1);
+        NodeAssert.equal(exited[0]?.threadId, threadId);
+        NodeAssert.equal(exited[0]?.turnId, turn.turnId);
+        NodeAssert.equal(secondStop._tag, "Success");
+        NodeAssert.deepEqual(runtimeMock.state.closeCalls, ["http://127.0.0.1:9999"]);
+        NodeAssert.deepEqual(yield* adapter.listSessions(), []);
+      } finally {
+        parentAbortRelease.resolve(undefined);
+        childAbortRelease.resolve(undefined);
+        if (!adapterScopeClosed) {
+          yield* Scope.close(adapterScope, Exit.void).pipe(Effect.ignore);
+        }
+      }
+    }),
+  );
+
+  it.effect("joins a concurrent stopSession waiter behind stopAll", () =>
+    Effect.gen(function* () {
+      const adapterScope = yield* Scope.make("sequential");
+      const abortStarted = promiseWithResolvers<void>();
+      const abortRelease = promiseWithResolvers<void>();
+      const stopWaiterDone = yield* Deferred.make<void>();
+      const rootSessionId = "http://127.0.0.1:9999/session";
+      let adapterScopeClosed = false;
+
+      try {
+        const adapterLayer = Layer.effect(
+          OpenCodeAdapter,
+          makeOpenCodeAdapter(openCodeAdapterTestSettings),
+        ).pipe(
+          Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        );
+        const context = yield* Layer.buildWithScope(adapterLayer, adapterScope);
+        const adapter = yield* Effect.service(OpenCodeAdapter).pipe(Effect.provide(context));
+        const threadId = asThreadId("thread-opencode-stop-all-waiter");
+        runtimeMock.state.abortImplementation = async (sessionID) => {
+          if (sessionID === rootSessionId) {
+            abortStarted.resolve(undefined);
+            await abortRelease.promise;
+          }
+        };
+        const eventsFiber = yield* adapter.streamEvents.pipe(Stream.runCollect, Effect.forkChild);
+
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const stopAllFiber = yield* adapter
+          .stopAll()
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.promise(() => abortStarted.promise);
+
+        const stopSessionFiber = yield* adapter
+          .stopSession(threadId)
+          .pipe(
+            Effect.result,
+            Effect.ensuring(Deferred.succeed(stopWaiterDone, undefined).pipe(Effect.ignore)),
+            Effect.forkChild({ startImmediately: true }),
+          );
+        const scopeCloseFiber = yield* Scope.close(adapterScope, Exit.void).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Effect.yieldNow;
+        NodeAssert.equal(yield* Deferred.isDone(stopWaiterDone), false);
+
+        abortRelease.resolve(undefined);
+        yield* Fiber.join(stopAllFiber);
+        const stopResult = yield* Fiber.join(stopSessionFiber);
+        yield* Fiber.join(scopeCloseFiber);
+        adapterScopeClosed = true;
+
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const exited = events.filter((event) => event.type === "session.exited");
+        NodeAssert.equal(stopResult._tag, "Success");
+        NodeAssert.equal(exited.length, 1);
+        NodeAssert.equal(exited[0]?.threadId, threadId);
+        NodeAssert.deepEqual(runtimeMock.state.abortCalls, [rootSessionId]);
+        NodeAssert.deepEqual(runtimeMock.state.closeCalls, ["http://127.0.0.1:9999"]);
+        NodeAssert.deepEqual(yield* adapter.listSessions(), []);
+      } finally {
+        abortRelease.resolve(undefined);
+        if (!adapterScopeClosed) {
+          yield* Scope.close(adapterScope, Exit.void).pipe(Effect.ignore);
+        }
+      }
+    }),
+  );
+
+  it.effect("bounds an interrupted stop when native abort never resolves", () =>
+    Effect.gen(function* () {
+      const adapterScope = yield* Scope.make("sequential");
+      const abortStarted = promiseWithResolvers<void>();
+      const stopCompleted = yield* Deferred.make<void>();
+      const interruptionCompleted = yield* Deferred.make<void>();
+      const rootSessionId = "http://127.0.0.1:9999/session";
+      let adapterScopeClosed = false;
+
+      try {
+        const adapterLayer = Layer.effect(
+          OpenCodeAdapter,
+          makeOpenCodeAdapter(openCodeAdapterTestSettings),
+        ).pipe(
+          Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        );
+        const context = yield* Layer.buildWithScope(adapterLayer, adapterScope);
+        const adapter = yield* Effect.service(OpenCodeAdapter).pipe(Effect.provide(context));
+        const threadId = asThreadId("thread-opencode-uninterruptible-timeout");
+        runtimeMock.state.abortImplementation = async () => {
+          abortStarted.resolve(undefined);
+          await new Promise<void>(() => {});
+        };
+        const eventsFiber = yield* adapter.streamEvents.pipe(Stream.runCollect, Effect.forkChild);
+
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const stopFiber = yield* adapter
+          .stopSession(threadId)
+          .pipe(
+            Effect.ensuring(Deferred.succeed(stopCompleted, undefined).pipe(Effect.ignore)),
+            Effect.forkChild({ startImmediately: true }),
+          );
+        yield* Effect.promise(() => abortStarted.promise);
+        const interruptionFiber = yield* Fiber.interrupt(stopFiber).pipe(
+          Effect.ensuring(Deferred.succeed(interruptionCompleted, undefined).pipe(Effect.ignore)),
+          Effect.forkChild({ startImmediately: true }),
+        );
+
+        yield* advanceTestClock(999);
+        NodeAssert.equal(yield* Deferred.isDone(stopCompleted), false);
+        NodeAssert.equal(yield* Deferred.isDone(interruptionCompleted), false);
+        NodeAssert.equal(runtimeMock.state.abortSignals[0]?.aborted, false);
+        NodeAssert.deepEqual(runtimeMock.state.closeCalls, []);
+
+        yield* advanceTestClock(1);
+        yield* Fiber.join(interruptionFiber);
+        const stopExit = yield* Fiber.await(stopFiber);
+        NodeAssert.equal(Exit.hasInterrupts(stopExit), true);
+        NodeAssert.equal(yield* Deferred.isDone(stopCompleted), true);
+        NodeAssert.equal(yield* Deferred.isDone(interruptionCompleted), true);
+        NodeAssert.equal(runtimeMock.state.abortSignals[0]?.aborted, true);
+        NodeAssert.deepEqual(runtimeMock.state.abortCalls, [rootSessionId]);
+        NodeAssert.deepEqual(runtimeMock.state.closeCalls, ["http://127.0.0.1:9999"]);
+        NodeAssert.deepEqual(yield* adapter.listSessions(), []);
+
+        yield* Scope.close(adapterScope, Exit.void);
+        adapterScopeClosed = true;
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const exited = events.filter((event) => event.type === "session.exited");
+        NodeAssert.equal(exited.length, 1);
+        NodeAssert.equal(exited[0]?.threadId, threadId);
+      } finally {
+        if (!adapterScopeClosed) {
+          yield* advanceTestClock(1_000).pipe(Effect.ignore);
+          yield* Scope.close(adapterScope, Exit.void).pipe(Effect.ignore);
+        }
+      }
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("closes the session scope after a pre-scope cleanup defect", () =>
+    Effect.gen(function* () {
+      const adapterScope = yield* Scope.make("sequential");
+      const rootSessionId = "http://127.0.0.1:9999/session";
+      let defectObserved = false;
+      let adapterScopeClosed = false;
+
+      try {
+        const adapterLayer = Layer.effect(
+          OpenCodeAdapter,
+          makeOpenCodeAdapter(openCodeAdapterTestSettings),
+        ).pipe(
+          Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        );
+        const context = yield* Layer.buildWithScope(adapterLayer, adapterScope);
+        const adapter = yield* Effect.service(OpenCodeAdapter).pipe(Effect.provide(context));
+        const threadId = asThreadId("thread-opencode-pre-scope-defect");
+        const defectiveChild = {
+          get id(): string {
+            defectObserved = true;
+            throw new Error("session.children response defect");
+          },
+        };
+        runtimeMock.state.sessionChildrenImplementation = async (sessionID) =>
+          sessionID === rootSessionId ? [defectiveChild] : [];
+        const eventsFiber = yield* adapter.streamEvents.pipe(Stream.runCollect, Effect.forkChild);
+
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const turn = yield* adapter.sendTurn({
+          threadId,
+          input: "Keep working",
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("opencode"),
+            "opencode/kimi-k3",
+          ),
+        });
+        yield* adapter.stopSession(threadId);
+        NodeAssert.equal(defectObserved, true);
+        NodeAssert.deepEqual(runtimeMock.state.abortCalls, [rootSessionId]);
+        NodeAssert.deepEqual(runtimeMock.state.closeCalls, ["http://127.0.0.1:9999"]);
+        NodeAssert.deepEqual(yield* adapter.listSessions(), []);
+
+        yield* Scope.close(adapterScope, Exit.void);
+        adapterScopeClosed = true;
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const exited = events.filter((event) => event.type === "session.exited");
+        NodeAssert.equal(exited.length, 1);
+        NodeAssert.equal(exited[0]?.threadId, threadId);
+        NodeAssert.equal(exited[0]?.turnId, turn.turnId);
+      } finally {
+        if (!adapterScopeClosed) {
+          yield* Scope.close(adapterScope, Exit.void).pipe(Effect.ignore);
+        }
+      }
+    }),
+  );
+
   it.effect("clears session state even when cleanup finalizers throw", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
@@ -1395,13 +2026,185 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         scopeClosed = true;
 
         const exit = yield* Fiber.await(eventsFiber).pipe(Effect.timeout("1 second"));
-        NodeAssert.equal(Exit.hasInterrupts(exit), true);
+        NodeAssert.equal(Exit.isSuccess(exit), true);
+        if (Exit.isSuccess(exit)) {
+          NodeAssert.deepEqual(Array.from(exit.value), []);
+        }
       } finally {
         if (!scopeClosed) {
           yield* Scope.close(scope, Exit.void).pipe(Effect.ignore);
         }
       }
     }),
+  );
+
+  it.effect("drainEvents waits for downstream handling without exposing its barrier", () =>
+    Effect.gen(function* () {
+      const adapterScope = yield* Scope.make("sequential");
+      const handlerStarted = promiseWithResolvers<void>();
+      const handlerRelease = promiseWithResolvers<void>();
+      const threadId = asThreadId("thread-opencode-drain-handler-barrier");
+      const publicEvents: Array<{ type: string; turnId?: string }> = [];
+      let adapterScopeClosed = false;
+
+      try {
+        const adapterLayer = Layer.effect(
+          OpenCodeAdapter,
+          makeOpenCodeAdapter(openCodeAdapterTestSettings),
+        ).pipe(
+          Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        );
+        const context = yield* Layer.buildWithScope(adapterLayer, adapterScope);
+        const adapter = yield* Effect.service(OpenCodeAdapter).pipe(Effect.provide(context));
+        const drainEvents = adapter.drainEvents;
+        NodeAssert.notEqual(drainEvents, undefined);
+        if (drainEvents === undefined) {
+          throw new Error("OpenCode adapter does not expose drainEvents");
+        }
+
+        const consumer = yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              const turnId = event.turnId === undefined ? undefined : String(event.turnId);
+              publicEvents.push({
+                type: event.type,
+                ...(turnId === undefined ? {} : { turnId }),
+              });
+              if (event.type === "session.started") {
+                handlerStarted.resolve(undefined);
+                yield* Effect.promise(() => handlerRelease.promise);
+              }
+            }),
+          ),
+          Effect.forkChild({ startImmediately: true }),
+        );
+
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        yield* Effect.promise(() => handlerStarted.promise);
+
+        const drainCompletion = yield* Deferred.make<boolean>();
+        const drainFiber = yield* drainEvents().pipe(
+          Effect.tap((drained) => Deferred.succeed(drainCompletion, drained)),
+          Effect.forkChild({ startImmediately: true }),
+        );
+        NodeAssert.equal(yield* Deferred.isDone(drainCompletion), false);
+
+        handlerRelease.resolve(undefined);
+        NodeAssert.equal(yield* Fiber.join(drainFiber), true);
+        NodeAssert.equal(yield* Deferred.await(drainCompletion), true);
+        NodeAssert.deepEqual(
+          publicEvents.map((event) => event.type),
+          ["session.started", "thread.started"],
+        );
+
+        yield* adapter.stopSession(threadId);
+        yield* Scope.close(adapterScope, Exit.void);
+        adapterScopeClosed = true;
+        yield* Fiber.join(consumer);
+        NodeAssert.deepEqual(
+          publicEvents.map((event) => event.type),
+          ["session.started", "thread.started", "session.exited"],
+        );
+      } finally {
+        handlerRelease.resolve(undefined);
+        if (!adapterScopeClosed) {
+          yield* Scope.close(adapterScope, Exit.void).pipe(Effect.ignore);
+        }
+      }
+    }),
+  );
+
+  it.effect(
+    "returns false after producer closure while the external consumer drains buffered events",
+    () =>
+      Effect.gen(function* () {
+        const adapterScope = yield* Scope.make("sequential");
+        const handlerStarted = promiseWithResolvers<void>();
+        const handlerRelease = promiseWithResolvers<void>();
+        const threadId = asThreadId("thread-opencode-drain-after-producer-close");
+        const publicEvents: Array<{ type: string; turnId?: string }> = [];
+        let adapterScopeClosed = false;
+
+        try {
+          const adapterLayer = Layer.effect(
+            OpenCodeAdapter,
+            makeOpenCodeAdapter(openCodeAdapterTestSettings),
+          ).pipe(
+            Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+            Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+            Layer.provideMerge(ServerSettingsService.layerTest()),
+            Layer.provideMerge(providerSessionDirectoryTestLayer),
+            Layer.provideMerge(NodeServices.layer),
+          );
+          const context = yield* Layer.buildWithScope(adapterLayer, adapterScope);
+          const adapter = yield* Effect.service(OpenCodeAdapter).pipe(Effect.provide(context));
+          const drainEvents = adapter.drainEvents;
+          NodeAssert.notEqual(drainEvents, undefined);
+          if (drainEvents === undefined) {
+            throw new Error("OpenCode adapter does not expose drainEvents");
+          }
+
+          const consumer = yield* adapter.streamEvents.pipe(
+            Stream.runForEach((event) =>
+              Effect.gen(function* () {
+                const turnId = event.turnId === undefined ? undefined : String(event.turnId);
+                publicEvents.push({
+                  type: event.type,
+                  ...(turnId === undefined ? {} : { turnId }),
+                });
+                if (event.type === "session.started") {
+                  handlerStarted.resolve(undefined);
+                  yield* Effect.promise(() => handlerRelease.promise);
+                }
+              }),
+            ),
+            Effect.forkChild({ startImmediately: true }),
+          );
+
+          yield* adapter.startSession({
+            provider: ProviderDriverKind.make("opencode"),
+            threadId,
+            runtimeMode: "full-access",
+          });
+          yield* Effect.promise(() => handlerStarted.promise);
+
+          yield* Scope.close(adapterScope, Exit.void);
+          adapterScopeClosed = true;
+
+          const drainCompletion = yield* Deferred.make<boolean>();
+          const drainFiber = yield* drainEvents().pipe(
+            Effect.tap((drained) => Deferred.succeed(drainCompletion, drained)),
+            Effect.forkChild({ startImmediately: true }),
+          );
+          NodeAssert.equal(yield* Fiber.join(drainFiber), false);
+          NodeAssert.equal(yield* Deferred.await(drainCompletion), false);
+          NodeAssert.deepEqual(
+            publicEvents.map((event) => event.type),
+            ["session.started"],
+          );
+
+          handlerRelease.resolve(undefined);
+          yield* Fiber.join(consumer);
+          NodeAssert.deepEqual(
+            publicEvents.map((event) => event.type),
+            ["session.started", "thread.started", "session.exited"],
+          );
+          NodeAssert.equal(publicEvents.at(-1)?.type, "session.exited");
+        } finally {
+          handlerRelease.resolve(undefined);
+          if (!adapterScopeClosed) {
+            yield* Scope.close(adapterScope, Exit.void).pipe(Effect.ignore);
+          }
+        }
+      }),
   );
 
   it.effect("rolls back session state when sendTurn fails before OpenCode accepts the prompt", () =>
@@ -1478,6 +2281,143 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.equal(session?.status, "running");
       NodeAssert.equal(String(session?.activeTurnId), String(turn.turnId));
       NodeAssert.equal(runtimeMock.state.promptCalls.length, 2);
+    }),
+  );
+
+  it.effect("correlates a stopped pending steer with the latest emitted turn.started", () =>
+    Effect.gen(function* () {
+      const adapterScope = yield* Scope.make("sequential");
+      const steerStarted = promiseWithResolvers<void>();
+      const steerRelease = promiseWithResolvers<void>();
+      const abortStarted = promiseWithResolvers<void>();
+      const abortRelease = promiseWithResolvers<void>();
+      const rootSessionId = "http://127.0.0.1:9999/session";
+      const threadId = asThreadId("thread-steer-stop-before-start-event");
+      const observedEvents: Array<{ type: string; turnId?: string }> = [];
+      let adapterScopeClosed = false;
+
+      try {
+        const adapterLayer = Layer.effect(
+          OpenCodeAdapter,
+          makeOpenCodeAdapter(openCodeAdapterTestSettings),
+        ).pipe(
+          Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        );
+        const context = yield* Layer.buildWithScope(adapterLayer, adapterScope);
+        const adapter = yield* Effect.service(OpenCodeAdapter).pipe(Effect.provide(context));
+        const turnStarted = yield* Deferred.make<string>();
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) =>
+            Effect.gen(function* () {
+              const turnId = event.turnId === undefined ? undefined : String(event.turnId);
+              observedEvents.push({
+                type: event.type,
+                ...(turnId === undefined ? {} : { turnId }),
+              });
+              if (event.type === "turn.started" && turnId !== undefined) {
+                yield* Deferred.succeed(turnStarted, turnId);
+              }
+            }),
+          ),
+          Stream.runCollect,
+          Effect.forkChild({ startImmediately: true }),
+        );
+
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const turnA = yield* adapter.sendTurn({
+          threadId,
+          input: "Start turn A",
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("opencode"),
+            "opencode/kimi-k3",
+          ),
+        });
+        const emittedTurnA = yield* Deferred.await(turnStarted);
+        NodeAssert.equal(emittedTurnA, String(turnA.turnId));
+
+        runtimeMock.state.promptAsyncImplementation = async () => {
+          if (runtimeMock.state.promptCalls.length === 2) {
+            steerStarted.resolve(undefined);
+            await steerRelease.promise;
+          }
+        };
+        runtimeMock.state.abortImplementation = async (sessionID) => {
+          if (sessionID === rootSessionId) {
+            abortStarted.resolve(undefined);
+            await abortRelease.promise;
+          }
+        };
+
+        const pendingSendFiber = yield* adapter
+          .sendTurn({
+            threadId,
+            input: "Steer turn B",
+            modelSelection: createModelSelection(
+              ProviderInstanceId.make("opencode"),
+              "opencode/kimi-k3",
+            ),
+          })
+          .pipe(Effect.exit, Effect.forkChild({ startImmediately: true }));
+        yield* Effect.promise(() => steerStarted.promise);
+        NodeAssert.equal(runtimeMock.state.promptCalls.length, 2);
+        NodeAssert.deepEqual(
+          observedEvents
+            .filter((event) => event.type === "turn.started")
+            .map((event) => event.turnId),
+          [String(turnA.turnId)],
+        );
+
+        const stopFiber = yield* adapter
+          .stopSession(threadId)
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.promise(() => abortStarted.promise);
+        const sessionDuringStop = (yield* adapter.listSessions()).find(
+          (session) => session.threadId === threadId,
+        );
+        NodeAssert.equal(sessionDuringStop?.activeTurnId, turnA.turnId);
+
+        steerRelease.resolve(undefined);
+        const pendingSend = yield* Fiber.join(pendingSendFiber);
+        NodeAssert.equal(Exit.isFailure(pendingSend), true);
+        NodeAssert.equal(Exit.hasInterrupts(pendingSend), true);
+
+        abortRelease.resolve(undefined);
+        yield* Fiber.join(stopFiber);
+        NodeAssert.deepEqual(runtimeMock.state.abortCalls, [rootSessionId]);
+        NodeAssert.deepEqual(yield* adapter.listSessions(), []);
+
+        yield* Scope.close(adapterScope, Exit.void);
+        adapterScopeClosed = true;
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const started = events.filter((event) => event.type === "turn.started");
+        const exited = events.filter((event) => event.type === "session.exited");
+        const mostRecentStarted = [...started].at(-1);
+        NodeAssert.deepEqual(
+          events.map((event) => event.type),
+          ["session.started", "thread.started", "turn.started", "session.exited"],
+        );
+        NodeAssert.deepEqual(
+          started.map((event) => String(event.turnId)),
+          [String(turnA.turnId)],
+        );
+        NodeAssert.equal(exited.length, 1);
+        NodeAssert.equal(exited[0]?.turnId, mostRecentStarted?.turnId);
+        NodeAssert.equal(exited[0]?.turnId, turnA.turnId);
+      } finally {
+        steerRelease.resolve(undefined);
+        abortRelease.resolve(undefined);
+        if (!adapterScopeClosed) {
+          yield* Scope.close(adapterScope, Exit.void).pipe(Effect.ignore);
+        }
+      }
     }),
   );
 
@@ -9501,14 +10441,16 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         Stream.filter(
           (event) =>
             event.threadId === threadId &&
-            (event.type === "task.started" || event.type === "task.completed"),
+            (event.type === "task.started" ||
+              event.type === "task.completed" ||
+              event.type === "session.exited"),
         ),
         Stream.tap((event) =>
           event.type === "task.started"
             ? Deferred.succeed(childStarted, undefined).pipe(Effect.asVoid)
             : Effect.void,
         ),
-        Stream.take(2),
+        Stream.take(3),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -9517,7 +10459,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         threadId,
         runtimeMode: "full-access",
       });
-      yield* adapter.sendTurn({
+      const activeTurn = yield* adapter.sendTurn({
         threadId,
         input: "Start replace review",
         modelSelection: createModelSelection(
@@ -9527,7 +10469,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       });
       releaseEvents.resolve(undefined);
       yield* Deferred.await(childStarted).pipe(Effect.timeout("2 seconds"));
-      yield* adapter.startSession({
+      const replacement = yield* adapter.startSession({
         provider: ProviderDriverKind.make("opencode"),
         threadId,
         runtimeMode: "full-access",
@@ -9536,12 +10478,36 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("2 seconds")));
       NodeAssert.deepEqual(
         events.map((event) => event.type),
-        ["task.started", "task.completed"],
+        ["task.started", "task.completed", "session.exited"],
       );
       const completed = events[1];
       if (completed?.type === "task.completed") {
         NodeAssert.equal(completed.payload.status, "stopped");
       }
+      const exited = events.filter((event) => event.type === "session.exited");
+      NodeAssert.equal(exited.length, 1);
+      NodeAssert.deepEqual(
+        exited[0]?.type === "session.exited"
+          ? {
+              turnId: exited[0].turnId,
+              exitKind: exited[0].payload.exitKind,
+              recoverable: exited[0].payload.recoverable,
+            }
+          : undefined,
+        {
+          turnId: activeTurn.turnId,
+          exitKind: "graceful",
+          recoverable: true,
+        },
+      );
+      NodeAssert.deepEqual(replacement.resumeCursor, {
+        schemaVersion: 1,
+        sessionId: "ses_parent_new",
+      });
+      const current = (yield* adapter.listSessions()).find(
+        (session) => session.threadId === threadId,
+      );
+      NodeAssert.deepEqual(current?.resumeCursor, replacement.resumeCursor);
       NodeAssert.deepEqual(runtimeMock.state.abortCalls, ["ses_parent_old", "ses_replace_child"]);
       yield* adapter.stopSession(threadId);
     }),

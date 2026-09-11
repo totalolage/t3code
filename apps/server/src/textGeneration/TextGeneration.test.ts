@@ -56,6 +56,7 @@ const makeStubRegistry = (
     subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
       PubSub.subscribe(pubsub),
     ),
+    registerRetirementHooks: () => Effect.void,
   };
 };
 

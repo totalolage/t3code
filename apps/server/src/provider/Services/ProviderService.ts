@@ -29,11 +29,17 @@ import type {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
+import type * as Exit from "effect/Exit";
+import type * as Scope from "effect/Scope";
 import type * as Stream from "effect/Stream";
 
 import type { ProviderServiceError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
+
+export type ProviderRuntimeEventConsumer = (
+  event: ProviderRuntimeEvent,
+) => Effect.Effect<void, unknown>;
 
 /**
  * ProviderServiceShape - Service API for provider session and turn orchestration.
@@ -45,6 +51,7 @@ export interface ProviderServiceShape {
   readonly startSession: (
     threadId: ThreadId,
     input: ProviderSessionStartInput,
+    onStarted?: (session: ProviderSession) => Effect.Effect<void, unknown>,
   ) => Effect.Effect<ProviderSession, ProviderServiceError>;
 
   /**
@@ -58,6 +65,7 @@ export interface ProviderServiceShape {
     threadId: ThreadId,
     modelSelection?: ProviderSendTurnInput["modelSelection"],
     requestId?: MessageId,
+    onSettled?: (exit: Exit.Exit<void, ProviderServiceError>) => Effect.Effect<void, unknown>,
   ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
@@ -86,7 +94,13 @@ export interface ProviderServiceShape {
    */
   readonly stopSession: (
     input: ProviderStopSessionInput,
+    onSettled?: (exit: Exit.Exit<void, ProviderServiceError>) => Effect.Effect<void, unknown>,
   ) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
+   * Stop all active provider sessions.
+   */
+  readonly stopAll: () => Effect.Effect<void, ProviderServiceError>;
 
   /**
    * List active provider sessions.
@@ -127,6 +141,13 @@ export interface ProviderServiceShape {
   readonly uploadFeedback: (
     input: ProviderUploadFeedbackInput,
   ) => Effect.Effect<ProviderUploadFeedbackResult, ProviderServiceError>;
+
+  /**
+   * Register a scoped consumer for canonical provider runtime events.
+   */
+  readonly registerRuntimeEventConsumer: (
+    consumer: ProviderRuntimeEventConsumer,
+  ) => Effect.Effect<void, never, Scope.Scope>;
 
   /**
    * Canonical provider runtime event stream.

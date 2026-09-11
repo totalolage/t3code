@@ -161,4 +161,10 @@ export interface ProviderAdapterShape<TError> {
    * Canonical runtime event stream emitted by this adapter.
    */
   readonly streamEvents: Stream.Stream<ProviderRuntimeEvent>;
+
+  /**
+   * Drain an in-stream barrier after prior events, or report that the queue has
+   * already ended and the source reader must be awaited separately.
+   */
+  readonly drainEvents?: () => Effect.Effect<boolean>;
 }

@@ -4,11 +4,14 @@ import { assert, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import { TestClock } from "effect/testing";
 
 import * as ServerConfig from "./config.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
@@ -111,6 +114,248 @@ it.effect("enqueueCommand fails queued work when readiness fails", () =>
       assert.equal(error.message, "Server runtime startup failed before command readiness.");
     }),
   ),
+);
+
+it.effect("queued commands recheck shutdown after readiness has been signaled", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const commandGate = yield* ServerRuntimeStartup.makeCommandGate;
+      const executionCount = yield* Ref.make(0);
+      const queuedCommandFiber = yield* commandGate
+        .enqueueCommand(Ref.updateAndGet(executionCount, (count) => count + 1))
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+
+      yield* commandGate.signalCommandReady;
+      const failure = new ServerRuntimeStartup.ServerRuntimeStartupError({
+        mode: "web",
+        host: "127.0.0.1",
+        port: 3773,
+        cause: new Error("Server is shutting down."),
+      });
+      yield* commandGate.failCommandReady(failure);
+
+      const error = yield* Effect.flip(Fiber.join(queuedCommandFiber));
+      assert.strictEqual(error, failure);
+      assert.equal(yield* Ref.get(executionCount), 0);
+    }),
+  ),
+);
+
+it.effect("shutdown rejects admission and closes the reactor scope after draining", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const commandGate = yield* ServerRuntimeStartup.makeCommandGate;
+      const reactorScope = yield* Scope.make("sequential");
+      const stopStarted = yield* Deferred.make<void>();
+      const stopRelease = yield* Deferred.make<void>();
+      const drainStarted = yield* Deferred.make<void>();
+      const drainRelease = yield* Deferred.make<void>();
+      const reactorClosed = yield* Deferred.make<void>();
+      const executionCount = yield* Ref.make(0);
+      yield* Scope.addFinalizer(reactorScope, Deferred.succeed(reactorClosed, undefined));
+
+      const queuedCommandFiber = yield* commandGate
+        .enqueueCommand(Ref.updateAndGet(executionCount, (count) => count + 1))
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+
+      const shutdownFiber = yield* ServerRuntimeStartup.shutdownServerRuntime({
+        commandGate,
+        shutdownError: new ServerRuntimeStartup.ServerRuntimeStartupError({
+          mode: "web",
+          host: "127.0.0.1",
+          port: 3773,
+          cause: new Error("Server is shutting down."),
+        }),
+        reactorScope,
+        stopProviders: Deferred.succeed(stopStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(stopRelease)),
+        ),
+        drainIngestion: Deferred.succeed(drainStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(drainRelease)),
+        ),
+      }).pipe(Effect.forkScoped);
+
+      yield* Deferred.await(stopStarted);
+      assert.isFalse(yield* Deferred.isDone(reactorClosed));
+      assert.isFalse(yield* Deferred.isDone(drainStarted));
+
+      const queuedError = yield* Effect.flip(Fiber.join(queuedCommandFiber));
+      assert.equal(queuedError._tag, "ServerRuntimeStartupError");
+      assert.equal((queuedError.cause as Error).message, "Server is shutting down.");
+      const newCommandError = yield* Effect.flip(
+        commandGate.enqueueCommand(Effect.succeed("should not run")),
+      );
+      assert.equal(newCommandError._tag, "ServerRuntimeStartupError");
+      assert.equal((newCommandError.cause as Error).message, "Server is shutting down.");
+      assert.equal(yield* Ref.get(executionCount), 0);
+
+      yield* Deferred.succeed(stopRelease, undefined);
+      yield* Deferred.await(drainStarted);
+      assert.isFalse(yield* Deferred.isDone(reactorClosed));
+
+      yield* Deferred.succeed(drainRelease, undefined);
+      yield* Fiber.join(shutdownFiber);
+      yield* Deferred.await(reactorClosed);
+      assert.equal(reactorScope.state._tag, "Closed");
+    }),
+  ),
+);
+
+it.effect("shutdown closes the reactor scope after a provider stop failure", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const commandGate = yield* ServerRuntimeStartup.makeCommandGate;
+      const reactorScope = yield* Scope.make("sequential");
+      const drainStarted = yield* Deferred.make<void>();
+      const drainRelease = yield* Deferred.make<void>();
+      const reactorClosed = yield* Deferred.make<void>();
+      yield* Scope.addFinalizer(reactorScope, Deferred.succeed(reactorClosed, undefined));
+
+      const shutdownFiber = yield* ServerRuntimeStartup.shutdownServerRuntime({
+        commandGate,
+        shutdownError: new ServerRuntimeStartup.ServerRuntimeStartupError({
+          mode: "web",
+          host: "127.0.0.1",
+          port: 3773,
+          cause: new Error("Server is shutting down."),
+        }),
+        reactorScope,
+        stopProviders: Effect.fail(new Error("provider stop failed")),
+        drainIngestion: Deferred.succeed(drainStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(drainRelease)),
+        ),
+      }).pipe(Effect.forkScoped);
+
+      yield* Deferred.await(drainStarted);
+      assert.isFalse(yield* Deferred.isDone(reactorClosed));
+      yield* Deferred.succeed(drainRelease, undefined);
+      yield* Fiber.join(shutdownFiber);
+      yield* Deferred.await(reactorClosed);
+      assert.equal(reactorScope.state._tag, "Closed");
+    }),
+  ),
+);
+
+it.effect("shutdown keeps the reactor scope open while provider stop completes", () =>
+  Effect.gen(function* () {
+    const reactorScope = yield* Scope.make("sequential");
+    const commandGate = yield* ServerRuntimeStartup.makeCommandGate;
+    const stopStarted = yield* Deferred.make<void>();
+    const stopFinished = yield* Deferred.make<void>();
+    const stopRelease = yield* Deferred.make<void>();
+    const setupComplete = yield* Deferred.make<void>();
+    const closeRequested = yield* Deferred.make<void>();
+    const reactorClosed = yield* Deferred.make<void>();
+    yield* Scope.addFinalizer(reactorScope, Deferred.succeed(reactorClosed, undefined));
+
+    const stopProviders = Deferred.succeed(stopStarted, undefined).pipe(
+      Effect.andThen(Deferred.await(stopRelease)),
+      Effect.ensuring(Deferred.succeed(stopFinished, undefined)),
+    );
+    const closingFiber = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const enclosingScope = yield* Scope.Scope;
+        yield* Scope.addFinalizer(
+          enclosingScope,
+          ServerRuntimeStartup.shutdownServerRuntime({
+            commandGate,
+            shutdownError: new ServerRuntimeStartup.ServerRuntimeStartupError({
+              mode: "web",
+              host: "127.0.0.1",
+              port: 3773,
+              cause: new Error("Server is shutting down."),
+            }),
+            reactorScope,
+            stopProviders,
+            drainIngestion: Effect.void,
+          }),
+        );
+        yield* Deferred.succeed(setupComplete, undefined);
+        yield* Deferred.await(closeRequested);
+      }),
+    ).pipe(Effect.forkScoped({ startImmediately: true }));
+
+    yield* Deferred.await(setupComplete);
+    yield* Deferred.succeed(closeRequested, undefined);
+    yield* Deferred.await(stopStarted);
+    assert.isUndefined(closingFiber.pollUnsafe());
+    assert.equal(reactorScope.state._tag, "Open");
+    assert.isFalse(yield* Deferred.isDone(reactorClosed));
+
+    yield* TestClock.adjust("16 seconds");
+    assert.isUndefined(closingFiber.pollUnsafe());
+    assert.isFalse(yield* Deferred.isDone(stopFinished));
+    assert.equal(reactorScope.state._tag, "Open");
+    assert.isFalse(yield* Deferred.isDone(reactorClosed));
+
+    yield* Deferred.succeed(stopRelease, undefined);
+    yield* Fiber.join(closingFiber);
+    assert.isTrue(yield* Deferred.isDone(stopFinished));
+    yield* Deferred.await(reactorClosed);
+    assert.equal(reactorScope.state._tag, "Closed");
+  }).pipe(Effect.provide(TestClock.layer())),
+);
+
+it.effect("shutdown bounds a never-ending ingestion drain and closes the reactor scope", () =>
+  Effect.gen(function* () {
+    const reactorScope = yield* Scope.make("sequential");
+    const commandGate = yield* ServerRuntimeStartup.makeCommandGate;
+    const drainStarted = yield* Deferred.make<void>();
+    const drainFinished = yield* Deferred.make<void>();
+    const setupComplete = yield* Deferred.make<void>();
+    const closeRequested = yield* Deferred.make<void>();
+    const reactorClosed = yield* Deferred.make<void>();
+    yield* Scope.addFinalizer(reactorScope, Deferred.succeed(reactorClosed, undefined));
+
+    const neverDrain = Deferred.succeed(drainStarted, undefined).pipe(
+      Effect.andThen(Effect.never),
+      Effect.ensuring(Deferred.succeed(drainFinished, undefined)),
+    );
+    const closingFiber = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const enclosingScope = yield* Scope.Scope;
+        yield* Scope.addFinalizer(
+          enclosingScope,
+          ServerRuntimeStartup.shutdownServerRuntime({
+            commandGate,
+            shutdownError: new ServerRuntimeStartup.ServerRuntimeStartupError({
+              mode: "web",
+              host: "127.0.0.1",
+              port: 3773,
+              cause: new Error("Server is shutting down."),
+            }),
+            reactorScope,
+            stopProviders: Effect.void,
+            drainIngestion: neverDrain,
+          }),
+        );
+        yield* Deferred.succeed(setupComplete, undefined);
+        yield* Deferred.await(closeRequested);
+      }),
+    ).pipe(Effect.forkScoped({ startImmediately: true }));
+
+    yield* Deferred.await(setupComplete);
+    yield* Deferred.succeed(closeRequested, undefined);
+    yield* Deferred.await(drainStarted);
+    assert.isUndefined(closingFiber.pollUnsafe());
+    assert.equal(reactorScope.state._tag, "Open");
+    assert.isFalse(yield* Deferred.isDone(reactorClosed));
+
+    yield* TestClock.adjust("16 seconds");
+    const closeExit = yield* TestClock.withLive(
+      Fiber.await(closingFiber).pipe(Effect.timeoutOption("1 second")),
+    );
+    if (Option.isNone(closeExit)) {
+      yield* Fiber.interrupt(closingFiber);
+      assert.fail("shutdown deadline did not interrupt the ingestion drain");
+      return;
+    }
+
+    assert.isTrue(Exit.isSuccess(closeExit.value));
+    assert.isTrue(yield* Deferred.isDone(drainFinished));
+    assert.equal(reactorScope.state._tag, "Closed");
+    assert.isTrue(yield* Deferred.isDone(reactorClosed));
+  }).pipe(Effect.provide(TestClock.layer())),
 );
 
 it.effect("resolveWelcomeBase derives cwd and project name from server config", () =>

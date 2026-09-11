@@ -118,6 +118,22 @@ export class ProviderValidationError extends Schema.TaggedErrorClass<ProviderVal
 }
 
 /**
+ * ProviderSessionSupersededError - A lifecycle operation lost ownership to a replacement session.
+ */
+export class ProviderSessionSupersededError extends Schema.TaggedErrorClass<ProviderSessionSupersededError>()(
+  "ProviderSessionSupersededError",
+  {
+    operation: Schema.String,
+    threadId: Schema.String,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Provider session superseded in ${this.operation} for thread ${this.threadId}: ${this.detail}`;
+  }
+}
+
+/**
  * ProviderUnsupportedError - Requested provider is not implemented.
  */
 export class ProviderUnsupportedError extends Schema.TaggedErrorClass<ProviderUnsupportedError>()(
@@ -212,6 +228,7 @@ export type ProviderAdapterError =
 
 export type ProviderServiceError =
   | ProviderValidationError
+  | ProviderSessionSupersededError
   | ProviderUnsupportedError
   | ProviderWorkspaceMissingError
   | ProviderInstanceNotFoundError

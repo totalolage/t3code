@@ -41,10 +41,12 @@ import {
   type ProviderDriverKind,
   type ServerProvider,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -77,6 +79,44 @@ interface LiveEntry {
   readonly entry: ProviderInstanceConfig;
 }
 
+type RetirementHooks = Parameters<ProviderInstanceRegistryShape["registerRetirementHooks"]>[0];
+type RetirementPhase = "beforeClose" | "close" | "afterClose";
+type RetirementStepInput = {
+  readonly instanceId: ProviderInstanceId;
+  readonly phase: RetirementPhase;
+  readonly effect: Effect.Effect<void>;
+};
+
+const RETIREMENT_STEP_TIMEOUT = "5 seconds";
+
+const runRetirementStep = Effect.fn("ProviderInstanceRegistryLive.runRetirementStep")(function* (
+  input: RetirementStepInput,
+) {
+  // Disconnect the cleanup fiber from reconciliation. A timed-out scope
+  // close may still be uninterruptible, so its interruption must not be
+  // awaited by either the deadline or the parent scope's finalizers.
+  const fiber = yield* Effect.forkDetach(input.effect);
+  const result = yield* Fiber.await(fiber).pipe(Effect.timeoutOption(RETIREMENT_STEP_TIMEOUT));
+  if (Option.isNone(result)) {
+    yield* Effect.logWarning("Provider instance retirement step timed out", {
+      instanceId: input.instanceId,
+      phase: input.phase,
+      timeout: RETIREMENT_STEP_TIMEOUT,
+    });
+    // `Fiber.interrupt` waits for cleanup. Detach that wait as well so the
+    // retirement sequence can continue to afterClose and replacement build.
+    yield* Fiber.interrupt(fiber).pipe(Effect.forkDetach, Effect.asVoid);
+    return;
+  }
+  if (Exit.isFailure(result.value)) {
+    yield* Effect.logWarning("Provider instance retirement step failed", {
+      instanceId: input.instanceId,
+      phase: input.phase,
+      cause: Cause.pretty(result.value.cause),
+    });
+  }
+});
+
 /**
  * Internal state shared between the public registry service and the
  * mutator service. Both services are thin shells around these refs.
@@ -85,6 +125,7 @@ interface RegistryState {
   readonly entries: Ref.Ref<ReadonlyMap<ProviderInstanceId, LiveEntry>>;
   readonly unavailable: Ref.Ref<ReadonlyMap<ProviderInstanceId, ServerProvider>>;
   readonly changes: PubSub.PubSub<void>;
+  readonly retirementHooks: Ref.Ref<RetirementHooks | undefined>;
 }
 
 /**
@@ -299,12 +340,55 @@ const makeReconcile = <R>(input: {
           replacedIds.add(instanceId);
         }
       }
-      for (const id of [...removedIds, ...replacedIds]) {
-        const live = previousEntries.get(id);
-        if (live) {
-          yield* Scope.close(live.scope, Exit.void).pipe(Effect.ignore);
-        }
-      }
+      const retiredIds = [...removedIds, ...replacedIds];
+      const retirementHooks = yield* Ref.get(state.retirementHooks);
+
+      // Withdrawal and retirement form one cancellation-safe handoff. The
+      // deadline races only the fiber waiting on each detached cleanup step,
+      // not the detached cleanup itself, so this mask cannot release the
+      // reconcile semaphore midway through retiring a withdrawn entry.
+      yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          if (retiredIds.length > 0) {
+            yield* Ref.update(state.entries, (current) => {
+              const next = new Map(current);
+              for (const id of retiredIds) {
+                next.delete(id);
+              }
+              return next;
+            });
+          }
+
+          for (const id of retiredIds) {
+            const live = previousEntries.get(id);
+            if (live) {
+              if (retirementHooks) {
+                yield* runRetirementStep({
+                  instanceId: id,
+                  phase: "beforeClose",
+                  effect: Effect.suspend(() =>
+                    retirementHooks.beforeClose(id, live.instance.adapter),
+                  ),
+                });
+              }
+              yield* runRetirementStep({
+                instanceId: id,
+                phase: "close",
+                effect: Scope.close(live.scope, Exit.void),
+              });
+              if (retirementHooks) {
+                yield* runRetirementStep({
+                  instanceId: id,
+                  phase: "afterClose",
+                  effect: Effect.suspend(() =>
+                    retirementHooks.afterClose(id, live.instance.adapter),
+                  ),
+                });
+              }
+            }
+          }
+        }),
+      );
 
       // 2. Build additions and replacements. Walk `nextRaw` so the final
       //    entry order follows settings-author order.
@@ -419,12 +503,35 @@ export const makeProviderInstanceRegistry = <R>(input: {
     const entries = yield* Ref.make<ReadonlyMap<ProviderInstanceId, LiveEntry>>(new Map());
     const unavailable = yield* Ref.make<ReadonlyMap<ProviderInstanceId, ServerProvider>>(new Map());
     const changes = yield* PubSub.unbounded<void>();
+    const retirementHooks = yield* Ref.make<RetirementHooks | undefined>(undefined);
     yield* Effect.addFinalizer(() => PubSub.shutdown(changes));
 
-    const state: RegistryState = { entries, unavailable, changes };
+    const state: RegistryState = { entries, unavailable, changes, retirementHooks };
     const reconcileWithR = makeReconcile({ state, driversById, parentScope });
+    const reconcileSemaphore = yield* Semaphore.make(1);
     const reconcile: ProviderInstanceRegistryMutatorShape["reconcile"] = (configMap) =>
-      reconcileWithR(configMap).pipe(Effect.provideContext(driverContext));
+      reconcileSemaphore.withPermit(
+        reconcileWithR(configMap).pipe(Effect.provideContext(driverContext)),
+      );
+
+    const registerRetirementHooks: ProviderInstanceRegistryShape["registerRetirementHooks"] = (
+      hooks,
+    ) =>
+      Effect.acquireRelease(
+        Effect.gen(function* () {
+          const registered = yield* Ref.modify(retirementHooks, (current) =>
+            current === undefined ? [true, hooks] : [false, current],
+          );
+          if (!registered) {
+            return yield* Effect.die("Provider retirement hooks are already registered");
+          }
+          return hooks;
+        }),
+        (registeredHooks) =>
+          Ref.update(retirementHooks, (current) =>
+            current === registeredHooks ? undefined : current,
+          ),
+      ).pipe(Effect.asVoid);
 
     // Hydrate the initial configMap synchronously so callers can read
     // `listInstances` immediately after this effect completes.
@@ -456,6 +563,7 @@ export const makeProviderInstanceRegistry = <R>(input: {
       get subscribeChanges() {
         return PubSub.subscribe(changes);
       },
+      registerRetirementHooks,
     };
 
     const mutator: ProviderInstanceRegistryMutatorShape = { reconcile };

@@ -1023,6 +1023,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 listUnavailable: Effect.succeed([]),
                 streamChanges: Stream.empty,
                 subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+                registerRetirementHooks: () => Effect.void,
               },
             );
             const retainedModels = [
@@ -1390,6 +1391,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               listUnavailable: Effect.succeed([]),
               streamChanges: Stream.empty,
               subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+              registerRetirementHooks: () => Effect.void,
             },
           );
           const scope = yield* Scope.make();
@@ -1509,6 +1511,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               listUnavailable: Effect.succeed([]),
               streamChanges: Stream.fromPubSub(registryChanges),
               subscribeChanges: PubSub.subscribe(registryChanges),
+              registerRetirementHooks: () => Effect.void,
             },
           );
           const scope = yield* Scope.make();
@@ -1705,6 +1708,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               listUnavailable: Effect.succeed([]),
               streamChanges: Stream.empty,
               subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+              registerRetirementHooks: () => Effect.void,
             },
           );
           const scope = yield* Scope.make();
@@ -1831,6 +1835,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
                 PubSub.subscribe(pubsub),
               ),
+              registerRetirementHooks: () => Effect.void,
             },
           );
           const scope = yield* Scope.make();
@@ -1956,6 +1961,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
                   PubSub.subscribe(pubsub),
                 ),
+                registerRetirementHooks: () => Effect.void,
               },
             );
             const scope = yield* Scope.make();
@@ -2059,6 +2065,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
                 PubSub.subscribe(pubsub),
               ),
+              registerRetirementHooks: () => Effect.void,
             },
           );
           const scope = yield* Scope.make();
@@ -2171,6 +2178,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               listUnavailable: Effect.succeed([]),
               streamChanges: Stream.fromPubSub(changes),
               subscribeChanges: PubSub.subscribe(changes),
+              registerRetirementHooks: () => Effect.void,
             },
           );
           const scope = yield* Scope.make();

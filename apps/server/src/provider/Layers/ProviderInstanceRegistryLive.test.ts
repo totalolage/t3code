@@ -36,18 +36,24 @@ import {
   ProviderDriverKind,
   type ProviderInstanceConfigMap,
   ProviderInstanceId,
+  type ServerProvider,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import { isHostWindows } from "@t3tools/shared/hostProcess";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
@@ -66,9 +72,84 @@ import { OpenCodeDriver } from "../Drivers/OpenCodeDriver.ts";
 import { AntigravityDriver } from "../Drivers/AntigravityDriver.ts";
 import * as ModelManifest from "../ModelManifest.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
+import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import * as CodexResetCredit from "./codexResetCredit.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
+
+const RETIREMENT_TEST_DRIVER = ProviderDriverKind.make("retirement-test");
+
+const makeRetirementTestInstance = (
+  instanceId: ProviderInstanceId,
+  adapter: ProviderInstance["adapter"],
+): ProviderInstance => ({
+  instanceId,
+  driverKind: RETIREMENT_TEST_DRIVER,
+  continuationIdentity: {
+    driverKind: RETIREMENT_TEST_DRIVER,
+    continuationKey: `${RETIREMENT_TEST_DRIVER}:instance:${instanceId}`,
+  },
+  displayName: undefined,
+  enabled: false,
+  snapshot: {
+    resolveMaintenance: () => Effect.die("unused"),
+    getSnapshot: Effect.succeed({} as ServerProvider),
+    refresh: Effect.succeed({} as ServerProvider),
+    streamChanges: Stream.empty,
+    applyUsageLimits: () => Effect.void,
+  },
+  adapter,
+  textGeneration: {} as ProviderInstance["textGeneration"],
+});
+
+const makeRetirementTestDriver = (
+  onCreate: (input: {
+    readonly instanceId: ProviderInstanceId;
+    readonly adapter: ProviderInstance["adapter"];
+    readonly scope: Scope.Scope;
+    readonly version: number;
+    readonly createNumber: number;
+  }) => Effect.Effect<void>,
+): ProviderDriver<{ readonly version: number }> => {
+  let createNumber = 0;
+  return {
+    driverKind: RETIREMENT_TEST_DRIVER,
+    metadata: { displayName: "Retirement test" },
+    configSchema: Schema.Struct({ version: Schema.Number }),
+    defaultConfig: () => ({ version: 0 }),
+    create: ({ instanceId, config }) =>
+      Effect.gen(function* () {
+        const scope = yield* Scope.Scope;
+        createNumber += 1;
+        const adapter = {
+          provider: RETIREMENT_TEST_DRIVER,
+          capabilities: {
+            sessionModelSwitch: "unsupported" as const,
+            turnSteering: "supported" as const,
+          },
+        } as ProviderInstance["adapter"];
+        yield* onCreate({
+          instanceId,
+          adapter,
+          scope,
+          version: config.version,
+          createNumber,
+        });
+        return makeRetirementTestInstance(instanceId, adapter);
+      }),
+  };
+};
+
+const makeRetirementConfig = (
+  instanceId: ProviderInstanceId,
+  version: number,
+): ProviderInstanceConfigMap => ({
+  [instanceId]: {
+    driver: RETIREMENT_TEST_DRIVER,
+    enabled: false,
+    config: { version },
+  },
+});
 
 const TestHttpClientLive = Layer.succeed(
   HttpClient.HttpClient,
@@ -787,5 +868,376 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       expect(firstTurn.turnId).not.toBe(secondTurn.turnId);
       expect(sendCount).toBe(2);
     }).pipe(Effect.provide(testLayer)),
+  );
+});
+
+describe("ProviderInstanceRegistryLive — retirement lifecycle", () => {
+  it.effect("retires an instance before creating or exposing its replacement", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("retirement-ordering");
+      const closeStarted = yield* Deferred.make<void>();
+      const closeRelease = yield* Deferred.make<void>();
+      const afterCloseStarted = yield* Deferred.make<void>();
+      const afterCloseRelease = yield* Deferred.make<void>();
+      const beforeCloseObserved = yield* Deferred.make<void>();
+      const events: Array<string> = [];
+      let initialAdapter: ProviderInstance["adapter"] | undefined;
+      let beforeCloseObservation:
+        | {
+            readonly retiringId: ProviderInstanceId;
+            readonly adapter: unknown;
+            readonly lookup: ProviderInstance | undefined;
+          }
+        | undefined;
+      let afterCloseObservation:
+        | {
+            readonly retiringId: ProviderInstanceId;
+            readonly adapter: unknown;
+            readonly lookup: ProviderInstance | undefined;
+          }
+        | undefined;
+
+      const releaseGates = Effect.uninterruptible(
+        Effect.gen(function* () {
+          yield* Deferred.succeed(closeRelease, undefined);
+          yield* Deferred.succeed(afterCloseRelease, undefined);
+        }),
+      );
+
+      yield* Effect.gen(function* () {
+        const driver = makeRetirementTestDriver(({ adapter, createNumber, scope, version }) =>
+          Effect.gen(function* () {
+            events.push(`create:${version}`);
+            if (createNumber === 1) {
+              initialAdapter = adapter;
+              yield* Scope.addFinalizer(
+                scope,
+                Effect.gen(function* () {
+                  events.push("close-started");
+                  yield* Deferred.succeed(closeStarted, undefined);
+                  yield* Deferred.await(closeRelease);
+                  events.push("close-complete");
+                }),
+              );
+            }
+          }),
+        );
+        const { registry, mutator } = yield* makeProviderInstanceRegistry({
+          drivers: [driver],
+          configMap: makeRetirementConfig(instanceId, 1),
+        });
+        const initial = yield* registry.getInstance(instanceId);
+        expect(initial?.adapter).toBe(initialAdapter);
+
+        yield* registry.registerRetirementHooks({
+          beforeClose: (retiringId, adapter) =>
+            Effect.gen(function* () {
+              events.push("before-close");
+              beforeCloseObservation = {
+                retiringId,
+                adapter,
+                lookup: yield* registry.getInstance(instanceId),
+              };
+              yield* Deferred.succeed(beforeCloseObserved, undefined);
+            }),
+          afterClose: (retiringId, adapter) =>
+            Effect.gen(function* () {
+              events.push("after-close-started");
+              afterCloseObservation = {
+                retiringId,
+                adapter,
+                lookup: yield* registry.getInstance(instanceId),
+              };
+              yield* Deferred.succeed(afterCloseStarted, undefined);
+              yield* Deferred.await(afterCloseRelease);
+              events.push("after-close-receipt");
+            }),
+        });
+
+        const replacement = yield* mutator
+          .reconcile(makeRetirementConfig(instanceId, 2))
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(beforeCloseObserved);
+
+        expect(beforeCloseObservation?.retiringId).toBe(instanceId);
+        expect(beforeCloseObservation?.adapter).toBe(initialAdapter);
+        expect(beforeCloseObservation?.lookup).toBeUndefined();
+
+        yield* Deferred.await(closeStarted);
+        expect(events).toEqual(["create:1", "before-close", "close-started"]);
+        expect(yield* registry.getInstance(instanceId)).toBeUndefined();
+        expect(yield* registry.listInstances).toEqual([]);
+
+        yield* Deferred.succeed(closeRelease, undefined);
+        yield* Deferred.await(afterCloseStarted);
+        expect(afterCloseObservation?.retiringId).toBe(instanceId);
+        expect(afterCloseObservation?.adapter).toBe(initialAdapter);
+        expect(afterCloseObservation?.lookup).toBeUndefined();
+        expect(events).toEqual([
+          "create:1",
+          "before-close",
+          "close-started",
+          "close-complete",
+          "after-close-started",
+        ]);
+        expect(yield* registry.getInstance(instanceId)).toBeUndefined();
+
+        yield* Deferred.succeed(afterCloseRelease, undefined);
+        yield* Fiber.join(replacement);
+
+        expect(events).toEqual([
+          "create:1",
+          "before-close",
+          "close-started",
+          "close-complete",
+          "after-close-started",
+          "after-close-receipt",
+          "create:2",
+        ]);
+        const current = yield* registry.getInstance(instanceId);
+        expect(current).toBeDefined();
+        expect(current?.adapter).not.toBe(initialAdapter);
+      }).pipe(Effect.ensuring(releaseGates));
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("serializes concurrent reconciles through interrupted retirement", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("retirement-interruption");
+      const beforeStarted = yield* Deferred.make<void>();
+      const beforeRelease = yield* Deferred.make<void>();
+      const closeStarted = yield* Deferred.make<void>();
+      const closeRelease = yield* Deferred.make<void>();
+      const afterCloseStarted = yield* Deferred.make<void>();
+      const afterCloseRelease = yield* Deferred.make<void>();
+      const afterCloseComplete = yield* Deferred.make<void>();
+      const createdVersions: Array<number> = [];
+      const events: Array<string> = [];
+      let beforeCalls = 0;
+      let activeBeforeCalls = 0;
+      let maxActiveBeforeCalls = 0;
+      const releaseGates = Effect.uninterruptible(
+        Effect.gen(function* () {
+          yield* Deferred.succeed(beforeRelease, undefined);
+          yield* Deferred.succeed(closeRelease, undefined);
+          yield* Deferred.succeed(afterCloseRelease, undefined);
+        }),
+      );
+
+      yield* Effect.gen(function* () {
+        const driver = makeRetirementTestDriver(({ createNumber, scope, version }) =>
+          Effect.gen(function* () {
+            events.push(`create:${version}`);
+            createdVersions.push(version);
+            if (createNumber !== 1) return;
+            yield* Scope.addFinalizer(
+              scope,
+              Effect.uninterruptible(
+                Effect.gen(function* () {
+                  events.push("close-started");
+                  yield* Deferred.succeed(closeStarted, undefined);
+                  yield* Deferred.await(closeRelease);
+                  events.push("close-complete");
+                }),
+              ),
+            );
+          }),
+        );
+        const { registry, mutator } = yield* makeProviderInstanceRegistry({
+          drivers: [driver],
+          configMap: makeRetirementConfig(instanceId, 0),
+        });
+
+        yield* registry.registerRetirementHooks({
+          beforeClose: () =>
+            Effect.gen(function* () {
+              beforeCalls += 1;
+              activeBeforeCalls += 1;
+              maxActiveBeforeCalls = Math.max(maxActiveBeforeCalls, activeBeforeCalls);
+              if (beforeCalls === 1) {
+                events.push("before-close");
+                yield* Deferred.succeed(beforeStarted, undefined);
+                yield* Deferred.await(beforeRelease);
+              }
+              activeBeforeCalls -= 1;
+            }),
+          afterClose: () =>
+            Effect.gen(function* () {
+              events.push("after-close-started");
+              yield* Deferred.succeed(afterCloseStarted, undefined);
+              yield* Deferred.await(afterCloseRelease);
+              events.push("after-close-complete");
+              yield* Deferred.succeed(afterCloseComplete, undefined);
+            }),
+        });
+
+        const first = yield* mutator
+          .reconcile(makeRetirementConfig(instanceId, 1))
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(beforeStarted);
+
+        const second = yield* mutator
+          .reconcile(makeRetirementConfig(instanceId, 2))
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        const interruptFirst = yield* Fiber.interrupt(first).pipe(Effect.forkDetach);
+        yield* Effect.yieldNow;
+
+        expect(events).toEqual(["create:0", "before-close"]);
+        expect(createdVersions).toEqual([0]);
+        expect(activeBeforeCalls).toBe(1);
+        expect(yield* registry.getInstance(instanceId)).toBeUndefined();
+
+        yield* Deferred.succeed(beforeRelease, undefined);
+        yield* Deferred.await(closeStarted);
+        expect(events).toEqual(["create:0", "before-close", "close-started"]);
+        expect(createdVersions).toEqual([0]);
+        expect(yield* registry.getInstance(instanceId)).toBeUndefined();
+
+        yield* Deferred.succeed(closeRelease, undefined);
+        yield* Deferred.await(afterCloseStarted);
+        expect(events).toEqual([
+          "create:0",
+          "before-close",
+          "close-started",
+          "close-complete",
+          "after-close-started",
+        ]);
+        expect(createdVersions).toEqual([0]);
+        expect(yield* registry.getInstance(instanceId)).toBeUndefined();
+
+        yield* Deferred.succeed(afterCloseRelease, undefined);
+        yield* Deferred.await(afterCloseComplete);
+        yield* Fiber.join(interruptFirst);
+        yield* Fiber.join(second);
+
+        expect(createdVersions).toContain(2);
+        expect(events.indexOf("after-close-complete")).toBeLessThan(
+          events.findIndex((event) => event === "create:2"),
+        );
+        expect(beforeCalls).toBeGreaterThanOrEqual(1);
+        expect(maxActiveBeforeCalls).toBe(1);
+        expect(yield* registry.getInstance(instanceId)).toBeDefined();
+      }).pipe(Effect.ensuring(releaseGates));
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("runs afterClose and replacement build after a timed-out close", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("retirement-timeout");
+      const closeStarted = yield* Deferred.make<void>();
+      const closeRelease = yield* Deferred.make<void>();
+      const closeComplete = yield* Deferred.make<void>();
+      const afterCloseStarted = yield* Deferred.make<void>();
+      const afterCloseRelease = yield* Deferred.make<void>();
+      const events: Array<string> = [];
+      const releaseGates = Effect.uninterruptible(
+        Effect.gen(function* () {
+          yield* Deferred.succeed(closeRelease, undefined);
+          yield* Deferred.succeed(afterCloseRelease, undefined);
+        }),
+      );
+
+      yield* Effect.gen(function* () {
+        const driver = makeRetirementTestDriver(({ createNumber, scope, version }) =>
+          Effect.gen(function* () {
+            events.push(`create:${version}`);
+            if (createNumber !== 1) return;
+            yield* Scope.addFinalizer(
+              scope,
+              Effect.uninterruptible(
+                Effect.gen(function* () {
+                  events.push("close-started");
+                  yield* Deferred.succeed(closeStarted, undefined);
+                  yield* Deferred.await(closeRelease);
+                  events.push("close-complete");
+                  yield* Deferred.succeed(closeComplete, undefined);
+                }),
+              ),
+            );
+          }),
+        );
+        const { registry, mutator } = yield* makeProviderInstanceRegistry({
+          drivers: [driver],
+          configMap: makeRetirementConfig(instanceId, 0),
+        });
+
+        yield* registry.registerRetirementHooks({
+          beforeClose: () =>
+            Effect.sync(() => {
+              events.push("before-close");
+            }),
+          afterClose: () =>
+            Effect.gen(function* () {
+              events.push("after-close-started");
+              yield* Deferred.succeed(afterCloseStarted, undefined);
+              yield* Deferred.await(afterCloseRelease);
+              events.push("after-close-complete");
+            }),
+        });
+
+        const replacement = yield* mutator
+          .reconcile(makeRetirementConfig(instanceId, 1))
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(closeStarted);
+        yield* TestClock.adjust("5 seconds");
+        yield* Deferred.await(afterCloseStarted);
+
+        expect(events).toEqual([
+          "create:0",
+          "before-close",
+          "close-started",
+          "after-close-started",
+        ]);
+        expect(yield* registry.getInstance(instanceId)).toBeUndefined();
+
+        yield* Deferred.succeed(afterCloseRelease, undefined);
+        yield* Fiber.join(replacement);
+        expect(events).toEqual([
+          "create:0",
+          "before-close",
+          "close-started",
+          "after-close-started",
+          "after-close-complete",
+          "create:1",
+        ]);
+        expect(yield* registry.getInstance(instanceId)).toBeDefined();
+
+        yield* Deferred.succeed(closeRelease, undefined);
+        yield* Deferred.await(closeComplete);
+      }).pipe(Effect.ensuring(releaseGates));
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("unregisters retirement hooks by scope and rejects duplicate registration", () =>
+    Effect.gen(function* () {
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: [makeRetirementTestDriver(() => Effect.void)],
+        configMap: {},
+      });
+      const firstScope = yield* Scope.make();
+      const secondScope = yield* Scope.make();
+      const firstHooks = {
+        beforeClose: () => Effect.void,
+        afterClose: () => Effect.void,
+      };
+      const secondHooks = {
+        beforeClose: () => Effect.void,
+        afterClose: () => Effect.void,
+      };
+
+      yield* registry
+        .registerRetirementHooks(firstHooks)
+        .pipe(Effect.provideService(Scope.Scope, firstScope));
+      const duplicate = yield* registry
+        .registerRetirementHooks(secondHooks)
+        .pipe(Effect.provideService(Scope.Scope, secondScope), Effect.exit);
+      expect(Exit.isFailure(duplicate) && Cause.hasDies(duplicate.cause)).toBe(true);
+
+      yield* Scope.close(firstScope, Exit.void);
+      yield* registry
+        .registerRetirementHooks(secondHooks)
+        .pipe(Effect.provideService(Scope.Scope, secondScope));
+      yield* Scope.close(secondScope, Exit.void);
+    }).pipe(Effect.scoped),
   );
 });
