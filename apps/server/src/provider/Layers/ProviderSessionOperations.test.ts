@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
 import { ProviderSessionSupersededError } from "../Errors.ts";
@@ -15,6 +16,7 @@ import {
 } from "./ProviderSessionOperations.ts";
 
 const thread = ThreadId.make("provider-session-operations-thread");
+const isProviderSessionSupersededError = Schema.is(ProviderSessionSupersededError);
 
 const withOperations = <A, E, R>(
   use: (operations: ProviderSessionOperations) => Effect.Effect<A, E, R>,
@@ -29,7 +31,7 @@ const withOperations = <A, E, R>(
 const isSuperseded = (exit: Exit.Exit<unknown, unknown>): boolean =>
   Exit.isFailure(exit) &&
   exit.cause.reasons.some(
-    (reason) => reason._tag === "Fail" && reason.error instanceof ProviderSessionSupersededError,
+    (reason) => reason._tag === "Fail" && isProviderSessionSupersededError(reason.error),
   );
 
 const successValue = <A, E>(exit: Exit.Exit<A, E>): A => {

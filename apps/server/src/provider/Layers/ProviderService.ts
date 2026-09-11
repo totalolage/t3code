@@ -35,6 +35,7 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { resolveProjectAgentBrowserAccess } from "@t3tools/shared/serverSettings";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -91,6 +92,27 @@ import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 const isModelSelection = Schema.is(ModelSelection);
+const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
+const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
+const isProviderAdapterSessionClosedError = Schema.is(ProviderAdapterSessionClosedError);
+const isProviderAdapterSessionNotFoundError = Schema.is(ProviderAdapterSessionNotFoundError);
+const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
+const isProviderInstanceNotFoundError = Schema.is(ProviderInstanceNotFoundError);
+const isProviderSessionDirectoryPersistenceError = Schema.is(
+  ProviderSessionDirectoryPersistenceError,
+);
+const isProviderSessionNotFoundError = Schema.is(ProviderSessionNotFoundError);
+const isProviderSessionSupersededError = Schema.is(ProviderSessionSupersededError);
+const isProviderUnsupportedError = Schema.is(ProviderUnsupportedError);
+const isProviderValidationError = Schema.is(ProviderValidationError);
+const isProviderWorkspaceMissingError = Schema.is(ProviderWorkspaceMissingError);
+
+/** Carries a typed consumer failure through the delivery controller's homogeneous error channel. */
+class ProviderRuntimeConsumerFailure extends Data.TaggedError("ProviderRuntimeConsumerFailure")<{
+  readonly cause: unknown;
+}> {}
+
+type ProviderRuntimeDeliveryError = ProviderServiceError | ProviderRuntimeConsumerFailure;
 
 /** How long a manual context compaction may run before ProviderService gives up on it. */
 const COMPACTION_COMPLETION_TIMEOUT = "10 minutes";
@@ -243,26 +265,27 @@ const providerServiceErrorFromUnknown = (
   operation: string,
   cause: unknown,
 ): ProviderServiceError => {
+  const unwrappedCause = cause instanceof ProviderRuntimeConsumerFailure ? cause.cause : cause;
   if (
-    cause instanceof ProviderAdapterProcessError ||
-    cause instanceof ProviderAdapterRequestError ||
-    cause instanceof ProviderAdapterSessionClosedError ||
-    cause instanceof ProviderAdapterSessionNotFoundError ||
-    cause instanceof ProviderAdapterValidationError ||
-    cause instanceof ProviderInstanceNotFoundError ||
-    cause instanceof ProviderSessionDirectoryPersistenceError ||
-    cause instanceof ProviderSessionNotFoundError ||
-    cause instanceof ProviderSessionSupersededError ||
-    cause instanceof ProviderUnsupportedError ||
-    cause instanceof ProviderValidationError ||
-    cause instanceof ProviderWorkspaceMissingError
+    isProviderAdapterProcessError(unwrappedCause) ||
+    isProviderAdapterRequestError(unwrappedCause) ||
+    isProviderAdapterSessionClosedError(unwrappedCause) ||
+    isProviderAdapterSessionNotFoundError(unwrappedCause) ||
+    isProviderAdapterValidationError(unwrappedCause) ||
+    isProviderInstanceNotFoundError(unwrappedCause) ||
+    isProviderSessionDirectoryPersistenceError(unwrappedCause) ||
+    isProviderSessionNotFoundError(unwrappedCause) ||
+    isProviderSessionSupersededError(unwrappedCause) ||
+    isProviderUnsupportedError(unwrappedCause) ||
+    isProviderValidationError(unwrappedCause) ||
+    isProviderWorkspaceMissingError(unwrappedCause)
   ) {
-    return cause;
+    return unwrappedCause;
   }
   return toValidationError(
     operation,
-    cause instanceof Error ? cause.message : String(cause),
-    cause,
+    unwrappedCause instanceof Error ? unwrappedCause.message : String(unwrappedCause),
+    unwrappedCause,
   );
 };
 
@@ -851,28 +874,31 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   let processRuntimeEvent: (
     source: ProviderRuntimeSource,
     event: ProviderRuntimeEvent,
-  ) => Effect.Effect<void, unknown> = () =>
+  ) => Effect.Effect<void, ProviderRuntimeDeliveryError> = () =>
     Effect.die("ProviderService runtime event handler is not ready");
   const operations = yield* ProviderSessionOperations.makeProviderSessionOperations;
-  const runtimeDelivery = yield* ProviderRuntimeDelivery.makeProviderRuntimeDelivery({
-    processEvent: (source, event) => processRuntimeEvent(source, event),
-    onSourceEnded: () =>
-      // The delivery helper invokes this before it marks its reader record
-      // reconciled. Schedule the retry after that handoff so an attachment
-      // blocked by the old tombstone can proceed.
-      Effect.forkDetach(
-        Effect.yieldNow.pipe(
-          Effect.andThen(Effect.suspend(() => reconcileInstanceSubscriptions)),
-          Effect.catchCause((cause) =>
-            Effect.logWarning("provider runtime source reconciliation failed", { cause }),
+  const runtimeDelivery =
+    yield* ProviderRuntimeDelivery.makeProviderRuntimeDelivery<ProviderRuntimeDeliveryError>({
+      processEvent: (source, event) => processRuntimeEvent(source, event),
+      onSourceEnded: () =>
+        // The delivery helper invokes this before it marks its reader record
+        // reconciled. Schedule the retry after that handoff so an attachment
+        // blocked by the old tombstone can proceed.
+        Effect.forkDetach(
+          Effect.yieldNow.pipe(
+            Effect.andThen(Effect.suspend(() => reconcileInstanceSubscriptions)),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("provider runtime source reconciliation failed", { cause }),
+            ),
           ),
-        ),
-      ).pipe(Effect.asVoid),
-  });
+        ).pipe(Effect.asVoid),
+    });
   const stopAllRegistration = yield* Semaphore.make(1);
   let stopAllOutcome: Deferred.Deferred<Exit.Exit<void, ProviderServiceError>> | undefined;
 
-  const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void, unknown> =>
+  const publishRuntimeEvent = (
+    event: ProviderRuntimeEvent,
+  ): Effect.Effect<void, ProviderRuntimeDeliveryError> =>
     Effect.succeed(event).pipe(
       Effect.tap((canonicalEvent) =>
         canonicalEventLogger
@@ -915,7 +941,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const processFallbackCompactionEvent = (
     pending: PendingCompaction,
     event: ProviderRuntimeEvent,
-  ): Effect.Effect<void, unknown> =>
+  ): Effect.Effect<void, ProviderRuntimeDeliveryError> =>
     Effect.gen(function* () {
       if (pendingCompactions.get(event.threadId) !== pending) {
         yield* publishRuntimeEvent(event);
@@ -999,7 +1025,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   processRuntimeEvent = (
     source: ProviderRuntimeSource,
     event: ProviderRuntimeEvent,
-  ): Effect.Effect<void, unknown> =>
+  ): Effect.Effect<void, ProviderRuntimeDeliveryError> =>
     Effect.gen(function* () {
       const canonicalEvent = yield* Effect.sync(() =>
         correlateRuntimeEventWithInstance(
@@ -1249,9 +1275,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             )
             .pipe(
               Effect.catch((cause) =>
-                cause instanceof ProviderAdapterSessionNotFoundError
-                  ? Effect.void
-                  : Effect.fail(cause),
+                isProviderAdapterSessionNotFoundError(cause) ? Effect.void : Effect.fail(cause),
               ),
             ),
         );
@@ -1973,7 +1997,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             .pipe(
               Effect.asVoid,
               Effect.catch((cause) =>
-                cause instanceof ProviderSessionSupersededError ? Effect.void : Effect.fail(cause),
+                isProviderSessionSupersededError(cause) ? Effect.void : Effect.fail(cause),
               ),
             ),
       );
@@ -2615,9 +2639,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const executeStopAll = Effect.fn("executeStopAll")(function* () {
     const failures: ProviderServiceError[] = [];
-    const runStage = <A>(
+    const runStage = <A, E>(
       stage: string,
-      effect: Effect.Effect<A, unknown, never>,
+      effect: Effect.Effect<A, E, never>,
     ): Effect.Effect<A | undefined, never> =>
       Effect.exit(effect).pipe(
         Effect.flatMap((exit) => {
@@ -2633,9 +2657,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           }).pipe(Effect.as(undefined));
         }),
       );
-    const runMetadataStage = <A>(
+    const runMetadataStage = <A, E>(
       stage: string,
-      effect: Effect.Effect<A, unknown, never>,
+      effect: Effect.Effect<A, E, never>,
     ): Effect.Effect<A | undefined, never> =>
       runStage(
         stage,
@@ -2896,7 +2920,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     assertConversationRollbackSupported,
     rollbackConversation,
     uploadFeedback,
-    registerRuntimeEventConsumer: (consumer) => runtimeDelivery.registerConsumer(consumer),
+    registerRuntimeEventConsumer: <E>(consumer: ProviderService.ProviderRuntimeEventConsumer<E>) =>
+      runtimeDelivery.registerConsumer((event) =>
+        consumer(event).pipe(
+          Effect.mapError((cause) => new ProviderRuntimeConsumerFailure({ cause })),
+        ),
+      ),
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

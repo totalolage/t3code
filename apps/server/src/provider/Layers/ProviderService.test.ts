@@ -108,6 +108,7 @@ const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
 const OPENCODE_DRIVER = ProviderDriverKind.make("opencode");
+const isProviderValidationError = Schema.is(ProviderValidationError);
 
 const assistantQuoteText = 'Keep the shared parser for "résumé".\nPreserve line breaks.';
 const assistantCitation = {
@@ -5283,8 +5284,8 @@ describe("ProviderService lifecycle ownership", () => {
         assert.isTrue(Exit.isFailure(settledExit));
         if (Exit.isFailure(settledExit)) {
           const settledFailure = Cause.squash(settledExit.cause);
-          assert.instanceOf(settledFailure, ProviderValidationError);
-          if (settledFailure instanceof ProviderValidationError) {
+          assert.isTrue(isProviderValidationError(settledFailure));
+          if (isProviderValidationError(settledFailure)) {
             assert.equal(settledFailure.cause, receiverError);
           }
         }
@@ -6041,8 +6042,8 @@ describe("ProviderService lifecycle ownership", () => {
       assert.isTrue(Exit.isFailure(shutdownExit));
       if (Exit.isFailure(shutdownExit)) {
         const failure = Cause.squash(shutdownExit.cause);
-        assert.instanceOf(failure, ProviderValidationError);
-        if (failure instanceof ProviderValidationError) {
+        assert.isTrue(isProviderValidationError(failure));
+        if (isProviderValidationError(failure)) {
           assert.equal(failure.operation, "ProviderService.stopAll");
           assert.equal(
             failure.issue,

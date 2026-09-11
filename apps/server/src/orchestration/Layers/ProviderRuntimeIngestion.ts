@@ -21,6 +21,7 @@ import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -116,11 +117,17 @@ type TurnStartRequestedDomainEvent = Extract<
   { type: "thread.turn-start-requested" }
 >;
 
-type RuntimeIngestionInput =
+class ProviderRuntimeIngestionClosedError extends Data.TaggedError(
+  "ProviderRuntimeIngestionClosedError",
+)<{
+  readonly message: string;
+}> {}
+
+type RuntimeIngestionInput<ReceiptError> =
   | {
       source: "runtime";
       event: ProviderRuntimeEvent;
-      receipt?: Deferred.Deferred<void, unknown>;
+      receipt?: Deferred.Deferred<void, ReceiptError>;
     }
   | {
       source: "domain";
@@ -2157,10 +2164,15 @@ const make = Effect.gen(function* () {
 
   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
 
-  const processInput = (input: RuntimeIngestionInput) =>
+  const processInput = <ReceiptError>(input: RuntimeIngestionInput<ReceiptError>) =>
     input.source === "runtime" ? processRuntimeEvent(input.event) : processDomainEvent(input.event);
 
-  const processInputSafely = (input: RuntimeIngestionInput) => {
+  type RuntimeIngestionProcessingError = Effect.Error<ReturnType<typeof processInput>>;
+  type RuntimeIngestionReceiptError =
+    | RuntimeIngestionProcessingError
+    | ProviderRuntimeIngestionClosedError;
+
+  const processInputSafely = (input: RuntimeIngestionInput<RuntimeIngestionReceiptError>) => {
     const receipt = input.source === "runtime" ? input.receipt : undefined;
     const processing =
       receipt === undefined
@@ -2186,9 +2198,11 @@ const make = Effect.gen(function* () {
     );
   };
 
-  const closedIngestionFailure = new Error("Provider runtime ingestion is closed");
+  const closedIngestionFailure = new ProviderRuntimeIngestionClosedError({
+    message: "Provider runtime ingestion is closed",
+  });
   const closedDeferred = yield* Deferred.make<void>();
-  const pendingExitReceipts = new Set<Deferred.Deferred<void, unknown>>();
+  const pendingExitReceipts = new Set<Deferred.Deferred<void, RuntimeIngestionReceiptError>>();
   let accepting = true;
 
   const workerScope = yield* Effect.acquireRelease(Scope.make("sequential"), (scope) =>
@@ -2228,7 +2242,7 @@ const make = Effect.gen(function* () {
             if (!accepting) {
               return undefined;
             }
-            const receipt = Deferred.makeUnsafe<void, unknown>();
+            const receipt = Deferred.makeUnsafe<void, RuntimeIngestionReceiptError>();
             pendingExitReceipts.add(receipt);
             return receipt;
           }),
@@ -2269,7 +2283,7 @@ const make = Effect.gen(function* () {
       yield* forkParked(
         Effect.gen(function* () {
           yield* providerService.registerRuntimeEventConsumer(consumeRuntimeEvent);
-          yield* Effect.never;
+          return yield* Effect.never;
         }),
       );
       yield* forkParked(

@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { DEFAULT_MODEL, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
+import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -19,6 +20,10 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
+
+class ProviderStopTestError extends Data.TaggedError("ProviderStopTestError")<{
+  readonly message: string;
+}> {}
 
 it.effect("automatic pull only updates enabled, behind, clean default-branch checkouts", () =>
   Effect.gen(function* () {
@@ -220,7 +225,7 @@ it.effect("shutdown closes the reactor scope after a provider stop failure", () 
           cause: new Error("Server is shutting down."),
         }),
         reactorScope,
-        stopProviders: Effect.fail(new Error("provider stop failed")),
+        stopProviders: Effect.fail(new ProviderStopTestError({ message: "provider stop failed" })),
         drainIngestion: Deferred.succeed(drainStarted, undefined).pipe(
           Effect.andThen(Deferred.await(drainRelease)),
         ),

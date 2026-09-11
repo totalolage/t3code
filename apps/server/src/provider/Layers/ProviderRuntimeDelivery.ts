@@ -5,6 +5,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -17,13 +18,13 @@ import type { ProviderAdapterError } from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 
 type ProviderRuntimeAdapter = ProviderAdapterShape<ProviderAdapterError>;
-type ProcessEvent = (
+type ProcessEvent<E> = (
   source: ProviderRuntimeSource,
   event: ProviderRuntimeEvent,
-) => Effect.Effect<void, unknown>;
-type SourceConsumer = (event: ProviderRuntimeEvent) => Effect.Effect<void, unknown>;
-type PublishEvent = (isAllowed: () => boolean) => Effect.Effect<void, unknown>;
-type ReaderExit = Exit.Exit<void, unknown>;
+) => Effect.Effect<void, E>;
+type SourceConsumer<E> = (event: ProviderRuntimeEvent) => Effect.Effect<void, E>;
+type PublishEvent<E> = (isAllowed: () => boolean) => Effect.Effect<void, E>;
+type ReaderExit<E> = Exit.Exit<void, E>;
 
 const OPEN_CODE = ProviderDriverKind.make("opencode");
 const LIFECYCLE_WAIT = "5 seconds" as const;
@@ -35,20 +36,20 @@ interface ExitIntentRegistration {
   readonly intent: () => "stop" | "replace";
 }
 
-interface FlushOperation {
-  worker: Fiber.Fiber<void, unknown> | undefined;
+interface FlushOperation<E> {
+  worker: Fiber.Fiber<void, E> | undefined;
   completed: boolean;
   readonly onComplete: (() => void) | undefined;
 }
 
-interface SourceEntry {
+interface SourceEntry<E> {
   readonly instanceId: ProviderInstanceId;
   readonly adapter: ProviderRuntimeAdapter;
   readonly source: ProviderRuntimeSource;
-  readonly readerCompletion: Deferred.Deferred<ReaderExit>;
-  readonly pendingFlushes: Set<FlushOperation>;
-  readonly timedOutFlushes: Set<FlushOperation>;
-  processFailure: Cause.Cause<unknown> | undefined;
+  readonly readerCompletion: Deferred.Deferred<ReaderExit<E>>;
+  readonly pendingFlushes: Set<FlushOperation<E>>;
+  readonly timedOutFlushes: Set<FlushOperation<E>>;
+  processFailure: Cause.Cause<E> | undefined;
   readonly state: {
     status: SourceStatus;
   };
@@ -56,16 +57,16 @@ interface SourceEntry {
   readerEnded: boolean;
 }
 
-interface InstanceEntries {
-  readonly byAdapter: WeakMap<ProviderRuntimeAdapter, SourceEntry>;
+interface InstanceEntries<E> {
+  readonly byAdapter: WeakMap<ProviderRuntimeAdapter, SourceEntry<E>>;
   /** Entries stay here until their adapter reader has actually completed. */
-  readonly unfinished: Set<SourceEntry>;
+  readonly unfinished: Set<SourceEntry<E>>;
   /** Retired entries stay here only while detached flush workers are running. */
-  readonly pendingFlushEntries: Set<SourceEntry>;
+  readonly pendingFlushEntries: Set<SourceEntry<E>>;
 }
 
-interface EntryRegistration {
-  readonly entry: SourceEntry;
+interface EntryRegistration<E> {
+  readonly entry: SourceEntry<E>;
   readonly created: boolean;
 }
 
@@ -76,12 +77,18 @@ export interface ProviderRuntimeSource {
   readonly isPublishing: () => boolean;
 }
 
-export interface ProviderRuntimeDeliveryHandlers {
-  readonly processEvent: ProcessEvent;
-  readonly onSourceEnded: () => Effect.Effect<void, unknown>;
+export class ProviderRuntimeSourceNotOwnedError extends Data.TaggedError(
+  "ProviderRuntimeSourceNotOwnedError",
+)<{
+  readonly message: string;
+}> {}
+
+export interface ProviderRuntimeDeliveryHandlers<E = never> {
+  readonly processEvent: ProcessEvent<E>;
+  readonly onSourceEnded: () => Effect.Effect<void, E>;
 }
 
-export interface ProviderRuntimeDelivery {
+export interface ProviderRuntimeDelivery<E = never> {
   readonly attach: (
     instanceId: ProviderInstanceId,
     adapter: ProviderRuntimeAdapter,
@@ -98,23 +105,27 @@ export interface ProviderRuntimeDelivery {
   readonly afterClose: (
     instanceId: ProviderInstanceId,
     adapter: ProviderRuntimeAdapter,
-  ) => Effect.Effect<void, unknown>;
+  ) => Effect.Effect<void, E | Cause.TimeoutError>;
   readonly closeAdmission: Effect.Effect<void>;
-  readonly registerConsumer: (consumer: SourceConsumer) => Effect.Effect<void, never, Scope.Scope>;
+  readonly registerConsumer: (
+    consumer: SourceConsumer<E>,
+  ) => Effect.Effect<void, never, Scope.Scope>;
   readonly tag: (event: ProviderRuntimeEvent, source: ProviderRuntimeSource) => void;
   readonly inheritTag: (derived: ProviderRuntimeEvent, original: ProviderRuntimeEvent) => void;
   readonly isEventAllowed: (event: ProviderRuntimeEvent) => boolean;
   readonly deliver: (
     event: ProviderRuntimeEvent,
-    publish: PublishEvent,
-  ) => Effect.Effect<void, unknown>;
-  readonly withExitIntent: <A, E, R>(
+    publish: PublishEvent<E>,
+  ) => Effect.Effect<void, E>;
+  readonly withExitIntent: <A, EBody, R>(
     source: ProviderRuntimeSource,
     threadId: ThreadId,
     intent: () => "stop" | "replace",
-    effect: Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, unknown, R>;
-  readonly flush: (source: ProviderRuntimeSource) => Effect.Effect<void, unknown>;
+    effect: Effect.Effect<A, EBody, R>,
+  ) => Effect.Effect<A, EBody | E | Cause.TimeoutError | ProviderRuntimeSourceNotOwnedError, R>;
+  readonly flush: (
+    source: ProviderRuntimeSource,
+  ) => Effect.Effect<void, E | Cause.TimeoutError | ProviderRuntimeSourceNotOwnedError>;
 }
 
 function fromExit<A, E>(exit: Exit.Exit<A, E>): Effect.Effect<A, E> {
@@ -126,15 +137,15 @@ function fromExit<A, E>(exit: Exit.Exit<A, E>): Effect.Effect<A, E> {
  * flush fibers are detached so scope shutdown requests interruption without
  * joining callbacks that may be uninterruptible.
  */
-export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDelivery")(function* (
-  handlers: ProviderRuntimeDeliveryHandlers,
-): Effect.fn.Return<ProviderRuntimeDelivery, never, Scope.Scope> {
+export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDelivery")(function* <E>(
+  handlers: ProviderRuntimeDeliveryHandlers<E>,
+): Effect.fn.Return<ProviderRuntimeDelivery<E>, never, Scope.Scope> {
   const controllerScope = yield* Scope.Scope;
-  const entriesByInstance = new Map<ProviderInstanceId, InstanceEntries>();
-  const liveEntries = new Set<SourceEntry>();
-  const sourceEntries = new WeakMap<ProviderRuntimeSource, SourceEntry>();
+  const entriesByInstance = new Map<ProviderInstanceId, InstanceEntries<E>>();
+  const liveEntries = new Set<SourceEntry<E>>();
+  const sourceEntries = new WeakMap<ProviderRuntimeSource, SourceEntry<E>>();
   const eventTags = new WeakMap<object, ProviderRuntimeSource>();
-  const consumers = new Set<{ readonly consumer: SourceConsumer }>();
+  const consumers = new Set<{ readonly consumer: SourceConsumer<E> }>();
   const exitIntents = new WeakMap<
     ProviderRuntimeSource,
     Map<ThreadId, Map<number, ExitIntentRegistration>>
@@ -143,10 +154,10 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
   let admissionClosed = false;
   let nextExitIntentSequence = 0;
 
-  const getInstanceEntries = (instanceId: ProviderInstanceId): InstanceEntries => {
+  const getInstanceEntries = (instanceId: ProviderInstanceId): InstanceEntries<E> => {
     const existing = entriesByInstance.get(instanceId);
     if (existing !== undefined) return existing;
-    const created: InstanceEntries = {
+    const created: InstanceEntries<E> = {
       byAdapter: new WeakMap(),
       unfinished: new Set(),
       pendingFlushEntries: new Set(),
@@ -155,7 +166,7 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
     return created;
   };
 
-  const hasUnfinishedEntry = (instanceId: ProviderInstanceId, except?: SourceEntry): boolean => {
+  const hasUnfinishedEntry = (instanceId: ProviderInstanceId, except?: SourceEntry<E>): boolean => {
     const instanceEntries = entriesByInstance.get(instanceId);
     if (instanceEntries === undefined) return false;
     for (const entry of instanceEntries.unfinished) {
@@ -168,10 +179,10 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
     instanceId: ProviderInstanceId,
     adapter: ProviderRuntimeAdapter,
     status: SourceStatus,
-  ): SourceEntry => {
-    const readerCompletion = Deferred.makeUnsafe<ReaderExit>();
-    const pendingFlushes = new Set<FlushOperation>();
-    const timedOutFlushes = new Set<FlushOperation>();
+  ): SourceEntry<E> => {
+    const readerCompletion = Deferred.makeUnsafe<ReaderExit<E>>();
+    const pendingFlushes = new Set<FlushOperation<E>>();
+    const timedOutFlushes = new Set<FlushOperation<E>>();
     const state = { status };
     const source: ProviderRuntimeSource = {
       instanceId,
@@ -197,7 +208,7 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
     instanceId: ProviderInstanceId,
     adapter: ProviderRuntimeAdapter,
     status: SourceStatus,
-  ): EntryRegistration => {
+  ): EntryRegistration<E> => {
     const instanceEntries = getInstanceEntries(instanceId);
     const existing = instanceEntries.byAdapter.get(adapter);
     if (existing !== undefined) return { entry: existing, created: false };
@@ -210,7 +221,7 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
     return { entry, created: true };
   };
 
-  const rollbackEntry = (entry: SourceEntry): void => {
+  const rollbackEntry = (entry: SourceEntry<E>): void => {
     if (entry.reader !== undefined || entry.readerEnded) return;
     const instanceEntries = entriesByInstance.get(entry.instanceId);
     if (instanceEntries?.byAdapter.get(entry.adapter) !== entry) return;
@@ -221,7 +232,7 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
     liveEntries.delete(entry);
   };
 
-  const recordProcessFailure = (entry: SourceEntry, cause: Cause.Cause<unknown>): void => {
+  const recordProcessFailure = (entry: SourceEntry<E>, cause: Cause.Cause<E>): void => {
     if (entry.processFailure === undefined) entry.processFailure = cause;
   };
 
@@ -271,8 +282,8 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
   };
 
   const finishEntry = Effect.fn("ProviderRuntimeDelivery.finishEntry")(function* (
-    entry: SourceEntry,
-    streamExit: ReaderExit,
+    entry: SourceEntry<E>,
+    streamExit: ReaderExit<E>,
   ) {
     const shouldFinish = yield* Effect.sync(() => {
       if (entry.readerEnded) return false;
@@ -308,7 +319,7 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
   });
 
   const processOne = Effect.fn("ProviderRuntimeDelivery.processOne")(function* (
-    entry: SourceEntry,
+    entry: SourceEntry<E>,
     event: ProviderRuntimeEvent,
   ) {
     yield* Effect.sync(() => eventTags.set(event, entry.source));
@@ -334,7 +345,7 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
   });
 
   const startReader = Effect.fn("ProviderRuntimeDelivery.startReader")(function* (
-    entry: SourceEntry,
+    entry: SourceEntry<E>,
   ) {
     const streamEffect = Effect.suspend(() =>
       Stream.runForEach(entry.adapter.streamEvents, (event) => processOne(entry, event)),
@@ -349,7 +360,7 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
     });
   });
 
-  const startRegisteredReader = (registration: EntryRegistration): Effect.Effect<void> => {
+  const startRegisteredReader = (registration: EntryRegistration<E>): Effect.Effect<void> => {
     if (!registration.created) return Effect.void;
     const entry = registration.entry;
     return Effect.uninterruptible(
@@ -383,7 +394,7 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
   const registerAttach = (
     instanceId: ProviderInstanceId,
     adapter: ProviderRuntimeAdapter,
-  ): EntryRegistration | undefined => {
+  ): EntryRegistration<E> | undefined => {
     if (admissionClosed) return undefined;
 
     const instanceEntries = entriesByInstance.get(instanceId);
@@ -414,7 +425,7 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
           const existing = instanceEntries?.byAdapter.get(adapter);
           if (existing !== undefined) {
             if (existing.state.status === "active") existing.state.status = "retiring";
-            return { entry: existing, created: false } satisfies EntryRegistration;
+            return { entry: existing, created: false } satisfies EntryRegistration<E>;
           }
           return registerEntry(instanceId, adapter, "retiring");
         });
@@ -473,7 +484,7 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
   });
 
   const registerConsumer = Effect.fn("ProviderRuntimeDelivery.registerConsumer")(function* (
-    consumer: SourceConsumer,
+    consumer: SourceConsumer<E>,
   ) {
     const registration = { consumer };
     yield* Effect.acquireRelease(
@@ -502,7 +513,7 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
 
   const deliver = Effect.fn("ProviderRuntimeDelivery.deliver")(function* (
     event: ProviderRuntimeEvent,
-    publish: PublishEvent,
+    publish: PublishEvent<E>,
   ) {
     if (!isEventAllowed(event)) return;
 
@@ -534,7 +545,7 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
     yield* Effect.suspend(() => publish(() => isEventAllowed(event)));
   });
 
-  const completeFlush = (entry: SourceEntry, operation: FlushOperation): void => {
+  const completeFlush = (entry: SourceEntry<E>, operation: FlushOperation<E>): void => {
     if (operation.completed) return;
     operation.completed = true;
     entry.pendingFlushes.delete(operation);
@@ -546,14 +557,14 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
   };
 
   const startFlush = Effect.fn("ProviderRuntimeDelivery.startFlush")(function* (
-    entry: SourceEntry,
+    entry: SourceEntry<E>,
     onComplete: (() => void) | undefined,
   ) {
-    let operation: FlushOperation | undefined;
+    let operation: FlushOperation<E> | undefined;
     return yield* Effect.uninterruptible(
       Effect.gen(function* () {
         const registered = yield* Effect.sync(() => {
-          const created: FlushOperation = {
+          const created: FlushOperation<E> = {
             worker: undefined,
             completed: false,
             onComplete,
@@ -615,7 +626,9 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
     const entry = sourceEntries.get(source);
     if (entry === undefined) {
       onComplete?.();
-      return yield* Effect.fail(new Error("Provider runtime source is not owned by this delivery"));
+      return yield* new ProviderRuntimeSourceNotOwnedError({
+        message: "Provider runtime source is not owned by this delivery",
+      });
     }
 
     if (entry.adapter.drainEvents === undefined) {
@@ -697,7 +710,7 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
     };
   };
 
-  const withExitIntent: ProviderRuntimeDelivery["withExitIntent"] = (
+  const withExitIntent: ProviderRuntimeDelivery<E>["withExitIntent"] = (
     source,
     threadId,
     intent,
@@ -718,13 +731,13 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
   const closeController = Effect.gen(function* () {
     const fibers = yield* Effect.sync(() => {
       admissionClosed = true;
-      const entries = new Set<SourceEntry>(liveEntries);
+      const entries = new Set<SourceEntry<E>>(liveEntries);
       for (const instanceEntries of entriesByInstance.values()) {
         for (const entry of instanceEntries.unfinished) entries.add(entry);
         for (const entry of instanceEntries.pendingFlushEntries) entries.add(entry);
       }
 
-      const fibersToInterrupt = new Set<Fiber.Fiber<void, unknown>>();
+      const fibersToInterrupt = new Set<Fiber.Fiber<void, E>>();
       for (const entry of entries) {
         entry.state.status = "retired";
         liveEntries.delete(entry);
@@ -759,5 +772,5 @@ export const makeProviderRuntimeDelivery = Effect.fn("makeProviderRuntimeDeliver
     deliver,
     withExitIntent,
     flush,
-  } satisfies ProviderRuntimeDelivery;
+  } satisfies ProviderRuntimeDelivery<E>;
 });

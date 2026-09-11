@@ -7,6 +7,7 @@ import {
 } from "@t3tools/contracts";
 import { it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
+import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -24,6 +25,7 @@ import {
   makeProviderRuntimeDelivery,
   type ProviderRuntimeDelivery,
   type ProviderRuntimeSource,
+  ProviderRuntimeSourceNotOwnedError,
 } from "./ProviderRuntimeDelivery.ts";
 
 const OPENCODE = ProviderDriverKind.make("opencode");
@@ -34,6 +36,14 @@ const THREAD = ThreadId.make("thread-main");
 const OTHER_THREAD = ThreadId.make("thread-other");
 const CREATED_AT = "2026-01-01T00:00:00.000Z";
 const LIFECYCLE_WAIT = "5 seconds" as const;
+
+class ConsumerReceiptError extends Data.TaggedError("ConsumerReceiptError")<{
+  readonly message: string;
+}> {}
+
+class ProcessReceiptError extends Data.TaggedError("ProcessReceiptError")<{
+  readonly message: string;
+}> {}
 
 interface FakeAdapter {
   readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
@@ -118,14 +128,14 @@ function isSome<A>(option: Option.Option<A>): option is Option.Some<A> {
   return Option.isSome(option);
 }
 
-const runWithDelivery = <A, E>(
-  make: (delivery: ProviderRuntimeDelivery) => Effect.Effect<A, E, Scope.Scope>,
+const runWithDelivery = <A, E, EController = never>(
+  make: (delivery: ProviderRuntimeDelivery<EController>) => Effect.Effect<A, E, Scope.Scope>,
   handlers: {
     readonly processEvent: (
       source: ProviderRuntimeSource,
       event: ProviderRuntimeEvent,
-    ) => Effect.Effect<void, unknown>;
-    readonly onSourceEnded?: () => Effect.Effect<void, unknown>;
+    ) => Effect.Effect<void, EController>;
+    readonly onSourceEnded?: () => Effect.Effect<void, EController>;
   },
 ) =>
   Effect.scoped(
@@ -183,7 +193,11 @@ describe("ProviderRuntimeDelivery", () => {
             const result = yield* Effect.exit(delivery.flush(foreign));
             expect(Exit.isFailure(result)).toBe(true);
             if (Exit.isFailure(result)) {
-              expect(Cause.squash(result.cause)).toBeInstanceOf(Error);
+              const error = Cause.squash(result.cause);
+              expect(error).toBeInstanceOf(ProviderRuntimeSourceNotOwnedError);
+              if (error instanceof ProviderRuntimeSourceNotOwnedError) {
+                expect(error.message).toBe("Provider runtime source is not owned by this delivery");
+              }
             }
           }),
         { processEvent: () => Effect.void },
@@ -508,10 +522,10 @@ describe("ProviderRuntimeDelivery", () => {
       const adapter = yield* makeFakeAdapter({
         drainEvents: () => Deferred.await(secondProcessed).pipe(Effect.as(true)),
       });
-      const firstError = new Error("first process receipt failed");
+      const firstError = new ProcessReceiptError({ message: "first process receipt failed" });
       const seen: Array<string> = [];
 
-      yield* runWithDelivery(
+      yield* runWithDelivery<void, never, ProcessReceiptError>(
         (delivery) =>
           Effect.gen(function* () {
             const attached = yield* delivery.attach(INSTANCE, adapter.adapter);
@@ -530,7 +544,7 @@ describe("ProviderRuntimeDelivery", () => {
           processEvent: (_source, event) =>
             Effect.gen(function* () {
               seen.push(String(event.eventId));
-              if (seen.length === 1) return yield* Effect.fail(firstError);
+              if (seen.length === 1) return yield* firstError;
               yield* Deferred.succeed(secondProcessed, undefined);
             }),
         },
@@ -868,10 +882,12 @@ describe("ProviderRuntimeDelivery", () => {
   it.effect("records consumer failures so flush reports the actual downstream error", () =>
     Effect.gen(function* () {
       const adapter = yield* makeFakeAdapter({ drainEvents: () => Effect.succeed(true) });
-      const consumerError = new Error("consumer database receipt failed");
+      const consumerError = new ConsumerReceiptError({
+        message: "consumer database receipt failed",
+      });
       const event = makeEvent({ eventId: "consumer-failure" });
 
-      yield* runWithDelivery(
+      yield* runWithDelivery<void, never, ConsumerReceiptError>(
         (delivery) =>
           Effect.gen(function* () {
             const attached = yield* delivery.attach(INSTANCE, adapter.adapter);

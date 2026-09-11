@@ -165,14 +165,17 @@ export const makeCommandGate = Effect.gen(function* () {
   } satisfies CommandGate;
 });
 
-export const shutdownServerRuntime = Effect.fn("shutdownServerRuntime")(function* (input: {
+export const shutdownServerRuntime = Effect.fn("shutdownServerRuntime")(function* <
+  EStop,
+  EDrain,
+>(input: {
   readonly commandGate: {
     readonly failCommandReady: (error: ServerRuntimeStartupError) => Effect.Effect<void>;
   };
   readonly shutdownError: ServerRuntimeStartupError;
   readonly reactorScope: Scope.Closeable;
-  readonly stopProviders: Effect.Effect<void, unknown>;
-  readonly drainIngestion: Effect.Effect<void, unknown>;
+  readonly stopProviders: Effect.Effect<void, EStop>;
+  readonly drainIngestion: Effect.Effect<void, EDrain>;
 }) {
   yield* Effect.gen(function* () {
     yield* input.commandGate.failCommandReady(input.shutdownError);

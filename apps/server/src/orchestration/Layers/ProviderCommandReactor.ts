@@ -68,6 +68,7 @@ const isProviderUnsupportedError = Schema.is(ProviderUnsupportedError);
 const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
 const isProviderWorkspaceMissingError = Schema.is(ProviderWorkspaceMissingError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
+const isProviderSessionSupersededError = Schema.is(ProviderSessionSupersededError);
 
 type ProviderIntentEvent = Extract<
   OrchestrationEvent,
@@ -245,8 +246,7 @@ function providerErrorLabel(value: string | undefined): string {
 
 function isProviderSessionSupersededCause(cause: Cause.Cause<unknown>): boolean {
   return cause.reasons.some(
-    (reason) =>
-      Cause.isFailReason(reason) && reason.error instanceof ProviderSessionSupersededError,
+    (reason) => Cause.isFailReason(reason) && isProviderSessionSupersededError(reason.error),
   );
 }
 

@@ -27,6 +27,7 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
+import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -103,6 +104,34 @@ type LegacyTurnCompletedEvent = LegacyProviderRuntimeEvent & {
   readonly errorMessage?: string | undefined;
 };
 
+class ProviderRuntimeConsumerTestError extends Data.TaggedError(
+  "ProviderRuntimeConsumerTestError",
+)<{
+  readonly cause: unknown;
+}> {}
+
+type CapturedProviderRuntimeEventConsumer =
+  ProviderRuntimeEventConsumer<ProviderRuntimeConsumerTestError>;
+
+function expectClosedRuntimeConsumerFailure(
+  exit: Exit.Exit<void, ProviderRuntimeConsumerTestError>,
+): void {
+  expect(Exit.isFailure(exit)).toBe(true);
+  if (!Exit.isFailure(exit)) {
+    return;
+  }
+  expect(Cause.hasFails(exit.cause)).toBe(true);
+  expect(Cause.hasDies(exit.cause)).toBe(false);
+  const failure = Cause.squash(exit.cause);
+  expect(failure).toBeInstanceOf(ProviderRuntimeConsumerTestError);
+  if (failure instanceof ProviderRuntimeConsumerTestError) {
+    expect(failure.cause).toMatchObject({
+      _tag: "ProviderRuntimeIngestionClosedError",
+      message: "Provider runtime ingestion is closed",
+    });
+  }
+}
+
 function isLegacyTurnCompletedEvent(
   event: LegacyProviderRuntimeEvent,
 ): event is LegacyTurnCompletedEvent {
@@ -121,7 +150,14 @@ function createProviderServiceHarness() {
     }>(),
   );
   const runtimeSessions: ProviderSession[] = [];
-  let registeredRuntimeEventConsumer: ProviderRuntimeEventConsumer | undefined;
+  let registeredRuntimeEventConsumer: CapturedProviderRuntimeEventConsumer | undefined;
+
+  const normalizeRuntimeEventConsumer =
+    <E>(consume: ProviderRuntimeEventConsumer<E>): CapturedProviderRuntimeEventConsumer =>
+    (event) =>
+      consume(event).pipe(
+        Effect.mapError((cause) => new ProviderRuntimeConsumerTestError({ cause })),
+      );
 
   const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
   const service: ProviderServiceShape = {
@@ -150,10 +186,11 @@ function createProviderServiceHarness() {
     },
     rollbackConversation: () => unsupported(),
     uploadFeedback: () => unsupported(),
-    registerRuntimeEventConsumer: (consume) =>
+    registerRuntimeEventConsumer: <E>(consume: ProviderRuntimeEventConsumer<E>) =>
       Effect.gen(function* () {
+        const normalizedConsume = normalizeRuntimeEventConsumer(consume);
         yield* Effect.sync(() => {
-          registeredRuntimeEventConsumer = consume;
+          registeredRuntimeEventConsumer = normalizedConsume;
         });
         yield* Stream.runForEach(service.streamEvents, consume).pipe(
           Effect.forkScoped,
@@ -222,7 +259,7 @@ function createProviderServiceHarness() {
         : consume(event);
     });
 
-  const captureRuntimeEventConsumer = (): ProviderRuntimeEventConsumer => {
+  const captureRuntimeEventConsumer = (): CapturedProviderRuntimeEventConsumer => {
     if (registeredRuntimeEventConsumer === undefined) {
       throw new Error("Provider runtime event consumer is not registered");
     }
@@ -2939,12 +2976,7 @@ describe("ProviderRuntimeIngestion", () => {
     ]);
 
     for (const result of [sessionExitResult, ordinaryResult]) {
-      expect(Exit.isFailure(result)).toBe(true);
-      if (Exit.isFailure(result)) {
-        expect(Cause.squash(result.cause)).toMatchObject({
-          message: "Provider runtime ingestion is closed",
-        });
-      }
+      expectClosedRuntimeConsumerFailure(result);
     }
   });
 
@@ -2991,12 +3023,7 @@ describe("ProviderRuntimeIngestion", () => {
     await harness.closeOwner();
 
     const deliveryExit = await Effect.runPromise(Fiber.join(deliveryFiber));
-    expect(Exit.isFailure(deliveryExit)).toBe(true);
-    if (Exit.isFailure(deliveryExit)) {
-      expect(Cause.squash(deliveryExit.cause)).toMatchObject({
-        message: "Provider runtime ingestion is closed",
-      });
-    }
+    expectClosedRuntimeConsumerFailure(deliveryExit);
   });
 
   it("fails drain as a lifecycle defect after the ingestion owner closes", async () => {
@@ -3073,12 +3100,7 @@ describe("ProviderRuntimeIngestion", () => {
       }
 
       const deliveryExit = yield* Fiber.join(deliveryFiber);
-      expect(Exit.isFailure(deliveryExit)).toBe(true);
-      if (Exit.isFailure(deliveryExit)) {
-        expect(Cause.squash(deliveryExit.cause)).toMatchObject({
-          message: "Provider runtime ingestion is closed",
-        });
-      }
+      expectClosedRuntimeConsumerFailure(deliveryExit);
     }),
   );
 
@@ -3150,12 +3172,7 @@ describe("ProviderRuntimeIngestion", () => {
       }
 
       const deliveryExit = yield* Fiber.join(deliveryFiber);
-      expect(Exit.isFailure(deliveryExit)).toBe(true);
-      if (Exit.isFailure(deliveryExit)) {
-        expect(Cause.squash(deliveryExit.cause)).toMatchObject({
-          message: "Provider runtime ingestion is closed",
-        });
-      }
+      expectClosedRuntimeConsumerFailure(deliveryExit);
     }),
   );
 

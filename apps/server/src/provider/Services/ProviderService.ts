@@ -37,9 +37,9 @@ import type { ProviderServiceError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
 
-export type ProviderRuntimeEventConsumer = (
+export type ProviderRuntimeEventConsumer<E = never> = (
   event: ProviderRuntimeEvent,
-) => Effect.Effect<void, unknown>;
+) => Effect.Effect<void, E>;
 
 /**
  * ProviderServiceShape - Service API for provider session and turn orchestration.
@@ -48,10 +48,10 @@ export interface ProviderServiceShape {
   /**
    * Start a provider session.
    */
-  readonly startSession: (
+  readonly startSession: <E>(
     threadId: ThreadId,
     input: ProviderSessionStartInput,
-    onStarted?: (session: ProviderSession) => Effect.Effect<void, unknown>,
+    onStarted?: (session: ProviderSession) => Effect.Effect<void, E>,
   ) => Effect.Effect<ProviderSession, ProviderServiceError>;
 
   /**
@@ -61,11 +61,11 @@ export interface ProviderServiceShape {
     input: ProviderSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
 
-  readonly compactThread: (
+  readonly compactThread: <E>(
     threadId: ThreadId,
     modelSelection?: ProviderSendTurnInput["modelSelection"],
     requestId?: MessageId,
-    onSettled?: (exit: Exit.Exit<void, ProviderServiceError>) => Effect.Effect<void, unknown>,
+    onSettled?: (exit: Exit.Exit<void, ProviderServiceError>) => Effect.Effect<void, E>,
   ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
@@ -92,9 +92,9 @@ export interface ProviderServiceShape {
   /**
    * Stop a provider session.
    */
-  readonly stopSession: (
+  readonly stopSession: <E>(
     input: ProviderStopSessionInput,
-    onSettled?: (exit: Exit.Exit<void, ProviderServiceError>) => Effect.Effect<void, unknown>,
+    onSettled?: (exit: Exit.Exit<void, ProviderServiceError>) => Effect.Effect<void, E>,
   ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
@@ -145,8 +145,8 @@ export interface ProviderServiceShape {
   /**
    * Register a scoped consumer for canonical provider runtime events.
    */
-  readonly registerRuntimeEventConsumer: (
-    consumer: ProviderRuntimeEventConsumer,
+  readonly registerRuntimeEventConsumer: <E>(
+    consumer: ProviderRuntimeEventConsumer<E>,
   ) => Effect.Effect<void, never, Scope.Scope>;
 
   /**

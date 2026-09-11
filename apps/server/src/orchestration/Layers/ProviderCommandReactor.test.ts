@@ -10,6 +10,9 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSetupError,
+  type ProviderSendTurnInput,
+  type ProviderSessionStartInput,
+  type ProviderStopSessionInput,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import {
@@ -32,6 +35,7 @@ import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -42,8 +46,17 @@ import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { serviceUpdateCoordinator } from "../../cloud/serviceUpdateCoordinator.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 import {
+  ProviderAdapterProcessError,
   ProviderAdapterRequestError,
+  ProviderAdapterSessionClosedError,
+  ProviderAdapterSessionNotFoundError,
+  ProviderAdapterValidationError,
+  ProviderInstanceNotFoundError,
+  ProviderSessionDirectoryPersistenceError,
+  ProviderSessionNotFoundError,
   ProviderSessionSupersededError,
+  ProviderUnsupportedError,
+  ProviderValidationError,
   ProviderWorkspaceMissingError,
   type ProviderServiceError,
 } from "../../provider/Errors.ts";
@@ -84,6 +97,45 @@ const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
+
+const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
+const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
+const isProviderAdapterSessionClosedError = Schema.is(ProviderAdapterSessionClosedError);
+const isProviderAdapterSessionNotFoundError = Schema.is(ProviderAdapterSessionNotFoundError);
+const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
+const isProviderInstanceNotFoundError = Schema.is(ProviderInstanceNotFoundError);
+const isProviderSessionDirectoryPersistenceError = Schema.is(
+  ProviderSessionDirectoryPersistenceError,
+);
+const isProviderSessionNotFoundError = Schema.is(ProviderSessionNotFoundError);
+const isProviderSessionSupersededError = Schema.is(ProviderSessionSupersededError);
+const isProviderUnsupportedError = Schema.is(ProviderUnsupportedError);
+const isProviderValidationError = Schema.is(ProviderValidationError);
+const isProviderWorkspaceMissingError = Schema.is(ProviderWorkspaceMissingError);
+
+const normalizeProviderServiceError = (operation: string, cause: unknown): ProviderServiceError => {
+  if (
+    isProviderAdapterProcessError(cause) ||
+    isProviderAdapterRequestError(cause) ||
+    isProviderAdapterSessionClosedError(cause) ||
+    isProviderAdapterSessionNotFoundError(cause) ||
+    isProviderAdapterValidationError(cause) ||
+    isProviderInstanceNotFoundError(cause) ||
+    isProviderSessionDirectoryPersistenceError(cause) ||
+    isProviderSessionNotFoundError(cause) ||
+    isProviderSessionSupersededError(cause) ||
+    isProviderUnsupportedError(cause) ||
+    isProviderValidationError(cause) ||
+    isProviderWorkspaceMissingError(cause)
+  ) {
+    return cause;
+  }
+  return new ProviderValidationError({
+    operation,
+    issue: cause instanceof Error ? cause.message : String(cause),
+    cause,
+  });
+};
 
 const assistantQuoteText = "Retain the reconnect backoff.";
 const assistantCitation = {
@@ -215,25 +267,38 @@ describe("ProviderCommandReactor", () => {
       model: "gpt-5-codex",
     };
     const startSessionEffect = input?.startSessionEffect;
-    const runSettledHook = (
+    const runSettledHook = <E>(
       effect: Effect.Effect<void, ProviderServiceError>,
       onSettled:
-        | ((exit: Exit.Exit<void, ProviderServiceError>) => Effect.Effect<void, unknown>)
+        | ((exit: Exit.Exit<void, ProviderServiceError>) => Effect.Effect<void, E>)
         | undefined,
       suppressHook: ((exit: Exit.Exit<void, ProviderServiceError>) => boolean) | undefined,
-    ) =>
+      operation: string,
+    ): Effect.Effect<void, ProviderServiceError> =>
       effect.pipe(
-        Effect.onExit((exit) =>
-          onSettled !== undefined && suppressHook?.(exit) !== true
-            ? onSettled(exit).pipe(Effect.catchCause(() => Effect.void))
-            : Effect.void,
-        ),
+        Effect.exit,
+        Effect.flatMap((exit) => {
+          const continueWithExit = Exit.isSuccess(exit)
+            ? Effect.void
+            : Effect.failCause(exit.cause);
+          if (onSettled === undefined || suppressHook?.(exit) === true) {
+            return continueWithExit;
+          }
+          return onSettled(exit).pipe(
+            Effect.mapError((cause) => normalizeProviderServiceError(operation, cause)),
+            Effect.matchCauseEffect({
+              onFailure: (hookCause) =>
+                Exit.isFailure(exit) ? Effect.failCause(exit.cause) : Effect.failCause(hookCause),
+              onSuccess: () => continueWithExit,
+            }),
+          );
+        }),
       );
-    const startSession = vi.fn(
-      (
-        _: unknown,
-        input: unknown,
-        onStarted?: (session: ProviderSession) => Effect.Effect<void, unknown>,
+    const startSession = vi.fn<ProviderServiceShape["startSession"]>(
+      <E>(
+        _: ThreadId,
+        input: ProviderSessionStartInput,
+        onStarted?: (session: ProviderSession) => Effect.Effect<void, E>,
       ) => {
         const sessionIndex = nextSessionIndex++;
         const resumeCursor =
@@ -293,7 +358,15 @@ describe("ProviderCommandReactor", () => {
               runtimeSessions.push(startedSession);
             }),
           ),
-          Effect.tap((startedSession) => onStarted?.(startedSession) ?? Effect.void),
+          Effect.tap((startedSession) =>
+            onStarted === undefined
+              ? Effect.void
+              : onStarted(startedSession).pipe(
+                  Effect.mapError((cause) =>
+                    normalizeProviderServiceError("ProviderService.startSession.onStarted", cause),
+                  ),
+                ),
+          ),
         );
       },
     );
@@ -309,37 +382,43 @@ describe("ProviderCommandReactor", () => {
       () => input?.interruptTurnEffect?.() ?? Effect.void,
     );
     const compactThread = vi.fn<ProviderServiceShape["compactThread"]>(
-      (_threadId, _modelSelection, _requestId, onSettled) =>
+      <E>(
+        _threadId: ThreadId,
+        _modelSelection?: ProviderSendTurnInput["modelSelection"],
+        _requestId?: MessageId,
+        onSettled?: (exit: Exit.Exit<void, ProviderServiceError>) => Effect.Effect<void, E>,
+      ) =>
         runSettledHook(
           input?.compactThreadEffect?.() ?? Effect.void,
           onSettled,
           input?.suppressCompactSettledHook,
+          "ProviderService.compactThread.onSettled",
         ),
     );
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
     const respondToUserInput = vi.fn<ProviderServiceShape["respondToUserInput"]>(() => Effect.void);
-    const stopSession = vi.fn<ProviderServiceShape["stopSession"]>((stopInput, onSettled) =>
-      runSettledHook(
-        (input?.stopSessionEffect?.() ?? Effect.void).pipe(
-          Effect.tap(() =>
-            Effect.sync(() => {
-              const threadId =
-                typeof stopInput === "object" && stopInput !== null && "threadId" in stopInput
-                  ? (stopInput as { threadId?: ThreadId }).threadId
-                  : undefined;
-              if (!threadId) {
-                return;
-              }
-              const index = runtimeSessions.findIndex((session) => session.threadId === threadId);
-              if (index >= 0) {
-                runtimeSessions.splice(index, 1);
-              }
-            }),
+    const stopSession = vi.fn<ProviderServiceShape["stopSession"]>(
+      <E>(
+        stopInput: ProviderStopSessionInput,
+        onSettled?: (exit: Exit.Exit<void, ProviderServiceError>) => Effect.Effect<void, E>,
+      ) =>
+        runSettledHook(
+          (input?.stopSessionEffect?.() ?? Effect.void).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                const index = runtimeSessions.findIndex(
+                  (session) => session.threadId === stopInput.threadId,
+                );
+                if (index >= 0) {
+                  runtimeSessions.splice(index, 1);
+                }
+              }),
+            ),
           ),
+          onSettled,
+          input?.suppressStopSettledHook,
+          "ProviderService.stopSession.onSettled",
         ),
-        onSettled,
-        input?.suppressStopSettledHook,
-      ),
     );
     const renameBranch = vi.fn((input: unknown) =>
       Effect.succeed({
@@ -407,13 +486,13 @@ describe("ProviderCommandReactor", () => {
 
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
     const service: ProviderServiceShape = {
-      startSession: startSession as ProviderServiceShape["startSession"],
+      startSession,
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
-      compactThread: compactThread as ProviderServiceShape["compactThread"],
+      compactThread,
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
-      stopSession: stopSession as ProviderServiceShape["stopSession"],
+      stopSession,
       stopAll: () => unsupported(),
       listSessions: () => Effect.succeed(runtimeSessions),
       getCapabilities: (_provider) =>
