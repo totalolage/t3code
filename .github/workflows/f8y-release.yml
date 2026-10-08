@@ -247,7 +247,8 @@ jobs:
     needs: [metadata, quality]
     if: github.repository == 'totalolage/t3code' && github.ref == 'refs/heads/main' && needs.metadata.result == 'success' && needs.quality.result == 'success'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Cold native builds for all four Android architectures can exceed 45 minutes.
+    timeout-minutes: 60
     env:
       VERSION: ${{ needs.metadata.outputs.version }}
       T3CODE_RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
