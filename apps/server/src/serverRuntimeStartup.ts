@@ -613,6 +613,7 @@ const make = (options?: StartupOptions) =>
       );
 
       const updateOutcome = yield* launcher.prepareTrial;
+      yield* runStartupPhase("orchestration-v2.queued-runs.resume", orchestrator.resumeQueuedRuns);
 
       yield* Effect.logDebug("startup phase: publishing welcome event", {
         environmentId: environment.environmentId,
@@ -690,5 +691,3 @@ const make = (options?: StartupOptions) =>
 
 export const layerWithOptions = (options?: StartupOptions) =>
   Layer.effect(ServerRuntimeStartup, make(options));
-
-const layer = layerWithOptions();

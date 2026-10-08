@@ -7,10 +7,20 @@ import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Option from "effect/Option";
 
-import { projectWorkspaceEnvironment, projectWorkspaceState } from "./workspaceModel";
+import {
+  includeSavedConnectionQueryParameters,
+  projectWorkspaceEnvironment,
+  projectWorkspaceState,
+} from "./workspaceModel";
 import type { EnvironmentPresentation } from "./environments";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-1");
+const STORED_QUERY_PARAMETERS = [
+  { key: "  proxy  ", value: " first " },
+  { key: "proxy", value: "second" },
+  { key: "", value: "" },
+  { key: "empty", value: "" },
+];
 
 function environment(
   phase: EnvironmentPresentation["connection"]["phase"],
@@ -34,6 +44,7 @@ function environment(
           label: "Julius's MacBook Pro",
           httpBaseUrl: "https://environment.example.test",
           wsBaseUrl: "wss://environment.example.test",
+          queryParameters: STORED_QUERY_PARAMETERS,
         }),
       ),
       enabled: true,
@@ -64,10 +75,14 @@ const CACHED_SHELL_SUMMARY: EnvironmentShellSummary = {
 
 describe("mobile workspace projection", () => {
   it("preserves explicit offline state without presenting it as a connection error", () => {
-    const projected = projectWorkspaceEnvironment(ENVIRONMENT_ID, environment("offline"));
+    const base = projectWorkspaceEnvironment(ENVIRONMENT_ID, environment("offline"));
+    const [projected] = includeSavedConnectionQueryParameters([base], {
+      [ENVIRONMENT_ID]: { queryParameters: STORED_QUERY_PARAMETERS },
+    });
 
-    expect(projected.connectionState).toBe("offline");
-    expect(projected.connectionError).toBeNull();
+    expect(projected?.connectionState).toBe("offline");
+    expect(projected?.connectionError).toBeNull();
+    expect(projected).toMatchObject({ queryParameters: STORED_QUERY_PARAMETERS });
   });
 
   it("reports offline before stale connected presentations", () => {

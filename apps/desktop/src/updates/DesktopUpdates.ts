@@ -33,7 +33,10 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import { normalizeDesktopUpdateReleaseNotes } from "./releaseNotes.ts";
-import { resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
+import {
+  resolveDefaultDesktopUpdateChannel,
+  resolveDesktopUpdaterChannel,
+} from "./updateChannels.ts";
 import {
   createInitialDesktopUpdateState,
   reduceDesktopUpdateStateOnCheckFailure,
@@ -283,7 +286,6 @@ export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
-
   const appUpdateYmlConfigRef = yield* Ref.make<Option.Option<AppUpdateYmlConfig>>(Option.none());
   const activeUpdateActionRef = yield* Ref.make<Option.Option<UpdateAction>>(Option.none());
   const finishedUpdateActions = yield* PubSub.unbounded<UpdateAction>();
@@ -390,17 +392,20 @@ export const make = Effect.gen(function* () {
   const applyAutoUpdaterChannel = Effect.fn("desktop.updates.applyAutoUpdaterChannel")(function* (
     channel: DesktopUpdateChannel,
   ) {
-    yield* Effect.annotateCurrentSpan({ channel });
-    const allowsPrerelease = channel === "nightly";
-    yield* electronUpdater.setChannel(channel);
-    yield* electronUpdater.setAllowPrerelease(allowsPrerelease);
-    yield* electronUpdater.setAllowDowngrade(allowsPrerelease);
-    yield* electronUpdater.setFullChangelog(allowsPrerelease);
+    const updaterChannel = resolveDesktopUpdaterChannel(environment.appVersion, channel);
+    const allowPrerelease = updaterChannel === "nightly" || updaterChannel === "f8y";
+    const allowDowngrade = allowPrerelease;
+    const fullChangelog = allowPrerelease;
+    yield* Effect.annotateCurrentSpan({ channel: updaterChannel });
+    yield* electronUpdater.setChannel(updaterChannel);
+    yield* electronUpdater.setAllowPrerelease(allowPrerelease);
+    yield* electronUpdater.setAllowDowngrade(allowDowngrade);
+    yield* electronUpdater.setFullChangelog(fullChangelog);
     yield* logUpdaterInfo("using update channel", {
-      channel,
-      allowPrerelease: allowsPrerelease,
-      allowDowngrade: allowsPrerelease,
-      fullChangelog: allowsPrerelease,
+      channel: updaterChannel,
+      allowPrerelease,
+      allowDowngrade,
+      fullChangelog,
     });
   });
 
@@ -741,7 +746,15 @@ export const make = Effect.gen(function* () {
       Effect.flatMap(
         Effect.fn("desktop.updates.applyUpdateAvailable")(function* (info) {
           const state = yield* Ref.get(updateStateRef);
-          if (resolveDefaultDesktopUpdateChannel(info.version) !== state.channel) {
+          const offeredUpdaterChannel = resolveDesktopUpdaterChannel(
+            info.version,
+            resolveDefaultDesktopUpdateChannel(info.version),
+          );
+          const configuredUpdaterChannel = resolveDesktopUpdaterChannel(
+            environment.appVersion,
+            state.channel,
+          );
+          if (offeredUpdaterChannel !== configuredUpdaterChannel) {
             yield* logUpdaterInfo("ignoring update that does not match selected channel", {
               version: info.version,
               channel: state.channel,
@@ -912,6 +925,7 @@ export const make = Effect.gen(function* () {
         void Effect.runPromiseWith(context)(effect);
       };
 
+      const settings = yield* desktopSettings.get;
       const appUpdateYmlConfig = yield* readAppUpdateYml;
       yield* Ref.set(appUpdateYmlConfigRef, appUpdateYmlConfig);
 
@@ -922,7 +936,6 @@ export const make = Effect.gen(function* () {
         } as ElectronUpdater.ElectronUpdaterFeedUrl);
       }
 
-      const settings = yield* desktopSettings.get;
       const enabled = yield* shouldEnableAutoUpdates;
       yield* setState(createBaseUpdateState(settings.updateChannel, enabled, environment));
       if (!enabled) {

@@ -1031,6 +1031,7 @@ describe("deriveMessagesTimelineRows", () => {
             id: "compaction",
             createdAt: "2026-01-01T00:00:00Z",
             label: "Compacted context 899K → 19K tokens",
+            detail: "Preserve this multiline summary.\nKeep its original spacing.",
             tone: "info",
             sourceActivityKind: "context-compaction",
           },
@@ -1048,6 +1049,7 @@ describe("deriveMessagesTimelineRows", () => {
         id: "compaction-entry",
         createdAt: "2026-01-01T00:00:00Z",
         label: "Compacted context 899K → 19K tokens",
+        detail: "Preserve this multiline summary.\nKeep its original spacing.",
         active: false,
       },
     ]);

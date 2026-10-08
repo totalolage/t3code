@@ -1,7 +1,12 @@
 import * as QuickActions from "expo-quick-actions";
+import { useAtomValue } from "@effect/atom-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform } from "react-native";
 import { useLinkTo, type NavigationState } from "@react-navigation/native";
+import { isThreadHidden } from "@t3tools/client-runtime/state/thread-hidden";
+import { threadKey } from "@t3tools/client-runtime/state/entities";
+import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
+import { Atom } from "effect/reactivity";
 
 import {
   loadRecentThreadShortcuts,
@@ -9,12 +14,33 @@ import {
   type RecentThreadShortcut,
 } from "../../persistence/imperative";
 import { useThreadShell } from "../../state/entities";
+import { environmentThreadShells } from "../../state/threads";
 import {
   activeThreadRef,
   buildShortcutActions,
+  MAX_RECENT_THREAD_SHORTCUTS,
   shortcutHref,
   withRecentThreadShortcut,
 } from "./appShortcuts";
+
+const EMPTY_HIDDEN_RECENT_THREAD_KEYS = "[]";
+const EMPTY_HIDDEN_RECENT_THREAD_KEYS_ATOM = Atom.make(EMPTY_HIDDEN_RECENT_THREAD_KEYS).pipe(
+  Atom.withLabel("mobile:recent-hidden-thread-keys:empty"),
+);
+const EMPTY_SCOPED_THREAD_REFS: ReadonlyArray<ScopedThreadRef> = Object.freeze([]);
+
+function recentThreadRef(thread: RecentThreadShortcut): ScopedThreadRef | null {
+  try {
+    return {
+      environmentId: EnvironmentId.make(thread.environmentId),
+      threadId: ThreadId.make(thread.threadId),
+    };
+  } catch {
+    // Persisted launcher entries predate this observer and can contain stale
+    // ids. Keep the incumbent visible behavior for those entries.
+    return null;
+  }
+}
 
 /**
  * Owns the launcher app shortcuts (Android long-press menu): keeps the
@@ -74,6 +100,55 @@ function useRecentThreadShortcutSync(state: NavigationState): void {
   // Saves are fire-and-forget; chaining them keeps an older list from
   // finishing after (and overwriting) a newer one.
   const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+
+  // Observe only the first three persisted candidates, and reduce their
+  // shells to a serialized key list. Shell updates for title/status/session
+  // data therefore re-evaluate this atom without changing the primitive read
+  // by the root hook unless visibility changes. Unknown shells are excluded
+  // until a canonical shell confirms that the thread is visible.
+  const hiddenRecentThreadKeysAtom = useMemo(() => {
+    if (Platform.OS !== "android" || recents === null) {
+      return EMPTY_HIDDEN_RECENT_THREAD_KEYS_ATOM;
+    }
+
+    const candidateRefs = recents
+      .slice(0, MAX_RECENT_THREAD_SHORTCUTS)
+      .map(recentThreadRef)
+      .filter((ref): ref is ScopedThreadRef => ref !== null);
+    if (candidateRefs.length === 0) {
+      return EMPTY_HIDDEN_RECENT_THREAD_KEYS_ATOM;
+    }
+
+    return Atom.make((get): string => {
+      const hiddenKeys = candidateRefs.flatMap((ref) => {
+        const shell = get(environmentThreadShells.threadShellAtom(ref));
+        return shell === null || isThreadHidden(shell) ? [threadKey(ref)] : [];
+      });
+      return JSON.stringify(hiddenKeys);
+    }).pipe(Atom.withLabel("mobile:recent-hidden-thread-keys"));
+  }, [recents]);
+  const hiddenRecentThreadKeys = useAtomValue(hiddenRecentThreadKeysAtom);
+  const excludedScopedThreadRefs = useMemo(() => {
+    if (recents === null || hiddenRecentThreadKeys === EMPTY_HIDDEN_RECENT_THREAD_KEYS) {
+      return EMPTY_SCOPED_THREAD_REFS;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(hiddenRecentThreadKeys);
+    } catch {
+      return EMPTY_SCOPED_THREAD_REFS;
+    }
+    if (!Array.isArray(parsed) || !parsed.every((key): key is string => typeof key === "string")) {
+      return EMPTY_SCOPED_THREAD_REFS;
+    }
+
+    const hiddenKeys = new Set(parsed);
+    return recents.slice(0, MAX_RECENT_THREAD_SHORTCUTS).flatMap((thread) => {
+      const ref = recentThreadRef(thread);
+      return ref !== null && hiddenKeys.has(threadKey(ref)) ? [ref] : [];
+    });
+  }, [recents, hiddenRecentThreadKeys]);
 
   useEffect(() => {
     if (Platform.OS !== "android") {
@@ -136,8 +211,16 @@ function useRecentThreadShortcutSync(state: NavigationState): void {
         () => undefined,
       );
     }
-    void QuickActions.setItems(buildShortcutActions(recents)).catch((error) => {
+  }, [recents]);
+
+  useEffect(() => {
+    if (recents === null) {
+      return;
+    }
+
+    const actions = buildShortcutActions(recents, excludedScopedThreadRefs);
+    void QuickActions.setItems(actions).catch((error) => {
       console.warn("[app-shortcuts] failed to update launcher shortcuts", error);
     });
-  }, [recents]);
+  }, [recents, excludedScopedThreadRefs]);
 }

@@ -64,6 +64,7 @@ function fixtureEvents(now: DateTime.Utc): ReadonlyArray<OrchestrationV2DomainEv
         createdAt: now,
         updatedAt: now,
         archivedAt: null,
+        hiddenAt: null,
         settledOverride: null,
         settledAt: null,
         lastVisitedAt: null,

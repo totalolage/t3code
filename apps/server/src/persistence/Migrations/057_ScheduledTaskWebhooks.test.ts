@@ -35,7 +35,7 @@ layer("057_ScheduledTaskWebhooks", (it) => {
         last_run_error: null,
         run_count: 0,
       })}`;
-      yield* runMigrations({ toMigrationInclusive: 57 });
+      yield* runMigrations({ toMigrationInclusive: 61 });
 
       const rows = yield* sql<{
         task_id: string;

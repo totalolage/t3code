@@ -37,6 +37,9 @@ const OUTPUT_BYTES_PER_ROW = 8_192;
 // 91b193653ec. The old path read this entire response once for every routine
 // implicit-auto message send; keep the raw fixture to preserve that baseline.
 const HISTORICAL_FULL_PROJECTION_APPLICATION_BYTES = 10_371_419;
+// The current thread shape adds the nullable hiddenAt field to that historical
+// fixture; it contributes 16 encoded bytes to the projection and response.
+const THREAD_HIDDEN_AT_NULL_BYTES = 16;
 // Projection response + dispatch command + dispatch receipt, excluding RPC
 // envelope bytes. The omitted projection request only makes the old path larger.
 const HISTORICAL_FORMER_SEND_APPLICATION_BYTES = 10_371_678;
@@ -268,9 +271,13 @@ describe("routine command transport budget", () => {
         receiptRpcJsonBytes;
       const currentRpcJsonBytes = currentDispatchRequestRpcJsonBytes + receiptRpcJsonBytes;
 
-      expect(encodedBytes(projection)).toBe(HISTORICAL_FULL_PROJECTION_APPLICATION_BYTES);
-      expect(historicalApplicationBytes).toBe(HISTORICAL_FORMER_SEND_APPLICATION_BYTES);
-      expect(formerRpcJsonBytes).toBe(FORMER_SEND_RPC_JSON_BYTES);
+      expect(encodedBytes(projection)).toBe(
+        HISTORICAL_FULL_PROJECTION_APPLICATION_BYTES + THREAD_HIDDEN_AT_NULL_BYTES,
+      );
+      expect(historicalApplicationBytes).toBe(
+        HISTORICAL_FORMER_SEND_APPLICATION_BYTES + THREAD_HIDDEN_AT_NULL_BYTES,
+      );
+      expect(formerRpcJsonBytes).toBe(FORMER_SEND_RPC_JSON_BYTES + THREAD_HIDDEN_AT_NULL_BYTES);
       expect(projectionRequests).toEqual([]);
       expect(projectionResponseBytes.value).toBe(0);
       expect(command).toMatchObject({

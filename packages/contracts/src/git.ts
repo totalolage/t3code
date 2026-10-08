@@ -363,7 +363,6 @@ export const VcsPullResult = Schema.Struct({
 export type VcsPullResult = typeof VcsPullResult.Type;
 
 // RPC / domain errors
-
 // Well-known git failures, recognized from stderr at the driver and carried as
 // a closed set of diagnostic tags. Git's stderr itself stays off the error: it
 // echoes argv and remote URLs, which can hold credentials. The tag names the
@@ -380,6 +379,15 @@ export const GitCommandFailureReason = Schema.Literals([
 ]);
 export type GitCommandFailureReason = typeof GitCommandFailureReason.Type;
 
+export const GitWorktreeCreateErrorReason = Schema.Literals([
+  "branch_exists",
+  "path_exists",
+  "branch_in_use",
+  "registration_conflict",
+  "unknown",
+]);
+export type GitWorktreeCreateErrorReason = typeof GitWorktreeCreateErrorReason.Type;
+
 export class GitCommandError extends Schema.TaggedError<GitCommandError>()("GitCommandError", {
   operation: Schema.String,
   command: Schema.String,
@@ -391,12 +399,22 @@ export class GitCommandError extends Schema.TaggedError<GitCommandError>()("GitC
   outputLength: Schema.optional(Schema.Number),
   reason: Schema.optional(GitCommandFailureReason),
   detail: Schema.String,
+  worktreeReason: Schema.optional(GitWorktreeCreateErrorReason),
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
     const reason = this.reason === undefined ? "" : ` (${this.reason})`;
     return `Git command failed in ${this.operation} (${this.cwd}): ${this.detail}${reason}`;
   }
+}
+
+export function isGitWorktreeCreateConflict(error: GitCommandError): boolean {
+  return (
+    error.worktreeReason === "branch_exists" ||
+    error.worktreeReason === "path_exists" ||
+    error.worktreeReason === "branch_in_use" ||
+    error.worktreeReason === "registration_conflict"
+  );
 }
 
 export class TextGenerationError extends Schema.TaggedError<TextGenerationError>()(

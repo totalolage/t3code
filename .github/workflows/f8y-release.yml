@@ -1,0 +1,524 @@
+name: f8y Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: f8y-release
+  cancel-in-progress: true
+
+jobs:
+  metadata:
+    name: Resolve f8y metadata
+    if: github.repository == 'totalolage/t3code' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      version_code: ${{ steps.resolve.outputs.versionCode }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      timestamp: ${{ steps.metadata.outputs.timestamp }}
+      short_sha: ${{ steps.metadata.outputs.short_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          run-install: true
+          cache: true
+
+      - id: metadata
+        name: Validate f8y release metadata
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { validateRunStartedAt } = require('./.github/scripts/f8y-release-metadata.cjs');
+            const { data: workflowRun } = await github.rest.actions.getWorkflowRun({
+              ...context.repo,
+              run_id: context.runId,
+            });
+            core.setOutput('timestamp', validateRunStartedAt(workflowRun.run_started_at));
+            core.setOutput('short_sha', context.sha.slice(0, 7));
+
+      - id: resolve
+        name: Resolve f8y release version
+        shell: bash
+        env:
+          TIMESTAMP: ${{ steps.metadata.outputs.timestamp }}
+        run: |
+          set -euo pipefail
+          node scripts/resolve-f8y-release.ts \
+            --timestamp "$TIMESTAMP" \
+            --run-number "$GITHUB_RUN_NUMBER" \
+            --sha "$GITHUB_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+
+  quality:
+    name: f8y quality checks
+    needs: [metadata]
+    if: github.repository == 'totalolage/t3code' && github.ref == 'refs/heads/main' && needs.metadata.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          run-install: true
+          cache: true
+
+      - name: Run targeted f8y tests
+        run: |
+          vp test run \
+            scripts/f8y-release-workflow.test.ts \
+            scripts/resolve-f8y-release.test.ts \
+            scripts/build-desktop-artifact.test.ts \
+            apps/desktop/src/updates/updateChannels.test.ts \
+            apps/desktop/src/updates/DesktopUpdates.test.ts \
+            scripts/verify-f8y-platform.test.ts \
+            scripts/verify-f8y-release.test.ts \
+            scripts/update-release-package-versions.test.ts \
+            apps/mobile/f8yBuildConfig.test.ts \
+            apps/mobile/plugins/withF8yAndroidSigning.test.ts
+
+      - name: Typecheck release packages
+        run: |
+          vp run --filter @t3tools/scripts typecheck
+          vp run --filter @t3tools/desktop typecheck
+          vp run --filter @t3tools/mobile typecheck
+
+  desktop:
+    name: Build ${{ matrix.label }}
+    needs: [metadata, quality]
+    if: github.repository == 'totalolage/t3code' && github.ref == 'refs/heads/main' && needs.metadata.result == 'success' && needs.quality.result == 'success'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64 DMG
+            runner: macos-15
+            platform: mac
+            target: dmg
+            arch: arm64
+            rust_target: aarch64-apple-darwin
+          - label: Linux x64 AppImage
+            runner: ubuntu-24.04
+            platform: linux
+            target: AppImage
+            arch: x64
+            rust_target: x86_64-unknown-linux-gnu
+    env:
+      VERSION: ${{ needs.metadata.outputs.version }}
+      PLATFORM: ${{ matrix.platform }}
+      TARGET: ${{ matrix.target }}
+      ARCH: ${{ matrix.arch }}
+      T3CODE_DESKTOP_SIGNED: "false"
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      T3CODE_DESKTOP_KEEP_STAGE: ${{ matrix.platform == 'linux' && 'true' || 'false' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          run-install: true
+          cache: true
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Setup apt mirrors
+        if: matrix.platform == 'linux'
+        uses: ./.github/actions/setup-apt-mirrors
+
+      - name: Install Linux desktop build libraries
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev pkg-config imagemagick
+
+      - name: Prepare desktop staging directory
+        env:
+          STAGE_ROOT: ${{ runner.temp }}/f8y-desktop-stage
+        run: mkdir -m 700 -p "$STAGE_ROOT"
+
+      - name: Ensure Electron runtime is installed
+        run: vp run --filter @t3tools/desktop ensure:electron
+
+      - name: Align package versions
+        run: node scripts/update-release-package-versions.ts "$VERSION"
+
+      - name: Build desktop artifact
+        env:
+          TMPDIR: ${{ runner.temp }}/f8y-desktop-stage
+        run: |
+          vp run dist:desktop:artifact \
+            --platform "$PLATFORM" \
+            --target "$TARGET" \
+            --arch "$ARCH" \
+            --build-version "$VERSION" \
+            --verbose
+
+      - name: Verify macOS DMG
+        if: matrix.platform == 'mac'
+        run: |
+          node scripts/verify-f8y-platform.ts \
+            --platform mac \
+            --version "$VERSION" \
+            --artifact "release/T3-Code-$VERSION-arm64.dmg"
+
+      - name: Verify Linux AppImage
+        if: matrix.platform == 'linux'
+        env:
+          TMPDIR: ${{ runner.temp }}/f8y-desktop-stage
+        run: |
+          set -euo pipefail
+          unpacked_directory=""
+          for candidate in "$TMPDIR"/t3code-desktop-linux-stage-*/app/dist/linux-unpacked; do
+            if [[ -d "$candidate" ]]; then
+              if [[ -n "$unpacked_directory" ]]; then
+                echo "Found more than one retained Linux builder directory." >&2
+                exit 1
+              fi
+              unpacked_directory="$candidate"
+            fi
+          done
+          if [[ -z "$unpacked_directory" ]]; then
+            echo "The desktop builder did not retain its Linux unpacked directory." >&2
+            exit 1
+          fi
+          chmod +x "release/T3-Code-$VERSION-x86_64.AppImage"
+          node scripts/verify-f8y-platform.ts \
+            --platform linux \
+            --version "$VERSION" \
+            --artifact "release/T3-Code-$VERSION-x86_64.AppImage" \
+            --unpacked-directory "$unpacked_directory"
+
+      - name: Upload macOS DMG
+        if: matrix.platform == 'mac'
+        uses: actions/upload-artifact@v7
+        with:
+          name: f8y-release-macos-arm64
+          path: release/T3-Code-${{ needs.metadata.outputs.version }}-arm64.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Linux AppImage and update manifest
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: f8y-release-linux-x64
+          path: |
+            release/T3-Code-${{ needs.metadata.outputs.version }}-x86_64.AppImage
+            release/f8y-linux.yml
+          if-no-files-found: error
+          retention-days: 7
+
+  android:
+    name: Build Android APK
+    needs: [metadata, quality]
+    if: github.repository == 'totalolage/t3code' && github.ref == 'refs/heads/main' && needs.metadata.result == 'success' && needs.quality.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.metadata.outputs.version }}
+      T3CODE_RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+      T3CODE_ANDROID_VERSION_CODE: ${{ needs.metadata.outputs.version_code }}
+      NODE_OPTIONS: --max-old-space-size=8192
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          run-install: true
+          cache: true
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # Expo's current SDK 57 template defaults buildToolsVersion to 35.0.0.
+      - id: android_build_tools
+        name: Install pinned Android build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install "build-tools;35.0.0"
+          build_tools="$ANDROID_HOME/build-tools/35.0.0"
+          test -x "$build_tools/apksigner"
+          test -x "$build_tools/aapt"
+          echo "path=$build_tools" >> "$GITHUB_OUTPUT"
+
+      - name: Build f8y APK
+        env:
+          F8Y_ANDROID_KEYSTORE_BASE64: ${{ secrets.F8Y_ANDROID_KEYSTORE_BASE64 }}
+          T3CODE_ANDROID_STORE_PASSWORD: ${{ secrets.F8Y_ANDROID_STORE_PASSWORD }}
+          T3CODE_ANDROID_KEY_PASSWORD: ${{ secrets.F8Y_ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          keystore_path="$RUNNER_TEMP/t3code-f8y.jks"
+          trap 'rm -f "$keystore_path"' EXIT
+          printf '%s' "$F8Y_ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          T3CODE_ANDROID_KEYSTORE_PATH="$keystore_path" vp run dist:mobile:apk:f8y
+          mkdir -p release
+          cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk "release/T3-Code-$VERSION-android.apk"
+
+      - name: Verify Android APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous_apk_url="$(
+            gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '[.[] | select(.prerelease and (.tag_name | contains("-f8y."))) | .assets[] | select(.name | test("^T3-Code-.*-android\\.apk$")) | .browser_download_url][0] // empty'
+          )"
+          previous_args=()
+          if [[ -n "$previous_apk_url" ]]; then
+            previous_apk="$RUNNER_TEMP/previous-f8y.apk"
+            curl --fail --location --silent --show-error "$previous_apk_url" --output "$previous_apk"
+            previous_args=(--previous-apk "$previous_apk")
+          fi
+          node scripts/verify-f8y-platform.ts \
+            --platform android \
+            --version "$VERSION" \
+            --artifact "release/T3-Code-$VERSION-android.apk" \
+            --android-build-tools "${{ steps.android_build_tools.outputs.path }}" \
+            "${previous_args[@]}"
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: f8y-release-android
+          path: release/T3-Code-${{ needs.metadata.outputs.version }}-android.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  standalone:
+    name: Build ${{ matrix.label }}
+    needs: [metadata, quality]
+    if: github.repository == 'totalolage/t3code' && github.ref == 'refs/heads/main' && needs.metadata.result == 'success' && needs.quality.result == 'success'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x64 standalone
+            runner: ubuntu-24.04
+            bun_target: bun-linux-x64-baseline
+            platform_arch: linux-x64
+          - label: macOS arm64 standalone
+            runner: macos-15
+            bun_target: bun-darwin-arm64
+            platform_arch: darwin-arm64
+    env:
+      VERSION: ${{ needs.metadata.outputs.version }}
+      BUN_TARGET: ${{ matrix.bun_target }}
+      PLATFORM_ARCH: ${{ matrix.platform_arch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          run-install: true
+          cache: true
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Prepare standalone release directory
+        run: mkdir -m 700 -p "$GITHUB_WORKSPACE/release"
+
+      # The standalone builder embeds apps/web/dist by default; the web client
+      # must exist before the builder runs. Both matrix platforms inherit.
+      - name: Build web client for embedding
+        env:
+          APP_VERSION: ${{ needs.metadata.outputs.version }}
+        run: vp run --filter @t3tools/web build
+
+      - name: Build standalone binary
+        run: bun apps/server/scripts/buildStandaloneBinary.ts --target "$BUN_TARGET" --outfile "$GITHUB_WORKSPACE/release/t3-${VERSION}-${PLATFORM_ARCH}" --version "$VERSION"
+
+      - name: Verify standalone executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="$GITHUB_WORKSPACE/release/t3-${VERSION}-${PLATFORM_ARCH}"
+          test -f "$artifact"
+          test -x "$artifact"
+
+      - name: Sign and verify macOS standalone
+        if: matrix.platform_arch == 'darwin-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="$GITHUB_WORKSPACE/release/t3-${VERSION}-${PLATFORM_ARCH}"
+          codesign --force --sign - "$artifact"
+          codesign --verify --strict "$artifact"
+          codesign_display="$(codesign --display --verbose=4 "$artifact" 2>&1 || true)"
+          printf '%s\n' "$codesign_display" | grep -Fq 'Signature=adhoc'
+          test "$(lipo -archs "$artifact")" = "arm64"
+
+      - name: Verify Linux standalone architecture
+        if: matrix.platform_arch == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="$GITHUB_WORKSPACE/release/t3-${VERSION}-${PLATFORM_ARCH}"
+          file_output="$(file "$artifact")"
+          printf '%s\n' "$file_output" | grep -Eiq 'ELF 64-bit.*x86-64'
+
+      - name: Smoke standalone version
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/f8y-standalone-home
+          T3CODE_HOME: ${{ runner.temp }}/f8y-standalone-home/t3
+        run: |
+          set -euo pipefail
+          mkdir -m 700 -p "$HOME" "$T3CODE_HOME"
+          artifact="$GITHUB_WORKSPACE/release/t3-${VERSION}-${PLATFORM_ARCH}"
+          actual="$(NO_COLOR=1 "$artifact" --version)"
+          test "$actual" = "t3 v$VERSION"
+
+      - name: Hash standalone binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="$GITHUB_WORKSPACE/release/t3-${VERSION}-${PLATFORM_ARCH}"
+          checksum_file="$RUNNER_TEMP/f8y-standalone-${PLATFORM_ARCH}.sha256"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            shasum -a 256 "$artifact" > "$checksum_file"
+            shasum -a 256 -c "$checksum_file"
+          else
+            sha256sum "$artifact" > "$checksum_file"
+            sha256sum -c "$checksum_file"
+          fi
+
+      - name: Upload standalone binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: f8y-release-cli-${{ matrix.platform_arch }}
+          path: release/t3-${{ needs.metadata.outputs.version }}-${{ matrix.platform_arch }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish f8y GitHub prerelease
+    needs: [metadata, quality, desktop, android, standalone]
+    if: github.repository == 'totalolage/t3code' && github.ref == 'refs/heads/main' && needs.metadata.result == 'success' && needs.quality.result == 'success' && needs.desktop.result == 'success' && needs.android.result == 'success' && needs.standalone.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.metadata.outputs.version }}
+      TAG: ${{ needs.metadata.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          run-install: true
+          cache: true
+
+      - name: Prepare release asset directory
+        run: |
+          set -euo pipefail
+          rm -rf release-assets
+          mkdir -m 700 release-assets
+
+      - name: Download f8y build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: f8y-release-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Verify release assets before GitHub writes
+        run: node scripts/verify-f8y-release.ts --version "$VERSION" --directory release-assets
+
+      - name: Publish f8y release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.metadata.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: T3 Code f8y ${{ needs.metadata.outputs.version }} (${{ needs.metadata.outputs.short_sha }})
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          body: |
+            Automated f8y build of `${{ github.sha }}` from `main`.
+
+            - macOS: ad-hoc-signed arm64 DMG with a SHA-256 checksum. It is not Apple-notarized. After copying the app to Applications and trying to open it once, use System Settings → Privacy & Security → Open Anyway.
+            - Linux: self-updating x86_64 AppImage with a SHA-256 checksum.
+            - Android: signed APK for installation on your devices and guided updates through Obtainium.
+            - CLI: self-contained macOS arm64 and Linux x86_64 binaries with the complete `t3` command set, each with a SHA-256 checksum. The macOS binary is ad-hoc signed.
+
+            Obtainium source: `https://github.com/totalolage/t3code`
+            APK filter: `^T3-Code-.*-android\.apk$`
+            Enable prereleases and disable “Verify Latest Tag” in Obtainium.
+          files: release-assets/*
+
+  publish_aur:
+    name: Publish AUR package
+    needs: [metadata, publish]
+    if: ${{ !failure() && !cancelled() && needs.publish.result == 'success' }}
+    uses: ./.github/workflows/publish-aur.yml
+    with:
+      release_tag: ${{ needs.metadata.outputs.tag }}
+    secrets:
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}

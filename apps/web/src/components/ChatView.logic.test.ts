@@ -14,16 +14,19 @@ import type { RightPanelSurface } from "../rightPanelStore";
 import {
   CommandId,
   EnvironmentId,
-  EventId,
   MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
   RunId,
   TurnItemId,
+  type OrchestrationV2ConversationMessage,
   type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2Run,
+  type OrchestrationV2ThreadProjection,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
+import { EMPTY_ENVIRONMENT_THREAD_STATE } from "@t3tools/client-runtime/state/threads";
 import type { CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
@@ -32,7 +35,7 @@ import { Atom, AsyncResult } from "effect/reactivity";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadDetails } from "../state/threads";
 
-import type { Thread, TurnDiffSummary } from "../types";
+import type { ChatMessage, Thread, TurnDiffSummary } from "../types";
 import { makeThreadFixture, makeThreadProjectionFixture } from "../test-fixtures";
 import {
   agentControlledBrowserCloseConfirmation,
@@ -2117,28 +2120,64 @@ describe("waitForRevertedMessage", () => {
   const threadRef = { environmentId: EnvironmentId.make("env-1"), threadId: ThreadId.make("t") };
   const messageId = MessageId.make("message-2");
   const requestId = CommandId.make("rollback-1");
+  const stateForProjection = (projection: OrchestrationV2ThreadProjection) => ({
+    ...EMPTY_ENVIRONMENT_THREAD_STATE,
+    data: Option.some(projection),
+    status: "live" as const,
+  });
+  const message: ChatMessage = {
+    id: messageId,
+    role: "user",
+    text: "second",
+    attachments: [],
+    runId: RunId.make("run-2"),
+    streaming: false,
+    createdAt: now,
+    updatedAt: now,
+  };
 
   function projectionAtom() {
     const base = makeThreadProjectionFixture();
-    const projection = {
+    const runId = RunId.make("run-2");
+    const projectedMessage: OrchestrationV2ConversationMessage = {
+      id: messageId,
+      threadId: base.thread.id,
+      runId,
+      nodeId: null,
+      role: "user",
+      text: "second",
+      attachments: [],
+      streaming: false,
+      createdBy: "user",
+      creationSource: "web",
+      createdAt: base.updatedAt,
+      updatedAt: base.updatedAt,
+    };
+    const run: OrchestrationV2Run = {
+      id: runId,
+      threadId: base.thread.id,
+      ordinal: 2,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      providerThreadId: null,
+      rootNodeId: null,
+      activeAttemptId: null,
+      status: "completed",
+      requestedAt: base.updatedAt,
+      startedAt: base.updatedAt,
+      completedAt: base.updatedAt,
+      checkpointId: null,
+      contextHandoffId: null,
+      userMessageId: messageId,
+    };
+    const projection: OrchestrationV2ThreadProjection = {
       ...base,
-      messages: [
-        {
-          id: messageId,
-          threadId: base.thread.id,
-          runId: RunId.make("run-2"),
-          nodeId: null,
-          role: "user",
-          text: "second",
-          attachments: [],
-          streaming: false,
-          createdAt: base.updatedAt,
-          updatedAt: base.updatedAt,
-        },
-      ],
-    } as unknown as ReturnType<typeof makeThreadProjectionFixture>;
-    const state = Atom.make({ data: Option.some(projection) });
-    vi.spyOn(environmentThreadDetails, "stateAtom").mockReturnValue(state as never);
+      thread: { ...base.thread, hiddenAt: null },
+      runs: [run],
+      messages: [projectedMessage],
+    };
+    const state = Atom.make(stateForProjection(projection));
+    vi.spyOn(environmentThreadDetails, "stateAtom").mockReturnValue(state);
     return { state, projection };
   }
 
@@ -2148,15 +2187,16 @@ describe("waitForRevertedMessage", () => {
     const { state, projection } = projectionAtom();
     const waiting = waitForRevertedMessage(threadRef, messageId, 1, requestId, async () => {});
     await Promise.resolve();
-    appAtomRegistry.set(state, {
-      data: Option.some({
+    appAtomRegistry.set(
+      state,
+      stateForProjection({
         ...projection,
         thread: {
           ...projection.thread,
           rollbackFailure: { requestId, message: "The provider could not roll back." },
         },
       }),
-    });
+    );
 
     await expect(waiting).rejects.toThrow("The provider could not roll back.");
   });
@@ -2166,17 +2206,204 @@ describe("waitForRevertedMessage", () => {
     const { state, projection } = projectionAtom();
     const waiting = waitForRevertedMessage(threadRef, messageId, 1, requestId, async () => {}, 50);
     const settled = expect(waiting).rejects.toThrow("Timed out waiting for the thread to rewind.");
-    appAtomRegistry.set(state, {
-      data: Option.some({
+    appAtomRegistry.set(
+      state,
+      stateForProjection({
         ...projection,
         thread: {
           ...projection.thread,
           rollbackFailure: { requestId: CommandId.make("rollback-0"), message: "Old failure." },
         },
       }),
-    });
+    );
     await vi.advanceTimersByTimeAsync(50);
     await settled;
     vi.useRealTimers();
+  });
+
+  it("waits for the matching run to roll back after command acceptance", async () => {
+    const { state, projection } = projectionAtom();
+    let accepted = false;
+    const result = waitForRevertedMessage(threadRef, message.id, 1, requestId, async () => {
+      accepted = true;
+    });
+    let completed = false;
+    void result.then(() => {
+      completed = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(accepted).toBe(true);
+    expect(completed).toBe(false);
+    appAtomRegistry.set(state, stateForProjection({ ...projection, messages: [] }));
+    await Promise.resolve();
+    expect(completed).toBe(false);
+    appAtomRegistry.set(
+      state,
+      stateForProjection({
+        ...projection,
+        messages: [],
+        runs: [{ ...projection.runs[0]!, status: "rolled_back" }],
+      }),
+    );
+    await result;
+  });
+
+  it("rejects a new provider rewind failure without restoring a draft", async () => {
+    const { state, projection } = projectionAtom();
+    const result = waitForRevertedMessage(threadRef, message.id, 1, requestId, async () => {
+      appAtomRegistry.set(
+        state,
+        stateForProjection({
+          ...projection,
+          thread: {
+            ...projection.thread,
+            rollbackFailure: { requestId, message: "Native history unavailable" },
+          },
+        }),
+      );
+    });
+    await expect(result).rejects.toThrow("Native history unavailable");
+  });
+
+  it("bounds waits when a provider never finishes", async () => {
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    projectionAtom();
+    const result = waitForRevertedMessage(threadRef, message.id, 0, requestId, async () => {}, 20);
+    const timeoutIndex = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 20);
+    const rewindTimeout = setTimeoutSpy.mock.results[timeoutIndex]?.value;
+    expect(rewindTimeout).toBeDefined();
+    const rejection = expect(result).rejects.toThrow("Timed out waiting");
+    await vi.advanceTimersByTimeAsync(20);
+    await rejection;
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(rewindTimeout);
+  });
+
+  it("copies attachment bytes before rewind into a fresh file", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("original bytes"));
+    vi.stubGlobal("fetch", fetchMock);
+    const files = await prepareRevertedMessageAttachments({
+      message: {
+        ...message,
+        attachments: [
+          {
+            type: "file",
+            id: "old-attachment",
+            name: "notes.txt",
+            mimeType: "text/plain",
+            sizeBytes: 14,
+          },
+        ],
+      },
+      environmentId,
+      connection: { httpBaseUrl: "https://server.test" },
+      createAssetUrl: async () =>
+        AsyncResult.success({ relativeUrl: "/asset/signed", expiresAt: Date.now() + 60_000 }),
+    });
+    expect(files[0]).toBeInstanceOf(File);
+    expect(files[0]?.name).toBe("notes.txt");
+    expect(await files[0]?.text()).toBe("original bytes");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://server.test/asset/signed");
+  });
+
+  it("merges prepared-connection routing parameters into restored attachment URLs", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("original bytes"));
+    vi.stubGlobal("fetch", fetchMock);
+    await prepareRevertedMessageAttachments({
+      message: {
+        ...message,
+        attachments: [
+          {
+            type: "file",
+            id: "old-attachment",
+            name: "notes.txt",
+            mimeType: "text/plain",
+            sizeBytes: 14,
+          },
+        ],
+      },
+      environmentId,
+      connection: {
+        httpBaseUrl: "https://server.test",
+        queryParameters: [
+          { key: "proxy", value: "a" },
+          { key: "proxy", value: "b" },
+          { key: "token", value: "must-not-leak" },
+        ],
+      },
+      createAssetUrl: async () =>
+        AsyncResult.success({ relativeUrl: "/asset/signed", expiresAt: Date.now() + 60_000 }),
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://server.test/asset/signed?proxy=a&proxy=b");
+  });
+});
+
+describe("restorePlanFollowUpComposer", () => {
+  it("writes back every field a cleared plan follow-up composer held", () => {
+    const snapshot = {
+      prompt: "Follow up on the plan",
+      terminalContexts: [
+        {
+          id: "terminal-1",
+          threadId: ThreadId.make("thread-1"),
+          createdAt: "2026-09-11T00:00:00.000Z",
+          terminalId: "main",
+          terminalLabel: "Main",
+          lineStart: 1,
+          lineEnd: 2,
+          text: "output",
+        },
+      ],
+      reviewComments: [
+        {
+          id: "review-1",
+          sectionId: "file:a.ts",
+          sectionTitle: "File comment",
+          filePath: "a.ts",
+          startIndex: 0,
+          endIndex: 0,
+          rangeLabel: "L1",
+          text: "look here",
+          diff: "",
+        },
+      ],
+      previewAnnotations: [],
+      threadContexts: [],
+    };
+    const writePrompt = vi.fn();
+    const writeTerminalContexts = vi.fn();
+    const writeReviewComments = vi.fn();
+    const writePreviewAnnotations = vi.fn();
+    const writeThreadContexts = vi.fn();
+    const resetCursor = vi.fn();
+
+    restorePlanFollowUpComposer({
+      snapshot,
+      writePrompt,
+      writeTerminalContexts,
+      writeReviewComments,
+      writePreviewAnnotations,
+      writeThreadContexts,
+      resetCursor,
+    });
+
+    expect(writePrompt).toHaveBeenCalledTimes(1);
+    expect(writePrompt).toHaveBeenCalledWith("Follow up on the plan");
+    expect(writeTerminalContexts).toHaveBeenCalledTimes(1);
+    expect(writeTerminalContexts).toHaveBeenCalledWith(snapshot.terminalContexts);
+    expect(writeReviewComments).toHaveBeenCalledTimes(1);
+    expect(writeReviewComments).toHaveBeenCalledWith(snapshot.reviewComments);
+    expect(writePreviewAnnotations).toHaveBeenCalledTimes(1);
+    expect(writePreviewAnnotations).toHaveBeenCalledWith(snapshot.previewAnnotations);
+    expect(writeThreadContexts).toHaveBeenCalledTimes(1);
+    expect(writeThreadContexts).toHaveBeenCalledWith(snapshot.threadContexts);
+    expect(resetCursor).toHaveBeenCalledTimes(1);
+    expect(resetCursor).toHaveBeenCalledWith({
+      cursor: expect.any(Number),
+      prompt: "Follow up on the plan",
+      detectTrigger: true,
+    });
   });
 });

@@ -7,10 +7,18 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
+import * as HttpClientError from "effect/http/HttpClientError";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ModelManifest from "./ModelManifest.ts";
+import {
+  make,
+  BUNDLED_MODEL_MANIFEST,
+  type ModelManifestData,
+  encodeManifestCache,
+} from "./ModelManifest.ts";
+import { getCodexVerbositySupport, resolveCodexSessionVerbosity } from "./CodexModelManifest.ts";
 
 /**
  * Test policy: this file covers manifest machinery, not manifest contents.
@@ -260,6 +268,97 @@ const REMOTE_CLAUDE_MANIFEST: ModelManifest.ModelManifestData = {
   },
 };
 
+const REMOTE_CODEX_MANIFEST: ModelManifestData = {
+  version: 1,
+  updatedAt: REMOTE_UPDATED_AT,
+  currentModels: {
+    codex: ["remote-codex-profile", "remote-codex-model"],
+  },
+  providers: {
+    codex: {
+      profiles: {
+        supported: {
+          adapter: { codex: { support_verbosity: true, default_verbosity: "low" } },
+        },
+      },
+      models: [
+        {
+          slug: "remote-codex-profile",
+          name: "Remote Codex Profile",
+          status: "current",
+          profile: "supported",
+        },
+        {
+          slug: "remote-codex-model",
+          name: "Remote Codex Model",
+          status: "current",
+          profile: "supported",
+          adapter: { codex: { support_verbosity: true, default_verbosity: "high" } },
+        },
+      ],
+    },
+  },
+};
+
+function remoteCodexManifestWithAdapters(input: {
+  readonly profileAdapter?: unknown;
+  readonly modelAdapter?: unknown;
+}): unknown {
+  const codex = REMOTE_CODEX_MANIFEST.providers!.codex!;
+  return {
+    ...REMOTE_CODEX_MANIFEST,
+    providers: {
+      ...REMOTE_CODEX_MANIFEST.providers,
+      codex: {
+        ...codex,
+        profiles: {
+          ...codex.profiles,
+          supported: {
+            ...codex.profiles.supported,
+            ...(input.profileAdapter === undefined ? {} : { adapter: input.profileAdapter }),
+          },
+        },
+        models: codex.models.map((model) =>
+          model.slug === "remote-codex-model"
+            ? {
+                ...model,
+                ...(input.modelAdapter === undefined ? {} : { adapter: input.modelAdapter }),
+              }
+            : model,
+        ),
+      },
+    },
+  };
+}
+
+function retainsRemoteCodexManifestAfterMalformedResponse(input: {
+  readonly prefix: string;
+  readonly malformed: unknown;
+}) {
+  let responseIndex = 0;
+  const responses = [REMOTE_CODEX_MANIFEST, input.malformed];
+
+  return Effect.gen(function* () {
+    const service = yield* make;
+    assert.deepStrictEqual(yield* service.refresh, REMOTE_CODEX_MANIFEST);
+
+    yield* TestClock.adjust("1 hour");
+    responseIndex = 1;
+    assert.deepStrictEqual(yield* service.refresh, REMOTE_CODEX_MANIFEST);
+
+    const rebooted = yield* make;
+    assert.deepStrictEqual(yield* rebooted.current, REMOTE_CODEX_MANIFEST);
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      layerService({
+        prefix: input.prefix,
+        response: () => Response.json(responses[responseIndex]),
+      }),
+    ),
+  );
+}
+
 const remoteClaudeManifestWithCompatibility = (
   compatibility: unknown,
 ): ModelManifest.ModelManifestData => ({
@@ -349,6 +448,67 @@ const layerService = (input: {
     Layer.provideMerge(ServerSettings.layerTest(input.settings ?? {})),
     Layer.provideMerge(layerHttpClient(input.response)),
   );
+
+const failingHttpClientLayer = (onFetch: () => void) =>
+  Layer.succeed(
+    HttpClient.HttpClient,
+    HttpClient.make((request) => {
+      onFetch();
+      return Effect.fail(
+        new HttpClientError.HttpClientError({
+          reason: new HttpClientError.TransportError({
+            request,
+            description: "network disabled",
+          }),
+        }),
+      );
+    }),
+  );
+
+/**
+ * The bundled manifest as of the previous release (git show of
+ * model-manifest.json at its prior edit date): same classification data but
+ * no Codex catalog yet. Minimal by intent — the loader only compares edit
+ * dates, so what matters here is the stale `updatedAt` and the missing
+ * `providers.codex` half.
+ */
+const PREVIOUS_BUNDLE_MANIFEST: ModelManifestData = {
+  version: 1,
+  updatedAt: "2026-09-12T00:41:55Z",
+  currentModels: {
+    codex: [
+      "gpt-6-astra",
+      "gpt-5.6-luna",
+      "gpt-5.6-terra",
+      "gpt-5.6-sol",
+      "gpt-daybreak-blue-latest",
+      "gpt-daybreak-red-latest",
+    ],
+    claudeAgent: ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"],
+    antigravity: ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"],
+  },
+  providers: {
+    antigravity: {
+      defaults: { chat: "gemini-3.8-flash-high" },
+      profiles: {},
+      models: [
+        { slug: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)", status: "current" },
+        { slug: "gemini-3.8-flash-medium", name: "Gemini 3.8 Flash (Medium)", status: "current" },
+        { slug: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)", status: "current" },
+      ],
+    },
+  },
+};
+
+const seedPreviousBundleCache = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const config = yield* ServerConfig.ServerConfig;
+  yield* fs.writeFileString(
+    path.join(config.stateDir, "model-manifest.json"),
+    yield* encodeManifestCache({ fetchedAtMs: 0, manifest: PREVIOUS_BUNDLE_MANIFEST }),
+  );
+});
 
 describe("ModelManifest service", () => {
   it.live("explicit refresh bypasses fresh memory and disk caches", () => {
@@ -516,6 +676,63 @@ describe("ModelManifest service", () => {
     );
   });
 
+  it.effect("accepts valid Codex profile and model adapter metadata and persists it", () =>
+    Effect.gen(function* () {
+      const service = yield* make;
+      assert.deepStrictEqual(yield* service.refresh, REMOTE_CODEX_MANIFEST);
+
+      const rebooted = yield* make;
+      assert.deepStrictEqual(yield* rebooted.current, REMOTE_CODEX_MANIFEST);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        layerService({
+          prefix: "model-manifest-codex-valid-test",
+          response: () => Response.json(REMOTE_CODEX_MANIFEST),
+        }),
+      ),
+    ),
+  );
+
+  it.effect(
+    "retains the active and persisted manifest when a Codex profile default is malformed",
+    () =>
+      retainsRemoteCodexManifestAfterMalformedResponse({
+        prefix: "model-manifest-codex-profile-malformed-test",
+        malformed: remoteCodexManifestWithAdapters({
+          profileAdapter: {
+            codex: { support_verbosity: true, default_verbosity: "bogus" },
+          },
+        }),
+      }),
+  );
+
+  it.effect(
+    "retains the active and persisted manifest when a Codex model support flag is malformed",
+    () =>
+      retainsRemoteCodexManifestAfterMalformedResponse({
+        prefix: "model-manifest-codex-model-malformed-test",
+        malformed: remoteCodexManifestWithAdapters({
+          modelAdapter: {
+            codex: { support_verbosity: "true", default_verbosity: "high" },
+          },
+        }),
+      }),
+  );
+
+  it.effect(
+    "retains the active and persisted manifest when a Codex profile support flag is malformed",
+    () =>
+      retainsRemoteCodexManifestAfterMalformedResponse({
+        prefix: "model-manifest-codex-support-malformed-test",
+        malformed: remoteCodexManifestWithAdapters({
+          profileAdapter: {
+            codex: { support_verbosity: "true", default_verbosity: "low" },
+          },
+        }),
+      }),
+  );
+
   it.live("drops a disk cache of a manifest older than the bundled one", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -550,6 +767,66 @@ describe("ModelManifest service", () => {
       Effect.provide(
         layerService({
           prefix: "model-manifest-newer-bundle-test",
+          response: () => Response.json(REMOTE_MANIFEST),
+        }),
+      ),
+    ),
+  );
+
+  it.live("drops a cache of the previous bundle and serves the bundled Codex catalog offline", () =>
+    Effect.gen(function* () {
+      yield* seedPreviousBundleCache;
+      let fetchCount = 0;
+      const service = yield* make.pipe(
+        Effect.provide(
+          failingHttpClientLayer(() => {
+            fetchCount += 1;
+          }),
+        ),
+      );
+      const manifest = yield* service.current;
+      assert.deepStrictEqual(manifest, BUNDLED_MODEL_MANIFEST);
+      assert.strictEqual(fetchCount, 0);
+
+      // The release's new Codex catalog is live despite the stale cache:
+      // verbosity support with the intended default of medium.
+      assert.isDefined(manifest.providers?.codex);
+      const support = getCodexVerbositySupport(manifest, "gpt-5.6-sol");
+      assert.strictEqual(support?.support_verbosity, true);
+      assert.strictEqual(
+        resolveCodexSessionVerbosity(manifest, "gpt-5.6-sol", undefined),
+        "medium",
+      );
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        layerService({
+          prefix: "model-manifest-stale-cache-offline-test",
+          response: () => Response.json(REMOTE_MANIFEST),
+        }),
+      ),
+    ),
+  );
+
+  it.live("retains the bundle when a refresh fails over a cache of the previous bundle", () =>
+    Effect.gen(function* () {
+      yield* seedPreviousBundleCache;
+      let fetchCount = 0;
+      const service = yield* make.pipe(
+        Effect.provide(
+          failingHttpClientLayer(() => {
+            fetchCount += 1;
+          }),
+        ),
+      );
+      assert.deepStrictEqual(yield* service.refresh, BUNDLED_MODEL_MANIFEST);
+      assert.strictEqual(fetchCount, 1);
+      assert.deepStrictEqual(yield* service.current, BUNDLED_MODEL_MANIFEST);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        layerService({
+          prefix: "model-manifest-refresh-failure-test",
           response: () => Response.json(REMOTE_MANIFEST),
         }),
       ),

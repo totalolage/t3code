@@ -17,6 +17,7 @@ import {
 } from "@t3tools/client-runtime/operations/projects";
 import { connectionStatusText } from "@t3tools/client-runtime/connection";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
+import { isThreadHidden } from "@t3tools/client-runtime/state/thread-hidden";
 import { resolveThreadReferenceCopyTarget } from "@t3tools/shared/threadReference";
 import {
   canPreloadBrowsePath,
@@ -1250,12 +1251,15 @@ function OpenCommandPaletteDialog(props: {
             threads.filter(
               (thread) =>
                 thread.archivedAt === null &&
+                !isThreadHidden(thread) &&
                 groupedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`),
             ),
             clientSettings.sidebarThreadSortOrder,
           )[0] ?? null)
         : getLatestThreadForProject(
-            threads.filter((thread) => thread.environmentId === project.environmentId),
+            threads.filter(
+              (thread) => thread.environmentId === project.environmentId && !isThreadHidden(thread),
+            ),
             project.id,
             clientSettings.sidebarThreadSortOrder,
           );

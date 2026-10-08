@@ -348,6 +348,38 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
     }).pipe(Effect.provide(layerEnvironmentAuth())),
   );
 
+  it.effect("reports the authenticated native session principal without its token", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const issued = yield* serverAuth.issueSession({
+        scopes: ["orchestration:read"],
+        subject: "native-session-subject",
+        label: "T3 local CLI",
+      });
+      const state = yield* serverAuth.getSessionState(makeBearerRequest(issued.token));
+
+      expect(state.authenticated).toBe(true);
+      expect(state.principal).toEqual({
+        sessionId: issued.sessionId,
+        subject: issued.subject,
+      });
+      expect(state).not.toHaveProperty("token");
+    }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
+
+  it.effect("omits the principal from unauthenticated session state", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const state = yield* serverAuth.getSessionState({
+        cookies: {},
+        headers: {},
+      } as never);
+
+      expect(state.authenticated).toBe(false);
+      expect(state.principal).toBeUndefined();
+    }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
+
   it.effect("prefers a bearer token over a stale legacy cookie", () =>
     Effect.gen(function* () {
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;

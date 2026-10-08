@@ -36,6 +36,7 @@ import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { useEnvironmentScope } from "../../state/session";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
+import { useThreadHidingUnavailableReason } from "../../state/thread-hiding";
 import { useThreadPr } from "../../state/use-thread-pr";
 import { useSwipeRowDormant } from "../home/swipe-row-activation";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
@@ -95,6 +96,12 @@ const LEGACY_MENU_ACTIONS: MenuAction[] = [
   { id: "archive", title: "Archive", image: "archivebox" },
   { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
 ];
+
+const HIDE_THREAD_MENU_ACTION: MenuAction = {
+  id: "hide",
+  title: "Hide thread",
+  image: "eye.slash",
+};
 
 /** Rounded-row radius shared with the v1 sidebar rows. */
 const SIDEBAR_V2_ROW_RADIUS = 12;
@@ -500,6 +507,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly fullSwipeWidth?: number;
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
   readonly onDeleteThread: (thread: EnvironmentThreadShell) => void;
+  readonly onHideThread: (thread: EnvironmentThreadShell) => void;
   readonly onNewThreadOnBranch: (thread: EnvironmentThreadShell) => void;
   readonly onRenameThread: (thread: EnvironmentThreadShell) => void;
   readonly onRegenerateThreadTitle: (thread: EnvironmentThreadShell) => void;
@@ -546,6 +554,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     variant,
     onSelectThread,
     onDeleteThread,
+    onHideThread,
     onRenameThread,
     onRegenerateThreadTitle,
     onNewThreadOnBranch,
@@ -562,6 +571,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const snoozedRow = props.snoozed === true;
   const pinnedRow = props.pinned === true;
   const dormant = useSwipeRowDormant(props.activationKey);
+  const threadHidingUnavailableReason = useThreadHidingUnavailableReason(thread.environmentId);
 
   const { providerDrivers, providerIconUrl } = useMemo(() => {
     const provider = props.providers?.find(
@@ -602,6 +612,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const handleDelete = useCallback(() => onDeleteThread(thread), [onDeleteThread, thread]);
   const handleRename = useCallback(() => onRenameThread(thread), [onRenameThread, thread]);
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
+  const handleHide = useCallback(() => onHideThread(thread), [onHideThread, thread]);
   const handleRegenerateTitle = useCallback(
     () => onRegenerateThreadTitle(thread),
     [onRegenerateThreadTitle, thread],
@@ -760,9 +771,16 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       ...arrangementMenuItems,
       ...titleMenuItems,
       ...autoSettleMenuItems,
+      ...(threadHidingUnavailableReason === null ? [HIDE_THREAD_MENU_ACTION] : []),
       { id: "delete", title: "Delete", image: "trash", attributes: { destructive: true } },
     ],
-    [arrangementMenuItems, autoSettleMenuItems, snoozePresetActions, titleMenuItems],
+    [
+      arrangementMenuItems,
+      autoSettleMenuItems,
+      snoozePresetActions,
+      threadHidingUnavailableReason,
+      titleMenuItems,
+    ],
   );
   const cardMenuActions = useMemo<MenuAction[]>(
     () => [
@@ -770,9 +788,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       ...arrangementMenuItems,
       ...titleMenuItems,
       ...autoSettleMenuItems,
+      ...(threadHidingUnavailableReason === null ? [HIDE_THREAD_MENU_ACTION] : []),
       ...CARD_MENU_ACTIONS.slice(1),
     ],
-    [arrangementMenuItems, autoSettleMenuItems, titleMenuItems],
+    [arrangementMenuItems, autoSettleMenuItems, threadHidingUnavailableReason, titleMenuItems],
   );
   // Settled and snoozed rows keep the setting too, matching web where every
   // row shares one menu builder.
@@ -784,27 +803,30 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       ),
       ...titleMenuItems,
       ...autoSettleMenuItems,
+      ...(threadHidingUnavailableReason === null ? [HIDE_THREAD_MENU_ACTION] : []),
       SLIM_MENU_ACTIONS[1]!,
     ],
-    [arrangementMenuItems, autoSettleMenuItems, titleMenuItems],
+    [arrangementMenuItems, autoSettleMenuItems, threadHidingUnavailableReason, titleMenuItems],
   );
   const snoozedMenuActions = useMemo<MenuAction[]>(
     () => [
       SNOOZED_MENU_ACTIONS[0]!,
       ...titleMenuItems,
       ...autoSettleMenuItems,
+      ...(threadHidingUnavailableReason === null ? [HIDE_THREAD_MENU_ACTION] : []),
       SNOOZED_MENU_ACTIONS[1]!,
     ],
-    [autoSettleMenuItems, titleMenuItems],
+    [autoSettleMenuItems, threadHidingUnavailableReason, titleMenuItems],
   );
   const legacyMenuActions = useMemo<MenuAction[]>(
     () => [
       LEGACY_MENU_ACTIONS[0]!,
       ...arrangementMenuItems,
       ...titleMenuItems,
+      ...(threadHidingUnavailableReason === null ? [HIDE_THREAD_MENU_ACTION] : []),
       LEGACY_MENU_ACTIONS[1]!,
     ],
-    [arrangementMenuItems, titleMenuItems],
+    [arrangementMenuItems, threadHidingUnavailableReason, titleMenuItems],
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
@@ -825,6 +847,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "copy-thread-id") {
         copyTextWithHaptic(thread.id, { target: "thread-id" });
       }
+      if (nativeEvent.event === "hide") handleHide();
       if (nativeEvent.event === "delete") handleDelete();
       if (nativeEvent.event === "snooze:custom") {
         setCustomSnoozeOpen(true);
@@ -846,6 +869,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       thread,
       handleArchive,
       handleDelete,
+      handleHide,
       handleRegenerateTitle,
       handleRename,
       handleMoveDown,

@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import type { DesktopUpdateState } from "@t3tools/contracts";
+import type { DesktopUpdateChannel, DesktopUpdateState } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as PlatformError from "effect/PlatformError";
@@ -26,6 +26,7 @@ export interface UpdatesHarnessOptions {
     void,
     ElectronUpdater.ElectronUpdaterCheckForUpdatesError
   >;
+  readonly onCheckForUpdates?: (allowDowngrade: boolean) => void;
   readonly beforeSetUpdateChannel?: Effect.Effect<void>;
   readonly setUpdateChannelError?: DesktopAppSettings.DesktopSettingsWriteError;
   readonly setDisableDifferentialDownload?: Effect.Effect<void>;
@@ -34,9 +35,12 @@ export interface UpdatesHarnessOptions {
   readonly stopBackend?: Effect.Effect<void>;
   readonly startBackend?: Effect.Effect<void>;
   readonly env?: Record<string, string | undefined>;
-  readonly platform?: NodeJS.Platform;
   /** Contents of the resources/package-type marker a Linux package ships. */
   readonly packageType?: string | undefined;
+  readonly appVersion?: string;
+  readonly platform?: NodeJS.Platform;
+  readonly resourcesPath?: string;
+  readonly initialUpdateChannel?: DesktopUpdateChannel;
 }
 
 export function makeHarness(options: UpdatesHarnessOptions = {}) {
@@ -44,8 +48,11 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   let quitAndInstallCount = 0;
   let downloadCount = 0;
   let allowDowngrade = false;
+  let allowPrerelease = false;
   let fullChangelog = false;
   const feedUrls: ElectronUpdater.ElectronUpdaterFeedUrl[] = [];
+  const updaterChannels: string[] = [];
+  const updaterCalls: string[] = [];
   const listeners = new Map<string, Set<(...args: readonly unknown[]) => void>>();
   const sentStates: DesktopUpdateState[] = [];
   const installSteps: string[] = [];
@@ -70,36 +77,61 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   const layerUpdater = Layer.succeed(ElectronUpdater.ElectronUpdater, {
     setFeedURL: (options) =>
       Effect.sync(() => {
+        updaterCalls.push("setFeedURL");
         feedUrls.push(options);
       }),
-    setAutoDownload: () => Effect.void,
-    setAutoInstallOnAppQuit: () => Effect.void,
-    setChannel: () => Effect.void,
-    setAllowPrerelease: () => Effect.void,
+    setAutoDownload: () =>
+      Effect.sync(() => {
+        updaterCalls.push("setAutoDownload");
+      }),
+    setAutoInstallOnAppQuit: () =>
+      Effect.sync(() => {
+        updaterCalls.push("setAutoInstallOnAppQuit");
+      }),
+    setChannel: (channel) =>
+      Effect.sync(() => {
+        updaterCalls.push("setChannel");
+        updaterChannels.push(channel);
+      }),
+    setAllowPrerelease: (value) =>
+      Effect.sync(() => {
+        updaterCalls.push("setAllowPrerelease");
+        allowPrerelease = value;
+      }),
     allowDowngrade: Effect.sync(() => allowDowngrade),
     setAllowDowngrade: (value) =>
       Effect.sync(() => {
+        updaterCalls.push("setAllowDowngrade");
         allowDowngrade = value;
       }),
     setFullChangelog: (value) =>
       Effect.sync(() => {
+        updaterCalls.push("setFullChangelog");
         fullChangelog = value;
       }),
-    setDisableDifferentialDownload: () => options.setDisableDifferentialDownload ?? Effect.void,
+    setDisableDifferentialDownload: () =>
+      Effect.sync(() => {
+        updaterCalls.push("setDisableDifferentialDownload");
+      }).pipe(Effect.andThen(options.setDisableDifferentialDownload ?? Effect.void)),
     checkForUpdates: Effect.sync(() => {
+      updaterCalls.push("checkForUpdates");
       checkCount += 1;
+      options.onCheckForUpdates?.(allowDowngrade);
     }).pipe(Effect.andThen(options.checkForUpdates ?? Effect.void)),
     downloadUpdate: Effect.sync(() => {
+      updaterCalls.push("downloadUpdate");
       downloadCount += 1;
     }).pipe(Effect.andThen(options.downloadUpdate ?? Effect.void)),
     quitAndInstall: () =>
       Effect.sync(() => {
+        updaterCalls.push("quitAndInstall");
         quitAndInstallCount += 1;
         installSteps.push("quitAndInstall");
       }).pipe(Effect.andThen(options.quitAndInstall ?? Effect.void)),
     on: (eventName, listener) =>
       Effect.acquireRelease(
         Effect.sync(() => {
+          updaterCalls.push(`on:${eventName}`);
           addListener(eventName, listener as unknown as (...args: readonly unknown[]) => void);
         }),
         () =>
@@ -152,10 +184,10 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     homeDirectory: `/tmp/t3-desktop-updates-home-${process.pid}`,
     platform: options.platform ?? "darwin",
     processArch: "x64",
-    appVersion: "1.2.3",
+    appVersion: options.appVersion ?? "1.2.3",
     appPath: "/repo",
     isPackaged: true,
-    resourcesPath: "/missing/resources",
+    resourcesPath: options.resourcesPath ?? "/missing/resources",
     runningUnderArm64Translation: false,
   }).pipe(
     Layer.provide(
@@ -173,10 +205,15 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
 
   let testSettings: DesktopAppSettings.DesktopSettings = {
     ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+    ...(options.initialUpdateChannel === undefined
+      ? {}
+      : { updateChannel: options.initialUpdateChannel }),
   };
   const setUpdateChannelError = options.setUpdateChannelError;
   const layerSettings =
-    setUpdateChannelError || options.beforeSetUpdateChannel
+    setUpdateChannelError ||
+    options.beforeSetUpdateChannel ||
+    options.initialUpdateChannel !== undefined
       ? Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
           get: Effect.sync(() => testSettings),
           load: Effect.sync(() => testSettings),
@@ -261,7 +298,11 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     updateRestartMarkers,
     downloadCount: () => downloadCount,
     feedUrls: (): ElectronUpdater.ElectronUpdaterFeedUrl[] => feedUrls,
+    allowDowngrade: () => allowDowngrade,
+    allowPrerelease: () => allowPrerelease,
     fullChangelog: () => fullChangelog,
+    updaterCalls: () => updaterCalls,
+    updaterChannels: () => updaterChannels,
     listenerCount: () =>
       Array.from(listeners.values()).reduce(
         (total, eventListeners) => total + eventListeners.size,

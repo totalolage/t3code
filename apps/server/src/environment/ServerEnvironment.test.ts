@@ -1,5 +1,12 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import {
+  HostProcessArchitecture,
+  HostProcessArguments,
+  HostProcessEnvironment,
+  HostProcessIsExecutable,
+  HostProcessPlatform,
+} from "@t3tools/shared/hostProcess";
+import { ORCHESTRATION_CLI_API_VERSION, ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -10,20 +17,19 @@ import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
-import {
-  HostProcessArguments,
-  HostProcessEnvironment,
-  HostProcessIsExecutable,
-  HostProcessPlatform,
-} from "@t3tools/shared/hostProcess";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
-
+import packageJson from "../../package.json" with { type: "json" };
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import {
   PUBLISH_AGENT_ACTIVITY_SECRET,
   RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
   RELAY_URL_SECRET,
 } from "../cloud/config.ts";
+import * as ServiceLauncherClient from "../cloud/serviceLauncherClient.ts";
+import {
+  SERVICE_LAUNCHER_CONTEXT_ENV,
+  SERVICE_LAUNCHER_PROTOCOL,
+} from "../cloud/serviceProtocol.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
 
@@ -223,10 +229,17 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.requiredWorktreeBootstrap).toBe(true);
       expect(second.capabilities.usagePriceOverrides).toBe(true);
       expect(second.capabilities.threadActiveReorder).toBe(true);
+      expect(second.capabilities.threadHiding).toBe(true);
       expect(second.capabilities.threadTitleRegeneration).toBe(true);
       expect(second.capabilities.threadPullRequests).toBe(true);
       expect(second.capabilities.threadPullRequestLinking).toBe(true);
       expect(second.capabilities.serverResolvedCommandContext).toBe(true);
+      expect(second.capabilities.orchestration).toEqual({
+        cliApiVersion: ORCHESTRATION_CLI_API_VERSION,
+        serverAuthoritativeCreate: true,
+        pendingInteractions: false,
+        manualThreadCompaction: true,
+      });
       expect(second.capabilities.agentActivityPublishing).toBe(false);
     }),
   );
@@ -316,6 +329,80 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       const web = yield* describeWith({ mode: "web", desktopTelemetryControlFd: 5 });
       expect(web.capabilities.desktopAppUpdate).toBeUndefined();
     }),
+  );
+
+  it.effect(
+    "advertises scheduledServiceUpdates only on a launcher-managed linux-x64 boot service",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-server-environment-scheduled-updates-test-",
+        });
+        const serverConfig = yield* makeServerConfig(baseDir);
+        yield* fileSystem.makeDirectory(serverConfig.stateDir, { recursive: true });
+
+        const describeWith = (overrides: {
+          readonly config?: Partial<ServerConfig.ServerConfig["Service"]>;
+          readonly managed?: boolean;
+          readonly platform?: NodeJS.Platform;
+          readonly architecture?: NodeJS.Architecture;
+        }) =>
+          Effect.gen(function* () {
+            const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+            return yield* serverEnvironment.getDescriptor;
+          }).pipe(
+            Effect.provide(
+              ServerEnvironment.layer.pipe(
+                Layer.provide(ServerSecretStore.layer),
+                Layer.provide(ServerConfig.layer({ ...serverConfig, ...overrides.config })),
+                Layer.provide(
+                  Layer.mergeAll(
+                    Layer.succeed(HostProcessPlatform, overrides.platform ?? "linux"),
+                    Layer.succeed(HostProcessArchitecture, overrides.architecture ?? "x64"),
+                    // Launcher management is the startup context plus a live
+                    // IPC channel; without the context the server is unmanaged.
+                    Layer.succeed(
+                      HostProcessEnvironment,
+                      overrides.managed === false
+                        ? {}
+                        : {
+                            [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify({
+                              protocol: SERVICE_LAUNCHER_PROTOCOL,
+                              childVersion: packageJson.version,
+                            }),
+                          },
+                    ),
+                    Layer.succeed(ServiceLauncherClient.ServiceLauncherHostProcess, {
+                      connected: overrides.managed !== false,
+                      send: () => true,
+                      on: () => undefined,
+                      off: () => undefined,
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          );
+
+        // The full scheduled chain is bound in `server.ts` exactly for this
+        // host shape: a launcher-managed boot service on linux-x64.
+        const bound = yield* describeWith({ config: { mode: "web" } });
+        expect(bound.capabilities.scheduledServiceUpdates).toBe(1);
+
+        const unmanaged = yield* describeWith({ managed: false });
+        expect(unmanaged.capabilities.scheduledServiceUpdates).toBeUndefined();
+
+        const darwin = yield* describeWith({ platform: "darwin" });
+        expect(darwin.capabilities.scheduledServiceUpdates).toBeUndefined();
+
+        const arm = yield* describeWith({ architecture: "arm64" });
+        expect(arm.capabilities.scheduledServiceUpdates).toBeUndefined();
+
+        // Desktop-managed updates use a different channel: no scheduled chain.
+        const desktop = yield* describeWith({ config: { mode: "desktop" } });
+        expect(desktop.capabilities.scheduledServiceUpdates).toBeUndefined();
+      }),
   );
 
   it.effect("structures persisted environment id filesystem failures", () =>

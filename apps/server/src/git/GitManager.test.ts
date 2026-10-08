@@ -3176,6 +3176,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
               createdAt,
               updatedAt: createdAt,
               archivedAt: null,
+              hiddenAt: null,
               settledOverride: null,
               settledAt: null,
               lastVisitedAt: null,

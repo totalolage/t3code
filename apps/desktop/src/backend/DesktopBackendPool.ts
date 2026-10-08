@@ -93,6 +93,8 @@ import * as FileSystem from "effect/FileSystem";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
+import type { DesktopBackendTerminalFailure } from "@t3tools/contracts";
+
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopBackendManager from "./DesktopBackendManager.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
@@ -152,6 +154,10 @@ export class DesktopBackendPool extends Context.Service<
     // exposed as a typed effect so consumers don't have to handle the
     // Option for the case that's guaranteed to be present.
     readonly primary: Effect.Effect<DesktopBackendInstance>;
+    // Completes with the first terminal failure reported by the primary
+    // instance. The pool owns this receipt so a consumer can subscribe before
+    // or after backend startup without losing the failure.
+    readonly awaitPrimaryTerminalFailure: Effect.Effect<DesktopBackendTerminalFailure>;
     // Build a fresh DesktopBackendInstance from `spec` and add it to the
     // registry. The pool owns the instance's scope: unregister(id) or pool
     // teardown closes it and runs the instance's auto-stop finalizer. The
@@ -230,6 +236,10 @@ export const layer = Layer.effect(
     // the same FileSystem, spawner, HTTP client and log factory the
     // primary instance uses.
     const factoryContext = yield* Effect.context<BackendInstanceFactoryRequirements>();
+    // This deferred belongs to the pool layer, not to an individual awaiter, so
+    // a terminal primary failure remains observable after the child has been
+    // cleaned up and any later awaiter receives the same initial receipt.
+    const primaryTerminalFailure = yield* Deferred.make<DesktopBackendTerminalFailure>();
 
     // A WSL preflight failure on the primary only happens in wsl-only mode.
     // Fatal configuration failures persist the Windows fallback. Bounded
@@ -303,6 +313,8 @@ export const layer = Layer.effect(
         ),
       onShutdown: () => desktopWindow.handleBackendNotReady,
       onPreflightFailed: handlePrimaryPreflightFailure,
+      onTerminalFailure: (failure) =>
+        Deferred.succeed(primaryTerminalFailure, failure).pipe(Effect.asVoid),
     });
 
     const instancesRef = yield* SynchronizedRef.make<
@@ -439,6 +451,7 @@ export const layer = Layer.effect(
         ),
       ),
       primary: Effect.succeed(primary),
+      awaitPrimaryTerminalFailure: Deferred.await(primaryTerminalFailure),
       register,
       unregister,
     });
@@ -469,6 +482,7 @@ export const layerTest = (
         get: (id) => Effect.succeed(Option.fromNullishOr(byId.get(id))),
         list: Effect.succeed(Array.from(byId.values())),
         primary: Effect.succeed(primary),
+        awaitPrimaryTerminalFailure: Effect.never,
         register: () => Effect.die("DesktopBackendPool.layerTest does not support register"),
         unregister: () => Effect.die("DesktopBackendPool.layerTest does not support unregister"),
       });

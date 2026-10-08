@@ -693,17 +693,13 @@ export const resolveCommandPath = Effect.fn("shell.resolveCommandPath")(function
   });
 });
 
-// Untraced because it runs before most spawns and returns at once off Windows.
+// Untraced because this runs before most child spawns and reuses the command-resolution cache.
 export const resolveSpawnCommand = Effect.fnUntraced(function* (
   command: string,
   args: ReadonlyArray<string>,
   options: CommandAvailabilityOptions = {},
 ): Effect.fn.Return<ResolvedSpawnCommand> {
   const platform = yield* HostProcessPlatform;
-  if (platform !== "win32") {
-    return { command, args: [...args], shell: false };
-  }
-
   const hostEnvironment = yield* HostProcessEnvironment;
   const env =
     options.env === undefined
@@ -738,6 +734,11 @@ export const resolveSpawnCommand = Effect.fnUntraced(function* (
     }
   }
   const resolvedCommand = resolvedExecutable ?? command;
+  if (platform !== "win32") {
+    // Bun's compiled executable can fail when posix_spawnp searches PATH in unprivileged Incus/LXC.
+    return { command: resolvedCommand, args: [...args], shell: false };
+  }
+
   const extension = NodePath.win32.extname(resolvedCommand).toLowerCase();
   if (extension !== ".cmd" && extension !== ".bat") {
     return { command: resolvedCommand, args: [...args], shell: false };

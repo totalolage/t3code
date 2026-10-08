@@ -40,7 +40,7 @@ export function restartContinuationRun(
         : latest,
     undefined,
   );
-  if (!run) return;
+  if (!run || run.purpose === "compaction") return;
   const preparedContinuation =
     run.status === "starting" && run.restartContinuationOfRunId !== undefined;
   if (run.status !== "running" && !preparedContinuation) return;
@@ -112,6 +112,7 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
     // including waiting runs that reconciliation subsequently cancelled.
     if (
       !source ||
+      source.purpose === "compaction" ||
       source.status !== "cancelled" ||
       isRestartNoteSource(source, projection.providerTurns)
     )

@@ -41,9 +41,15 @@ import * as EventStore from "../src/orchestration-v2/EventStore.ts";
 import * as EventSink from "../src/orchestration-v2/EventSink.ts";
 import * as ProjectionStore from "../src/orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagementService from "../src/orchestration-v2/ThreadManagementService.ts";
+import * as CommandReceiptStore from "../src/orchestration-v2/CommandReceiptStore.ts";
+import * as GitWorkflowService from "../src/git/GitWorkflowService.ts";
+import * as Orchestrator from "../src/orchestration-v2/Orchestrator.ts";
+import * as PendingInteractionService from "../src/orchestration-v2/PendingInteractionService.ts";
 import * as ProjectStore from "../src/orchestration-v2/ProjectStore.ts";
 import * as ProjectService from "../src/project/ProjectService.ts";
 import * as ProjectEnrichmentService from "../src/project/ProjectEnrichmentService.ts";
+import * as ServerConfig from "../src/config.ts";
+import * as ThreadLaunchService from "../src/orchestration-v2/ThreadLaunchService.ts";
 import * as OrchestrationHttp from "../src/orchestration-v2/http.ts";
 import * as ServerHttp from "../src/http.ts";
 import { subscribeOrchestrationV2Thread, subscribeOrchestrationV2Shell } from "../src/ws.ts";
@@ -107,12 +113,24 @@ const layerEnrichment = Layer.unwrap(
     });
   }),
 );
+// This fixture measures snapshots and streams. Unmeasured create, git, and
+// pending-interaction dependencies stay isolated and fail if those paths are called.
+const httpServices = Layer.mergeAll(
+  CommandReceiptStore.layer,
+  ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "transfer-budget-http-" }).pipe(
+    Layer.provideMerge(NodeServices.layer),
+  ),
+  Layer.mock(GitWorkflowService.GitWorkflowService)({}),
+  Layer.mock(Orchestrator.OrchestratorV2)({}),
+  Layer.mock(PendingInteractionService.PendingInteractionService)({}),
+  Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+).pipe(Layer.provideMerge(layerPersistence));
 // The transfer history has no project events, so shell streams never read a project shell.
 const layerServices = layerManagement.pipe(
   Layer.provideMerge(ProjectStore.layer),
   Layer.provideMerge(Layer.mock(ProjectService.ProjectService)({})),
   Layer.provideMerge(layerEnrichment),
-  Layer.provideMerge(layerPersistence),
+  Layer.provideMerge(httpServices),
 );
 class TransferApi extends HttpApi.make("environment").add(
   EnvironmentHttpApi.groups.orchestration,

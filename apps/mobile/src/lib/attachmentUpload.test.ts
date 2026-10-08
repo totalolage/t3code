@@ -476,14 +476,24 @@ describe("prepareTurnAttachments", () => {
 
   it("uses the current connection when an environment reconnects during URL creation", async () => {
     mocks.readAtom
-      .mockReturnValueOnce(Option.some({ httpBaseUrl: "https://old-environment.example/" }))
-      .mockReturnValueOnce(Option.some({ httpBaseUrl: "https://new-environment.example/" }));
+      .mockReturnValueOnce(
+        Option.some({
+          httpBaseUrl: "https://old-environment.example/",
+          queryParameters: [{ key: "route", value: "old" }],
+        }),
+      )
+      .mockReturnValueOnce(
+        Option.some({
+          httpBaseUrl: "https://new-environment.example/",
+          queryParameters: [{ key: "route", value: "new" }],
+        }),
+      );
 
     await prepareTurnAttachments({ environmentId, attachments: [file] });
 
     expect(mocks.upload).toHaveBeenCalledWith(
       file.fileUri,
-      "https://new-environment.example/api/attachments/upload/signed",
+      "https://new-environment.example/api/attachments/upload/signed?route=new",
       expect.anything(),
     );
   });

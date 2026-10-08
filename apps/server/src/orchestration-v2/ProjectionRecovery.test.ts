@@ -60,6 +60,7 @@ const createThread = Effect.fn(function* (
     createdAt: now,
     updatedAt: now,
     archivedAt: null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     lastVisitedAt: null,
@@ -79,7 +80,7 @@ const createThread = Effect.fn(function* (
 const createRun = Effect.fn(function* (
   threadId: ThreadId,
   status: OrchestrationV2Run["status"],
-  overrides: Partial<OrchestrationV2Run> = {},
+  overrides: Partial<Extract<OrchestrationV2Run, { readonly userMessageId: MessageId }>> = {},
 ) {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const now = yield* DateTime.now;

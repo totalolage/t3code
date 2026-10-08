@@ -214,6 +214,7 @@ const seedNativeThreads = Effect.fn("ProjectCliTest.seedNativeThreads")(function
           createdAt,
           updatedAt: createdAt,
           archivedAt: archived ? createdAt : null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,

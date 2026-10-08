@@ -2,7 +2,8 @@
 
 On your first V2 launch, T3 Code copies the V1 database, `state.sqlite`, into `statev2.sqlite`
 in the same data directory and migrates the copy. Your threads appear automatically, with full
-transcripts imported as needed. You do not need to run an import command.
+transcripts imported as needed. The shipped fork’s V1 database uses this same automatic import.
+You do not need to run an import command.
 
 V1 continues using its original database while V2 uses the copy. The database import can run while
 V1 is open. Opening V2 again resumes your V2 history. The copy happens only once: later conversations
@@ -15,8 +16,8 @@ the V2 desktop app copies stashed prompts, unsent drafts, layout, and theme from
 change in V2 afterwards stays in V2.
 
 The migrated thread keeps its title, project, provider and model selection, permission and
-interaction modes, branch or worktree, archive state, settlement state, snooze and pin state, and
-linked pull request. T3 Code also brings over user and assistant messages, their timestamps, and
+interaction modes, branch or worktree, archive and hidden states, settlement state, snooze and pin
+state, and linked pull request. T3 Code also brings over user and assistant messages, their timestamps, and
 supported attachments. Large histories may appear in stages while the server imports transcripts.
 
 The migration does not recreate the old provider's live session. It also does not convert old run

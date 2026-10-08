@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  CommandId,
   MessageId,
   ProjectId,
   ProviderDriverKind,
@@ -24,6 +25,7 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
+import { layerMemory } from "../persistence/Sqlite.ts";
 
 const threadId = ThreadId.make("thread:restart");
 const runId = RunId.make("run:restart");
@@ -123,6 +125,21 @@ it("requires matching saved native state for an unfinished root run", () => {
     ].map((status) => ({ ...projection, runs: [{ ...projection.runs[0]!, status }] })),
   ])
     assert.isUndefined(restartContinuationRun(invalid as OrchestrationV2ThreadProjection));
+});
+
+it("does not restart a native maintenance run as an ordinary prompt", () => {
+  const projection = makeProjection();
+  const maintenance = {
+    ...projection.runs[0]!,
+    purpose: "compaction",
+    requestCommandId: CommandId.make("command:restart-compact"),
+  };
+  assert.isUndefined(
+    restartContinuationRun({
+      ...projection,
+      runs: [maintenance],
+    } as unknown as OrchestrationV2ThreadProjection),
+  );
 });
 
 it("continues a live turn whose session the adapter never marked running", () => {
@@ -265,6 +282,7 @@ it.effect.each([
       const recovery = yield* ProviderRuntimeRecovery.make.pipe(
         Effect.provide(
           Layer.mergeAll(
+            layerMemory,
             ServerSettings.layerTest({
               continueThreadsAfterServerUpdate: enabled,
               projectSettingsOverrides:
@@ -397,6 +415,7 @@ it.effect("prepares no continuation for background work another provider thread 
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
       Effect.provide(
         Layer.mergeAll(
+          layerMemory,
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getRecoveryThreadIds: () => Effect.succeed([threadId]),
@@ -425,6 +444,7 @@ it.effect("prepares no continuation for background work another provider thread 
     const ownRecovery = yield* ProviderRuntimeRecovery.make.pipe(
       Effect.provide(
         Layer.mergeAll(
+          layerMemory,
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getRecoveryThreadIds: () => Effect.succeed([threadId]),
@@ -492,6 +512,7 @@ it.effect.each([
         const recovery = yield* ProviderRuntimeRecovery.make.pipe(
           Effect.provide(
             Layer.mergeAll(
+              layerMemory,
               ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
               Layer.mock(ProjectionStore.ProjectionStoreV2)({
                 getRecoveryThreadIds: () => Effect.succeed([threadId]),
@@ -548,6 +569,7 @@ it.effect("does not cancel or resume a run that completes while shutdown intent 
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
       Effect.provide(
         Layer.mergeAll(
+          layerMemory,
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getRecoveryThreadIds: () => Effect.succeed([threadId]),
@@ -727,6 +749,23 @@ it.effect("does not continue a cut /compact or /logout turn", () =>
   }),
 );
 
+it.effect("does not synthesize a restart prompt for a cancelled native maintenance run", () =>
+  Effect.gen(function* () {
+    const base = makeProjection();
+    const maintenance = {
+      ...base.runs[0]!,
+      status: "cancelled",
+      purpose: "compaction",
+      requestCommandId: CommandId.make("command:cancelled-compact"),
+    };
+    const texts = yield* continuationTexts({
+      ...base,
+      runs: [maintenance],
+    } as unknown as OrchestrationV2ThreadProjection);
+    assert.deepEqual(texts, []);
+  }),
+);
+
 it.effect("tells a turn cut mid-way about the background work it lost", () =>
   Effect.gen(function* () {
     const texts = yield* continuationTexts(
@@ -786,6 +825,7 @@ it.effect("prepares later threads' continuations when one thread fails", () =>
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
       Effect.provide(
         Layer.mergeAll(
+          layerMemory,
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getRecoveryThreadIds: () => Effect.succeed([brokenThreadId, threadId]),

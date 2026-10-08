@@ -1674,6 +1674,140 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("Context compacted");
   });
 
+  it("expands and collapses a persisted context-compaction summary in place", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("requestAnimationFrame", () => 0);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    const previousElement = globalThis.Element;
+    const previousNode = globalThis.Node;
+    const previousHTMLElement = globalThis.HTMLElement;
+    const previousWindow = globalThis.window;
+    const previousWindowElement = previousWindow.Element;
+    const previousWindowNode = previousWindow.Node;
+    const previousWindowHTMLElement = previousWindow.HTMLElement;
+    class TestElement {
+      readonly nodeType = 1;
+    }
+    vi.stubGlobal("Element", TestElement);
+    vi.stubGlobal("Node", TestElement);
+    vi.stubGlobal("HTMLElement", TestElement);
+    Object.assign(previousWindow, {
+      Element: TestElement,
+      Node: TestElement,
+      HTMLElement: TestElement,
+    });
+    const detail = [
+      "  Native compaction summary:",
+      "Preserve this complete multiline body.",
+      "It must not be reduced to the collapsed heading.",
+      "<exited with exit code 0>  ",
+    ].join("\n");
+    const timelineEntries = [
+      {
+        id: "user-before-entry",
+        kind: "message" as const,
+        createdAt: "2026-03-17T19:12:26.000Z",
+        message: {
+          id: MessageId.make("user-before"),
+          role: "user" as const,
+          text: "Before compaction",
+          turnId: null,
+          runId: null,
+          createdAt: "2026-03-17T19:12:26.000Z",
+          updatedAt: "2026-03-17T19:12:26.000Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "assistant-before-entry",
+        kind: "message" as const,
+        createdAt: "2026-03-17T19:12:27.000Z",
+        message: {
+          id: MessageId.make("assistant-before"),
+          role: "assistant" as const,
+          text: "Earlier answer",
+          turnId: null,
+          runId: null,
+          createdAt: "2026-03-17T19:12:27.000Z",
+          updatedAt: "2026-03-17T19:12:27.000Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "compaction-entry",
+        kind: "work" as const,
+        createdAt: "2026-03-17T19:12:28.000Z",
+        entry: {
+          id: "compaction-work",
+          createdAt: "2026-03-17T19:12:28.000Z",
+          label: "Compacted context complete",
+          detail,
+          tone: "info" as const,
+          sourceActivityKind: "context-compaction" as const,
+        },
+      },
+      {
+        id: "user-after-entry",
+        kind: "message" as const,
+        createdAt: "2026-03-17T19:12:29.000Z",
+        message: {
+          id: MessageId.make("user-after"),
+          role: "user" as const,
+          text: "After compaction",
+          turnId: null,
+          runId: null,
+          createdAt: "2026-03-17T19:12:29.000Z",
+          updatedAt: "2026-03-17T19:12:29.000Z",
+          streaming: false,
+        },
+      },
+    ];
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        renderer = create(<MessagesTimeline {...buildProps()} timelineEntries={timelineEntries} />);
+      });
+      const serialized = () => JSON.stringify(renderer!.toJSON());
+      const collapsedBefore = serialized();
+      expect(collapsedBefore).toContain("Before compaction");
+      expect(collapsedBefore).toContain("Earlier answer");
+      expect(collapsedBefore).toContain("After compaction");
+      expect(collapsedBefore).toContain("Compacted context");
+      expect(collapsedBefore).not.toContain("Native compaction summary:");
+
+      const toggle = renderer!.root.findByProps({ "aria-expanded": false });
+      await act(() => toggle.props.onClick());
+      const expanded = serialized();
+      expect(renderer!.root.findAllByType("pre")).toHaveLength(1);
+      expect(renderer!.root.findByType("pre").children).toEqual([detail]);
+      expect(expanded.indexOf("Before compaction")).toBeLessThan(
+        expanded.indexOf("Native compaction summary:"),
+      );
+      expect(expanded.indexOf("Native compaction summary:")).toBeLessThan(
+        expanded.indexOf("After compaction"),
+      );
+
+      const expandedToggle = renderer!.root.findByProps({ "aria-expanded": true });
+      await act(() => expandedToggle.props.onClick());
+      const collapsedAfter = serialized();
+      expect(renderer!.root.findAllByType("pre")).toHaveLength(0);
+      expect(collapsedAfter).not.toContain("Native compaction summary:");
+      expect(collapsedAfter).toContain("Before compaction");
+      expect(collapsedAfter).toContain("Earlier answer");
+      expect(collapsedAfter).toContain("After compaction");
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.stubGlobal("Element", previousElement);
+      vi.stubGlobal("Node", previousNode);
+      vi.stubGlobal("HTMLElement", previousHTMLElement);
+      Object.assign(previousWindow, {
+        Element: previousWindowElement,
+        Node: previousWindowNode,
+        HTMLElement: previousWindowHTMLElement,
+      });
+    }
+  });
+
   it("does not render the transient V2 interruption request", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(

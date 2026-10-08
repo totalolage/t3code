@@ -227,6 +227,53 @@ Claude Code, Codex, ChatGPT and other agents T3 Code did not start can drive
 threads on an environment through its MCP server. See
 [outside agents](./outside-agents.md) for setup.
 
+## Command-line access to a remote server
+
+Once your device can reach the server, the `t3 remote` commands let you drive
+it from a terminal. Authenticate first:
+
+```bash
+t3 remote auth --host https://your-server:3773
+```
+
+Paste a one-time credential when prompted (or pass it now with
+`--credential`). Authentication is stored locally and reused by the commands
+below; it must be repeated if it expires or is revoked. Every `t3 remote`
+command requires `--host`. Use the root commands below to target the server
+running on this machine.
+
+The short forms are plain root commands: `t3 session`, `t3 shell`,
+`t3 snapshot`, `t3 thread <thread-id>`, and `t3 send`. Useful examples:
+
+```bash
+t3 remote session --host https://your-server:3773
+t3 remote thread <thread-id> --host https://your-server:3773
+t3 remote send <thread-id> "message" --yes --host https://your-server:3773
+t3 remote watch <thread-id> --host https://your-server:3773
+
+t3 session                                  # local server
+t3 thread <thread-id>                       # local server
+t3 send <thread-id> "message" --yes         # local server
+t3 pending list                             # local server
+t3 pending approve <thread-id> <request-id> --yes --idempotency-key retry-1
+t3 compact <thread-id> --yes --idempotency-key retry-1
+t3 create "message" --project my-project --yes --idempotency-key retry-1
+```
+
+Mutating commands (send, create, compact, and pending answers) require `--yes`
+so nothing runs by accident. Passing an `--idempotency-key` makes retries safe:
+re-running the same command with the same key continues the original operation
+instead of duplicating it.
+
+`t3 remote watch <thread-id> --host …` streams a turn until it settles, then
+prints the assistant reply. It exits 20 when the thread ended without a reply,
+21 when interrupted, 22 when it errored, 23 on timeout (default 10 minutes,
+override with `--timeout`), 24 on a connection failure, 25 when there is no
+turn to watch, and 26 when the turn is waiting on you. On 26 the pending
+approval or question is printed as JSON; answer it with the pending commands,
+or rerun watch with `--no-interactions` to wait through interactions instead
+of stopping.
+
 ## Manage or revoke access
 
 On the host, **Settings → Connections** lets authorized administrators create

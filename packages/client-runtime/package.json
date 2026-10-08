@@ -311,6 +311,10 @@
       "types": "./src/state/threadSubagents.ts",
       "default": "./src/state/threadSubagents.ts"
     },
+    "./state/thread-hidden": {
+      "types": "./src/state/threadHidden.ts",
+      "default": "./src/state/threadHidden.ts"
+    },
     "./state/thread-settled": {
       "types": "./src/state/threadSettled.ts",
       "default": "./src/state/threadSettled.ts"

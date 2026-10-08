@@ -76,6 +76,15 @@ describe("V2 client presentation", () => {
     expect(shell.source).toBe(v2ThreadShell);
   });
 
+  it("presents hidden shell state for reversible recovery", () => {
+    const hiddenAt = DateTime.makeUnsafe("2026-06-20T01:00:00.000Z");
+    const hidden = presentThreadShell(environmentId, { ...v2ThreadShell, hiddenAt });
+    const unhidden = presentThreadShell(environmentId, { ...v2ThreadShell, hiddenAt: null });
+
+    expect(hidden.hiddenAt).toBe(DateTime.formatIso(hiddenAt));
+    expect(unhidden.hiddenAt).toBeNull();
+  });
+
   it("preserves active ordering and both pull-request sources", () => {
     const linkedPullRequest = {
       projectId: v2ThreadShell.projectId,

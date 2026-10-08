@@ -13,6 +13,7 @@ import {
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
   deleteSelectedThreadEntries,
+  filterHiddenSidebarThreads,
   filterSidebarProjectScopeItems,
   filterSidebarV2VisibleThreads,
   formatWorkingDurationLabel,
@@ -62,6 +63,7 @@ import {
 } from "./Sidebar.logic";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import { sortSettledThreads } from "@t3tools/client-runtime/state/thread-sort";
+import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 
 import {
@@ -432,6 +434,12 @@ describe("sidebar thread lineage helpers", () => {
       projectId,
       archivedAt: "2026-01-02T00:00:00.000Z",
     });
+    const hidden = makeThreadFixture({
+      id: ThreadId.make("thread-hidden"),
+      environmentId,
+      projectId,
+      hiddenAt: "2026-01-03T00:00:00.000Z",
+    });
     const otherProject = makeThreadFixture({
       id: ThreadId.make("thread-other-project"),
       environmentId,
@@ -440,7 +448,7 @@ describe("sidebar thread lineage helpers", () => {
 
     expect(
       filterSidebarV2VisibleThreads(
-        [root, subagent, fork, archived, otherProject],
+        [root, subagent, fork, archived, hidden, otherProject],
         new Set([`${environmentId}:${projectId}`]),
       ).map((thread) => thread.id),
     ).toEqual([parentId, fork.id]);
@@ -852,6 +860,66 @@ describe("resolveAdjacentThreadId", () => {
         direction: "previous",
       }),
     ).toBeNull();
+  });
+});
+
+describe("filterHiddenSidebarThreads", () => {
+  it("feeds visible scoped rows to adjacent navigation without mutating shells", () => {
+    const environmentA = EnvironmentId.make("environment-a");
+    const environmentB = EnvironmentId.make("environment-b");
+    const visible = makeThread({
+      environmentId: environmentA,
+      id: ThreadId.make("thread-1"),
+      hiddenAt: null,
+    });
+    const hidden = makeThread({
+      environmentId: environmentA,
+      id: ThreadId.make("thread-2"),
+      hiddenAt: "2026-09-12T00:00:00.000Z",
+    });
+    const legacy = makeThread({
+      environmentId: environmentB,
+      id: ThreadId.make("thread-2"),
+    });
+    const originalThreads = [visible, hidden, legacy] as const;
+    const visibleThreads = filterHiddenSidebarThreads(originalThreads);
+    const visibleKeys = visibleThreads.map((thread) =>
+      scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+    );
+    const firstKey = visibleKeys[0]!;
+    const legacyKey = visibleKeys[1]!;
+    const hiddenKey = scopedThreadKey(scopeThreadRef(hidden.environmentId, hidden.id));
+
+    expect(visibleKeys).toEqual([firstKey, legacyKey]);
+    expect(
+      resolveAdjacentThreadId({
+        threadIds: visibleKeys,
+        currentThreadId: firstKey,
+        direction: "next",
+      }),
+    ).toBe(legacyKey);
+    expect(
+      resolveAdjacentThreadId({
+        threadIds: visibleKeys,
+        currentThreadId: legacyKey,
+        direction: "previous",
+      }),
+    ).toBe(firstKey);
+    expect(
+      resolveAdjacentThreadId({
+        threadIds: visibleKeys,
+        currentThreadId: hiddenKey,
+        direction: "next",
+      }),
+    ).toBeNull();
+    expect(hiddenKey).not.toBe(legacyKey);
+
+    const restored = filterHiddenSidebarThreads([visible, { ...hidden, hiddenAt: null }, legacy]);
+    expect(
+      restored.map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
+    ).toEqual([firstKey, hiddenKey, legacyKey]);
+    expect(hidden.hiddenAt).toBe("2026-09-12T00:00:00.000Z");
+    expect(originalThreads).toEqual([visible, hidden, legacy]);
   });
 });
 
@@ -1506,6 +1574,13 @@ describe("getFallbackThreadIdAfterDelete", () => {
           messages: [],
         }),
         makeThread({
+          id: ThreadId.make("thread-hidden"),
+          projectId: ProjectId.make("project-1"),
+          createdAt: "2026-03-09T10:30:00.000Z",
+          hiddenAt: "2026-03-09T10:31:00.000Z",
+          messages: [],
+        }),
+        makeThread({
           id: ThreadId.make("thread-other-project"),
           projectId: ProjectId.make("project-2"),
           createdAt: "2026-03-09T10:20:00.000Z",
@@ -1741,6 +1816,42 @@ describe("sortProjectsForSidebar", () => {
     },
   );
 
+  it("ignores hidden threads when sorting projects", () => {
+    const sorted = sortProjectsForSidebar(
+      [
+        makeProject({
+          id: ProjectId.make("project-visible"),
+          title: "Visible project",
+          updatedAt: "2026-03-09T10:01:00.000Z",
+        }),
+        makeProject({
+          id: ProjectId.make("project-hidden"),
+          title: "Hidden-only project",
+          updatedAt: "2026-03-09T10:00:00.000Z",
+        }),
+      ],
+      [
+        makeThread({
+          id: ThreadId.make("thread-visible"),
+          projectId: ProjectId.make("project-visible"),
+          updatedAt: "2026-03-09T10:02:00.000Z",
+        }),
+        makeThread({
+          id: ThreadId.make("thread-hidden"),
+          projectId: ProjectId.make("project-hidden"),
+          updatedAt: "2026-03-09T10:10:00.000Z",
+          hiddenAt: "2026-03-09T10:11:00.000Z",
+        }),
+      ],
+      "updated_at",
+    );
+
+    expect(sorted.map((project) => project.id)).toEqual([
+      ProjectId.make("project-visible"),
+      ProjectId.make("project-hidden"),
+    ]);
+  });
+
   it("returns the project timestamp when no threads are present", () => {
     const timestamp = getProjectSortTimestamp(
       makeProject({ updatedAt: "2026-03-09T10:10:00.000Z" }),
@@ -1820,6 +1931,44 @@ describe("sortScopedProjectsForSidebar", () => {
       "Archived-only project",
     ]);
   });
+
+  it("does not use hidden threads as cross-environment project activity", () => {
+    const remoteEnvironmentId = EnvironmentId.make("environment-remote");
+    const projects = [
+      makeProject({
+        environmentId: localEnvironmentId,
+        id: ProjectId.make("project-local"),
+        title: "Visible project",
+        updatedAt: "2026-03-09T10:01:00.000Z",
+      }),
+      makeProject({
+        environmentId: remoteEnvironmentId,
+        id: ProjectId.make("project-remote"),
+        title: "Hidden-only project",
+        updatedAt: "2026-03-09T10:00:00.000Z",
+      }),
+    ];
+    const threads = [
+      makeThread({
+        environmentId: localEnvironmentId,
+        projectId: ProjectId.make("project-local"),
+        updatedAt: "2026-03-09T10:02:00.000Z",
+      }),
+      makeThread({
+        environmentId: remoteEnvironmentId,
+        projectId: ProjectId.make("project-remote"),
+        updatedAt: "2026-03-09T10:10:00.000Z",
+        hiddenAt: "2026-03-09T10:11:00.000Z",
+      }),
+    ];
+
+    const sorted = sortScopedProjectsForSidebar(projects, threads, "updated_at");
+
+    expect(sorted.map((project) => project.title)).toEqual([
+      "Visible project",
+      "Hidden-only project",
+    ]);
+  });
 });
 
 describe("sortLogicalProjectsForSidebar", () => {
@@ -1856,6 +2005,42 @@ describe("sortLogicalProjectsForSidebar", () => {
         (project) => project.projectKey,
       ),
     ).toEqual(["logical-newer", "logical-older"]);
+  });
+
+  it("does not use hidden member threads as logical project activity", () => {
+    const hiddenProjectId = ProjectId.make("project-hidden");
+    const visibleProjectId = ProjectId.make("project-visible");
+    const projects = [
+      {
+        ...makeProject({ id: hiddenProjectId, title: "Hidden-only project" }),
+        projectKey: "logical-hidden",
+        memberProjectRefs: [{ environmentId: localEnvironmentId, projectId: hiddenProjectId }],
+      },
+      {
+        ...makeProject({ id: visibleProjectId, title: "Visible project" }),
+        projectKey: "logical-visible",
+        memberProjectRefs: [{ environmentId: localEnvironmentId, projectId: visibleProjectId }],
+      },
+    ];
+    const threads = [
+      makeThread({
+        id: ThreadId.make("thread-hidden"),
+        projectId: hiddenProjectId,
+        updatedAt: "2026-03-09T10:10:00.000Z",
+        hiddenAt: "2026-03-09T10:11:00.000Z",
+      }),
+      makeThread({
+        id: ThreadId.make("thread-visible"),
+        projectId: visibleProjectId,
+        updatedAt: "2026-03-09T10:02:00.000Z",
+      }),
+    ];
+
+    expect(
+      sortLogicalProjectsForSidebar(projects, threads, "updated_at").map(
+        (project) => project.projectKey,
+      ),
+    ).toEqual(["logical-visible", "logical-hidden"]);
   });
 });
 

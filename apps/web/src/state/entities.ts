@@ -87,6 +87,14 @@ export function useServerConfigs(): ReadonlyMap<EnvironmentId, ServerConfig> {
 
 /** Every thread shell. Pass `enabled: false` to read a stable empty list and
     skip re-rendering on each shell update while the caller does not need them. */
+export function useEnvironmentSupportsHiding(environmentId: EnvironmentId | null): boolean {
+  const configs = useServerConfigs();
+  return (
+    environmentId !== null &&
+    configs.get(environmentId)?.environment.capabilities.threadHiding === true
+  );
+}
+
 export function useThreadShells(enabled = true): ReadonlyArray<EnvironmentThreadShell> {
   return useAtomValue(
     enabled ? environmentThreadShells.threadShellsAtom : EMPTY_THREAD_SHELLS_ATOM,
@@ -286,6 +294,15 @@ export function readEnvironmentSupportsVisitedTracking(environmentId: Environmen
   return (
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
       .threadVisitedTracking === true
+  );
+}
+
+/** Whether the environment's server understands thread.hide/unhide commands.
+    Same version-skew contract as settlement. */
+export function readEnvironmentSupportsHiding(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadHiding === true
   );
 }
 

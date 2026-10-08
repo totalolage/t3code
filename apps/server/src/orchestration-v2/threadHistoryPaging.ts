@@ -364,7 +364,7 @@ function messagesForBoundedProjection(
       run.status === "queued"
     ) {
       retainedRunIds.add(String(run.id));
-      retainedMessageIds.add(String(run.userMessageId));
+      if (run.purpose !== "compaction") retainedMessageIds.add(String(run.userMessageId));
     }
   }
 

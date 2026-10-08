@@ -52,6 +52,7 @@ it.effect.each(["sqlite", "memory"] as const)(
         createdAt: now,
         updatedAt: now,
         archivedAt: null,
+        hiddenAt: null,
         settledOverride: null,
         settledAt: null,
         lastVisitedAt: null,

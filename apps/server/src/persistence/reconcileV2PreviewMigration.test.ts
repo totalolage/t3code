@@ -10,6 +10,8 @@ import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
 import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
 
+const post56MigrationSuffix = migrationManifest.filter(([id]) => id > 56);
+
 // The V2 schema is unchanged from the published September 15–16 previews.
 const seedPreview = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -27,6 +29,33 @@ const seedPreview = Effect.gen(function* () {
   `;
 });
 
+const seedPreview54WithoutPullRequestFilesViewed = (withIndexCleanup: boolean) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 52 });
+    yield* Migrator.make({})({
+      loader: Migrator.fromRecord({
+        "54_OrchestrationV2": OrchestrationV2,
+        ...(withIndexCleanup
+          ? { "55_RemoveRedundantProjectionIndexes": RemoveRedundantProjectionIndexes }
+          : {}),
+      }),
+    });
+    yield* sql`
+      INSERT INTO orchestration_v2_legacy_imports
+        (thread_id, source_updated_at, shell_imported_at, transcript_imported_at, imported_message_count)
+      VALUES ('preview-thread', '2026-09-15', '2026-09-15', '2026-09-16', 42)
+    `;
+    yield* sql`
+      UPDATE effect_sql_migrations SET created_at = '2026-09-15 00:00:00' WHERE migration_id = 54
+    `;
+    if (withIndexCleanup) {
+      yield* sql`
+        UPDATE effect_sql_migrations SET created_at = '2026-09-16 00:00:00' WHERE migration_id = 55
+      `;
+    }
+  });
+
 describe("V2 preview upgrade", () => {
   it.effect("upgrades a published preview without replaying V2 or losing import progress", () =>
     Effect.gen(function* () {
@@ -37,9 +66,7 @@ describe("V2 preview upgrade", () => {
         [53, "PullRequestFilesViewed"],
         [54, "ProjectionThreadsAutoSettleDisabledAt"],
         [56, "RemoveRedundantProjectionIndexes"],
-        [57, "ScheduledTaskWebhooks"],
-        [58, "WebhookRelayDeliveries"],
-        [59, "McpAppModelContext"],
+        ...post56MigrationSuffix,
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -95,6 +122,63 @@ describe("V2 preview upgrade", () => {
       }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
+  it.effect.each([false, true])(
+    "fills the missing PullRequestFilesViewed entry for preview 54 with index cleanup %s",
+    (withIndexCleanup) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* seedPreview54WithoutPullRequestFilesViewed(withIndexCleanup);
+        const importsBefore = yield* sql`SELECT * FROM orchestration_v2_legacy_imports`;
+
+        const executed = yield* runMigrations();
+        assert.deepStrictEqual(
+          executed,
+          withIndexCleanup
+            ? [
+                [53, "PullRequestFilesViewed"],
+                [54, "ProjectionThreadsAutoSettleDisabledAt"],
+                ...post56MigrationSuffix,
+              ]
+            : [
+                [53, "PullRequestFilesViewed"],
+                [54, "ProjectionThreadsAutoSettleDisabledAt"],
+                [56, "RemoveRedundantProjectionIndexes"],
+                ...post56MigrationSuffix,
+              ],
+        );
+
+        const history = yield* sql<{
+          readonly migration_id: number;
+          readonly name: string;
+        }>`SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id`;
+        assert.deepStrictEqual(
+          history.map((row) => [row.migration_id, row.name] as const),
+          migrationManifest,
+        );
+        assert.deepStrictEqual(
+          yield* sql`SELECT created_at FROM effect_sql_migrations WHERE migration_id = 55`,
+          [{ created_at: "2026-09-15 00:00:00" }],
+        );
+        if (withIndexCleanup) {
+          assert.deepStrictEqual(
+            yield* sql`SELECT created_at FROM effect_sql_migrations WHERE migration_id = 56`,
+            [{ created_at: "2026-09-16 00:00:00" }],
+          );
+        }
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM orchestration_v2_legacy_imports`,
+          importsBefore,
+        );
+        yield* sql`
+          INSERT INTO pull_request_files_viewed
+            (provider, host, repository, number, viewer, path, revision, viewed_at)
+          VALUES ('github', 'github.com', 'owner/repo', 1, 'viewer', 'file.ts', 'revision', '2026-09-17')
+        `;
+        assert.strictEqual((yield* sql`SELECT * FROM pull_request_files_viewed`).length, 1);
+        assert.deepStrictEqual(yield* runMigrations(), []);
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
   it.effect("rolls back schema and ledger together on failure and can retry", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -119,9 +203,7 @@ describe("V2 preview upgrade", () => {
         [53, "PullRequestFilesViewed"],
         [54, "ProjectionThreadsAutoSettleDisabledAt"],
         [56, "RemoveRedundantProjectionIndexes"],
-        [57, "ScheduledTaskWebhooks"],
-        [58, "WebhookRelayDeliveries"],
-        [59, "McpAppModelContext"],
+        ...post56MigrationSuffix,
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

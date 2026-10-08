@@ -151,9 +151,7 @@ function inferDefaultVariant(
   providerID: string,
   variants: ReadonlyArray<string>,
 ): string | undefined {
-  if (variants.length === 1) {
-    return variants[0];
-  }
+  if (variants.length === 1) return variants[0];
   if (providerID === "anthropic" || providerID.startsWith("google")) {
     return variants.includes("high") ? "high" : undefined;
   }
@@ -163,8 +161,23 @@ function inferDefaultVariant(
   return undefined;
 }
 
+function isGpt5Model(modelId: string): boolean {
+  return modelId.startsWith("gpt-5");
+}
+
 function inferDefaultAgent(agents: ReadonlyArray<Agent>): string | undefined {
   return agents.find((agent) => agent.name === "build")?.name ?? agents[0]?.name ?? undefined;
+}
+
+function openCodeTextVerbosity(value: unknown): "low" | "medium" | "high" | undefined {
+  switch (value) {
+    case "low":
+    case "medium":
+    case "high":
+      return value;
+    default:
+      return undefined;
+  }
 }
 
 const DEFAULT_OPENCODE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
@@ -200,19 +213,29 @@ function openCodeCapabilitiesForModel(input: {
   readonly agents: ReadonlyArray<Agent>;
 }): ModelCapabilities {
   const rawVariantValues = Object.keys(input.model.variants ?? {});
-  // When a model advertises no variants, synthesize the standard reasoning
-  // levels so the composer still offers a Reasoning selector (mirrors the
-  // Codex/Grok experience where reasoning is always configurable). The set
-  // covers the common OpenCode variant spectrum; `inferDefaultVariant`
-  // picks the provider-appropriate default (e.g. medium for openai/opencode).
   const variantValues =
     rawVariantValues.length > 0 ? rawVariantValues : ["low", "medium", "high", "xhigh"];
   const defaultVariant = inferDefaultVariant(input.providerID, variantValues);
-  const variantOptions = variantValues.map((value) =>
-    defaultVariant === value
-      ? { id: value, label: titleCaseSlug(value), isDefault: true as const }
-      : { id: value, label: titleCaseSlug(value) },
-  );
+  const variantOptions = variantValues.map((value) => {
+    const variant = input.model.variants?.[value];
+    const textVerbosity =
+      input.model.api.npm === "@ai-sdk/openai"
+        ? openCodeTextVerbosity(variant?.textVerbosity)
+        : undefined;
+    const label = textVerbosity
+      ? `${titleCaseSlug(value)} (${titleCaseSlug(textVerbosity)} verbosity)`
+      : titleCaseSlug(value);
+    const description = textVerbosity
+      ? `Response verbosity: ${titleCaseSlug(textVerbosity)}. Applied by this configured variant.`
+      : undefined;
+    const option = {
+      id: value,
+      label,
+      ...(defaultVariant === value ? { isDefault: true as const } : {}),
+      ...(description ? { description } : {}),
+    };
+    return option;
+  });
   const primaryAgents = input.agents.filter(
     (agent) => !agent.hidden && (agent.mode === "primary" || agent.mode === "all"),
   );
@@ -224,14 +247,26 @@ function openCodeCapabilitiesForModel(input: {
   );
   return createModelCapabilities({
     optionDescriptors: [
-      ...(variantOptions.length > 0
+      {
+        id: "variant",
+        label: "Reasoning",
+        type: "select" as const,
+        options: variantOptions,
+        ...(defaultVariant === undefined ? {} : { currentValue: defaultVariant }),
+        description: "Select an OpenCode reasoning variant.",
+      },
+      ...(isGpt5Model(input.model.id)
         ? [
             {
-              id: "variant",
-              label: "Reasoning",
+              id: "verbosity",
+              label: "Verbosity",
               type: "select" as const,
-              options: variantOptions,
-              ...(defaultVariant ? { currentValue: defaultVariant } : {}),
+              options: [
+                { id: "low", label: "Low" },
+                { id: "medium", label: "Medium", isDefault: true as const },
+                { id: "high", label: "High" },
+              ],
+              currentValue: "medium",
             },
           ]
         : []),
@@ -496,7 +531,7 @@ function openCode2ModelCapabilities(model: OpenCode2Model): ModelCapabilities {
             {
               id: "variant",
               label: "Reasoning",
-              type: "select",
+              type: "select" as const,
               options: variants.map((id) => ({
                 id,
                 label: titleCaseSlug(id),

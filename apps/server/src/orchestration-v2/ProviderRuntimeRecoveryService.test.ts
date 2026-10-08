@@ -23,8 +23,15 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
-import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
+import * as ProviderRuntimeRecoveryModule from "./ProviderRuntimeRecoveryService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as SqlClient from "effect/sql/SqlClient";
+import { layerMemory } from "../persistence/Sqlite.ts";
+
+const ProviderRuntimeRecovery = {
+  ProviderRuntimeRecoveryService: ProviderRuntimeRecoveryModule.ProviderRuntimeRecoveryService,
+  layer: ProviderRuntimeRecoveryModule.layer.pipe(Layer.provideMerge(layerMemory)),
+};
 
 it.effect("leaves durable effects for the worker after runtime reconciliation", () =>
   Effect.gen(function* () {
@@ -724,6 +731,99 @@ it.effect("holds accepted queued work without cancelling its execution state aft
     assert.isUndefined(attemptEvent);
     assert.isUndefined(nodeEvent);
   }).pipe(Effect.provide(layer));
+});
+
+it.effect("holds updater-owned queued work when provider dispatch may have started", () => {
+  const threadId = ThreadId.make("thread_queued_restart_ambiguous_dispatch");
+  const runId = RunId.make("run_queued_restart_ambiguous_dispatch");
+  const attemptId = RunAttemptId.make("attempt_queued_restart_ambiguous_dispatch");
+  const rootNodeId = NodeId.make("node_queued_restart_ambiguous_dispatch");
+  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+    null;
+  const projection = {
+    thread: { id: threadId },
+    runtimeRequests: [],
+    providerSessions: [],
+    providerThreads: [],
+    providerTurns: [],
+    runs: [
+      {
+        id: runId,
+        status: "queued",
+        queuePosition: 1,
+        activeAttemptId: attemptId,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      },
+    ],
+    attempts: [
+      {
+        id: attemptId,
+        runId,
+        rootNodeId,
+        status: "pending",
+        startedAt: null,
+        providerTurnId: null,
+      },
+    ],
+    nodes: [{ id: rootNodeId, runId, status: "pending" }],
+    subagents: [],
+    messages: [],
+    turnItems: [],
+  } as unknown as OrchestrationV2ThreadProjection;
+  const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(ServerSettings.layerTest()),
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getRecoveryThreadIds: () => Effect.succeed([threadId]),
+          getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+        }),
+        Layer.mock(EventSink.EventSinkV2)({
+          commitCommand: (input) => {
+            committedInput = input;
+            return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+          },
+        }),
+        IdAllocator.layer,
+        Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({
+          runRecoveryOnce: Effect.succeed(false),
+        }),
+        Layer.mock(EffectOutbox.EffectOutboxV2)({
+          hasProviderStartDispatchEvidence: () => Effect.succeed(true),
+          reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+        }),
+      ),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_runs (
+        run_id, thread_id, ordinal, provider, provider_thread_id, status, requested_at,
+        completed_at, payload_json, service_update_resume_after_update
+      ) VALUES (
+        ${runId}, ${threadId}, 1, 'codex', NULL, 'queued', '2026-10-06T00:00:00.000Z',
+        NULL, '{"queueHeld":false}', 1
+      )
+    `;
+    const summary =
+      yield* (yield* ProviderRuntimeRecoveryModule.ProviderRuntimeRecoveryService).reconcile(
+        "startup",
+      );
+    assert.equal(summary.terminalizedRuns, 0);
+    const command = committedInput;
+    assert.isNotNull(command);
+    if (command === null) return;
+    assert.equal(command.events.length, 1);
+    const runEvent = command.events[0];
+    assert.equal(runEvent?.type, "run.updated");
+    if (runEvent?.type === "run.updated") {
+      assert.equal(runEvent.runId, runId);
+      assert.equal(runEvent.payload.status, "queued");
+      assert.equal(runEvent.payload.queueHeld, true);
+    }
+  }).pipe(Effect.provide(Layer.mergeAll(layer, layerMemory)));
 });
 
 it.effect(

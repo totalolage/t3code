@@ -4,17 +4,23 @@ import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/threa
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Haptics from "expo-haptics";
-import { useCallback, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { Alert, Platform } from "react-native";
 
 import { withThreadDismissal } from "./thread-dismissal";
 import { showConfirmDialog, showTextInputDialog } from "../../components/ConfirmDialogHost";
+import {
+  createThreadVisibilityActions,
+  type ThreadVisibilityAction,
+  type ThreadVisibilityTarget,
+} from "./thread-visibility-action";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { refreshArchivedThreadsForEnvironment } from "../archive/useArchivedThreadSnapshots";
 import { pinOrderKeyBetween } from "@t3tools/client-runtime/state/thread-sort";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { readEnvironmentScope } from "../../state/session";
+import { getThreadHidingUnavailableReason } from "../../state/thread-hiding";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
 import { queuedThreadKeysAtom } from "../../state/use-thread-outbox";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -81,16 +87,19 @@ function environmentSupportsTitleRegeneration(
 }
 
 type ThreadListAction = "archive" | "unarchive" | "delete" | "settle" | "unsettle";
+type ThreadAction = ThreadListAction | ThreadVisibilityAction;
 
-const ACTION_VERBS: Record<ThreadListAction, string> = {
+const ACTION_VERBS: Record<ThreadAction, string> = {
   archive: "archived",
   unarchive: "unarchived",
+  hide: "hidden",
+  unhide: "unhidden",
   delete: "deleted",
   settle: "settled",
   unsettle: "un-settled",
 };
 
-function actionFailureMessage(action: ThreadListAction, cause: Cause.Cause<unknown>): string {
+function actionFailureMessage(action: ThreadAction, cause: Cause.Cause<unknown>): string {
   const error = Cause.squash(cause);
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message;
@@ -102,9 +111,11 @@ function selectionHaptic(): void {
   void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 }
 
-function actionFailureTitle(action: ThreadListAction): string {
+function actionFailureTitle(action: ThreadAction): string {
   if (action === "archive") return "Could not archive thread";
   if (action === "unarchive") return "Could not unarchive thread";
+  if (action === "hide") return "Could not hide thread";
+  if (action === "unhide") return "Could not unhide thread";
   if (action === "settle") return "Could not settle thread";
   if (action === "unsettle") return "Could not un-settle thread";
   return "Could not delete thread";
@@ -246,6 +257,8 @@ function useConfirmDeleteThread(
 
 export function useThreadListActions(): {
   readonly archiveThread: (thread: EnvironmentThreadShell) => void;
+  readonly hideThread: (thread: ThreadVisibilityTarget) => Promise<boolean>;
+  readonly unhideThread: (thread: ThreadVisibilityTarget) => Promise<boolean>;
   readonly confirmDeleteThread: (thread: EnvironmentThreadShell) => void;
   readonly settleThread: (thread: EnvironmentThreadShell) => Promise<boolean>;
   readonly snoozeThread: (thread: EnvironmentThreadShell, snoozedUntil: string) => Promise<boolean>;
@@ -273,17 +286,44 @@ export function useThreadListActions(): {
   const setAutoSettleMutation = useAtomCommand(threadEnvironment.setAutoSettle, {
     reportFailure: false,
   });
+  const hideMutation = useAtomCommand(threadEnvironment.hide, { reportFailure: false });
+  const unhideMutation = useAtomCommand(threadEnvironment.unhide, { reportFailure: false });
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
   const snoozeInFlightThreadKeys = useRef(new Set<string>());
   const titleRegenerationInFlightThreadKeys = useRef(new Set<string>());
+  const visibilityActions = useMemo(
+    () =>
+      createThreadVisibilityActions({
+        hide: hideMutation,
+        unhide: unhideMutation,
+        getUnavailableReason: getThreadHidingUnavailableReason,
+        onUnavailable: (reason) => {
+          Alert.alert("Could not hide or unhide thread", reason);
+        },
+        onFailure: (action, cause) => {
+          Alert.alert(actionFailureTitle(action), actionFailureMessage(action, cause));
+        },
+        onStarted: selectionHaptic,
+        onSucceeded: refreshArchivedThreadsForEnvironment,
+      }),
+    [hideMutation, unhideMutation],
+  );
 
   const archiveThread = useCallback(
     (thread: EnvironmentThreadShell) => {
       void executeAction("archive", thread);
     },
     [executeAction],
+  );
+  const hideThread = useCallback(
+    async (thread: ThreadVisibilityTarget) => visibilityActions.hideThread(thread),
+    [visibilityActions],
+  );
+  const unhideThread = useCallback(
+    async (thread: ThreadVisibilityTarget) => visibilityActions.unhideThread(thread),
+    [visibilityActions],
   );
   const settleThread = useCallback(
     async (thread: EnvironmentThreadShell) => (await executeAction("settle", thread)) === true,
@@ -755,6 +795,8 @@ export function useThreadListActions(): {
 
   return {
     archiveThread,
+    hideThread,
+    unhideThread,
     confirmDeleteThread,
     settleThread,
     snoozeThread,

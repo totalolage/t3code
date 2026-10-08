@@ -3,6 +3,7 @@ import {
   AuthStandardClientScopes,
   EnvironmentId,
 } from "@t3tools/contracts";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import {
   RelayEnvironmentConnectScope,
   type RelayEnvironmentConnectResponse,
@@ -51,6 +52,15 @@ const BOOTSTRAP: RelayEnvironmentConnectResponse = {
 };
 
 type RecordedResponse = Response | ((init: RequestInit) => Response);
+
+const bearerQueryParameters = (): readonly RemoteQueryParameter[] => [
+  { key: "tenant", value: "one" },
+  { key: "tenant", value: "two" },
+  { key: "clientDeviceType", value: "configured" },
+];
+
+const bearerQueryParametersWithReversedProperties = (): readonly RemoteQueryParameter[] =>
+  bearerQueryParameters().map(({ key, value }) => ({ value, key }));
 
 function recordedFetch(responses: ReadonlyArray<RecordedResponse>) {
   const calls: Array<readonly [RequestInfo | URL, RequestInit]> = [];
@@ -235,37 +245,109 @@ const makeHarness = Effect.fn("TestRemoteAuthorization.makeHarness")(function* (
 });
 
 describe("RemoteEnvironmentAuthorization", () => {
-  it.effect("reuses a validated bearer descriptor while issuing fresh websocket tickets", () =>
+  it.effect(
+    "passes bearer query parameters to descriptor and ticket requests and reuses same-content fresh arrays",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          responses: [
+            Response.json(DESCRIPTOR),
+            websocketTicket("first-ticket"),
+            websocketTicket("second-ticket"),
+          ],
+        });
+
+        const [first, second] = yield* Effect.gen(function* () {
+          const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+          const authorize = (queryParameters: readonly RemoteQueryParameter[]) =>
+            remote.authorizeBearer({
+              expectedEnvironmentId: ENVIRONMENT_ID,
+              httpBaseUrl: ENDPOINT.httpBaseUrl,
+              wsBaseUrl: ENDPOINT.wsBaseUrl,
+              bearerToken: "bearer-token",
+              connectionMethod: "direct",
+              queryParameters,
+            });
+          const first = yield* authorize(bearerQueryParameters());
+          yield* TestClock.adjust("1 second");
+          return [first, yield* authorize(bearerQueryParametersWithReversedProperties())] as const;
+        }).pipe(Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
+
+        expect(first.socketUrl).toContain("wsTicket=first-ticket");
+        expect(second.socketUrl).toContain("wsTicket=second-ticket");
+        const descriptorCalls = harness.fetch.calls.filter(([url]) =>
+          String(url).startsWith("https://environment.example.test/.well-known/t3/environment"),
+        );
+        expect(descriptorCalls).toHaveLength(1);
+        expect(new URL(String(descriptorCalls[0]![0])).searchParams.getAll("tenant")).toEqual([
+          "one",
+          "two",
+        ]);
+        expect(new URL(String(descriptorCalls[0]![0])).searchParams.get("clientDeviceType")).toBe(
+          "configured",
+        );
+
+        const ticketCalls = harness.fetch.calls.filter(([url]) =>
+          String(url).startsWith("https://environment.example.test/api/auth/websocket-ticket"),
+        );
+        expect(ticketCalls).toHaveLength(2);
+        expect(
+          ticketCalls.map(([url]) => new URL(String(url)).searchParams.getAll("tenant")),
+        ).toEqual([
+          ["one", "two"],
+          ["one", "two"],
+        ]);
+        expect(
+          ticketCalls.map(([url]) => new URL(String(url)).searchParams.get("clientDeviceType")),
+        ).toEqual(["configured", "configured"]);
+
+        for (const socketUrl of [first.socketUrl, second.socketUrl]) {
+          const url = new URL(socketUrl);
+          expect(url.searchParams.getAll("tenant")).toEqual(["one", "two"]);
+          expect(url.searchParams.get("clientDeviceType")).toBe("phone");
+        }
+      }),
+  );
+
+  it.effect("invalidates a bearer descriptor cache entry when same-origin query pairs change", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({
         responses: [
           Response.json(DESCRIPTOR),
           websocketTicket("first-ticket"),
+          Response.json(DESCRIPTOR),
           websocketTicket("second-ticket"),
         ],
       });
 
-      const [first, second] = yield* Effect.gen(function* () {
+      yield* Effect.gen(function* () {
         const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
-        const authorize = () =>
+        const authorize = (queryParameters: readonly RemoteQueryParameter[]) =>
           remote.authorizeBearer({
             expectedEnvironmentId: ENVIRONMENT_ID,
             httpBaseUrl: ENDPOINT.httpBaseUrl,
             wsBaseUrl: ENDPOINT.wsBaseUrl,
             bearerToken: "bearer-token",
             connectionMethod: "direct",
+            queryParameters,
           });
-        return [yield* authorize(), yield* authorize()] as const;
+
+        yield* authorize([{ key: "tenant", value: "one" }]);
+        yield* authorize([{ key: "tenant", value: "two" }]);
       }).pipe(Effect.provide(harness.layer));
 
-      expect(first.socketUrl).toContain("wsTicket=first-ticket");
-      expect(second.socketUrl).toContain("wsTicket=second-ticket");
       expect(
-        harness.fetch.calls.filter(([url]) => String(url).endsWith("/.well-known/t3/environment")),
-      ).toHaveLength(1);
-      expect(
-        harness.fetch.calls.filter(([url]) => String(url).endsWith("/api/auth/websocket-ticket")),
+        harness.fetch.calls.filter(([url]) =>
+          String(url).startsWith("https://environment.example.test/.well-known/t3/environment"),
+        ),
       ).toHaveLength(2);
+      expect(
+        harness.fetch.calls
+          .filter(([url]) =>
+            String(url).startsWith("https://environment.example.test/.well-known/t3/environment"),
+          )
+          .map(([url]) => new URL(String(url)).searchParams.get("tenant")),
+      ).toEqual(["one", "two"]);
     }),
   );
 

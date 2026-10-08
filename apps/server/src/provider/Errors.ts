@@ -1,5 +1,4 @@
 import * as Schema from "effect/Schema";
-
 /**
  * ProviderInstanceNotFoundError - Lookup against the instance registry failed.
  *

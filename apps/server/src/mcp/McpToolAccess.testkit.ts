@@ -56,6 +56,7 @@ export const liveThreadShell = (
     createdAt: EPOCH,
     updatedAt: EPOCH,
     archivedAt: null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     lastVisitedAt: null,

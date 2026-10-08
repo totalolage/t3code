@@ -61,6 +61,7 @@ interface LegacyThreadRow {
   readonly branch_pull_request_json: string | null;
   readonly active_order_key: string | null;
   readonly deleted_at: string | null;
+  readonly hidden_at: string | null;
 }
 
 interface LegacyRepairRow extends LegacyThreadRow {
@@ -229,6 +230,7 @@ function importedThread(row: LegacyThreadRow): OrchestrationV2AppThread {
     createdAt: dateTime(row.created_at),
     updatedAt: dateTime(row.updated_at),
     archivedAt: nullableDateTime(row.archived_at),
+    hiddenAt: nullableDateTime(row.hidden_at),
     settledOverride: settledOverrideFor(row.settled_override),
     settledAt: nullableDateTime(row.settled_at),
     unsettledAt: nullableDateTime(row.unsettled_at),
@@ -348,6 +350,12 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const eventSink = yield* EventSink.EventSinkV2;
   const transcriptImports = yield* KeyedLock.make<ThreadId>();
+  const threadColumns = yield* Effect.orDie(
+    sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`,
+  );
+  const hiddenAtSelect = sql.literal(
+    threadColumns.some((column) => column.name === "hidden_at") ? "thread.hidden_at" : "NULL",
+  );
 
   const listMessages = (threadId: ThreadId) =>
     sql<LegacyMessageRow>`
@@ -468,6 +476,7 @@ const make = Effect.gen(function* () {
         thread.branch_pull_request_json,
         thread.active_order_key,
         thread.deleted_at,
+        ${hiddenAtSelect} AS hidden_at,
         projection.payload_json
       FROM orchestration_v2_legacy_imports AS legacy_import
       INNER JOIN projection_threads AS thread
@@ -571,7 +580,8 @@ const make = Effect.gen(function* () {
         thread.linked_pull_request_json,
         thread.branch_pull_request_json,
         thread.active_order_key,
-        thread.deleted_at
+        thread.deleted_at,
+        ${hiddenAtSelect} AS hidden_at
       FROM projection_threads AS thread
       WHERE NOT EXISTS (
         SELECT 1

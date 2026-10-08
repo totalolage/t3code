@@ -13,7 +13,7 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 59 }, (_, index) => index + 1),
+        Array.from({ length: 63 }, (_, index) => index + 1),
       );
     }),
   );
@@ -28,9 +28,13 @@ layer("055_OrchestrationV2", (it) => {
         [54, "ProjectionThreadsAutoSettleDisabledAt"],
         [55, "OrchestrationV2"],
         [56, "RemoveRedundantProjectionIndexes"],
-        [57, "ScheduledTaskWebhooks"],
-        [58, "WebhookRelayDeliveries"],
-        [59, "McpAppModelContext"],
+        [57, "PendingInteractionResponses"],
+        [58, "RunAcceptanceSequence"],
+        [59, "ServiceUpdateQueuedRuns"],
+        [60, "OrchestrationHttpCreateOperations"],
+        [61, "ScheduledTaskWebhooks"],
+        [62, "WebhookRelayDeliveries"],
+        [63, "McpAppModelContext"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -53,9 +57,13 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 54, name: "ProjectionThreadsAutoSettleDisabledAt" },
         { migration_id: 55, name: "OrchestrationV2" },
         { migration_id: 56, name: "RemoveRedundantProjectionIndexes" },
-        { migration_id: 57, name: "ScheduledTaskWebhooks" },
-        { migration_id: 58, name: "WebhookRelayDeliveries" },
-        { migration_id: 59, name: "McpAppModelContext" },
+        { migration_id: 57, name: "PendingInteractionResponses" },
+        { migration_id: 58, name: "RunAcceptanceSequence" },
+        { migration_id: 59, name: "ServiceUpdateQueuedRuns" },
+        { migration_id: 60, name: "OrchestrationHttpCreateOperations" },
+        { migration_id: 61, name: "ScheduledTaskWebhooks" },
+        { migration_id: 62, name: "WebhookRelayDeliveries" },
+        { migration_id: 63, name: "McpAppModelContext" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`

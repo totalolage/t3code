@@ -7,6 +7,7 @@ import type {
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
+import type { PreparedConnection } from "@t3tools/client-runtime/connection";
 import {
   type AtomCommandResult,
   mapAtomCommandResult,
@@ -15,7 +16,7 @@ import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import { AsyncResult } from "effect/reactivity";
 
-import { resolveAssetUrl } from "~/assets/assetUrls";
+import { resolvePreparedAssetUrl } from "~/assets/preparedAssetUrl";
 import { isPreviewAvailableFor, previewRuntimeFor } from "~/browser/previewRuntime";
 import { applyPreviewServerSnapshot, rememberPreviewUrl } from "~/previewStateStore";
 import { useRightPanelStore } from "~/rightPanelStore";
@@ -88,7 +89,7 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly filePath: string;
   readonly workspaceRoot: string | undefined;
-  readonly httpBaseUrl: string;
+  readonly connection: Pick<PreparedConnection, "httpBaseUrl" | "queryParameters">;
   readonly createAssetUrl: (input: {
     readonly environmentId: EnvironmentId;
     readonly input: { readonly resource: AssetResource };
@@ -124,7 +125,7 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
   if (assetResult._tag === "Failure") {
     return AsyncResult.failure(assetResult.cause);
   }
-  const assetUrl = resolveAssetUrl(input.httpBaseUrl, assetResult.value.relativeUrl);
+  const assetUrl = resolvePreparedAssetUrl(input.connection, assetResult.value.relativeUrl);
   if (assetUrl === null) {
     return AsyncResult.failure(
       Cause.die(new Error("The environment returned an invalid asset URL.")),

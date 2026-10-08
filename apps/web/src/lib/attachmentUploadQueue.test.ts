@@ -431,6 +431,30 @@ describe("attachmentUploadQueue", () => {
     );
   });
 
+  it("merges the prepared connection's routing parameters into the upload URL", async () => {
+    mocks.readPreparedConnection.mockReturnValue({
+      httpBaseUrl: "https://environment.test/",
+      queryParameters: [
+        { key: "proxy", value: "a" },
+        { key: "proxy", value: "b" },
+        { key: "token", value: "must-not-leak" },
+      ],
+    });
+
+    const image = makeImage("image-routed");
+    startAttachmentUpload({ environmentId: firstEnvironment, image });
+    await Promise.resolve();
+
+    const request = TestXmlHttpRequest.requests[0]!;
+    expect(request.url).toBe(
+      "https://environment.test/api/attachments/upload/pending-environment-1-image-routed.png?proxy=a&proxy=b",
+    );
+    const settled = awaitAttachmentUploads([image.id]);
+    request.complete();
+    await settled;
+    expect(readAttachmentUpload(image.id)).toMatchObject({ status: "ready" });
+  });
+
   it("uploads generic files and sends file attachment references", async () => {
     const file = {
       ...makeFile("report"),

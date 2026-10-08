@@ -29,6 +29,7 @@ import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { useProjects, useNavigationThreadShells } from "../../state/entities";
 import { useThreadSearch } from "../../state/queries";
+import { isThreadHidden } from "@t3tools/client-runtime/state/thread-hidden";
 import { useThreadListV2ShelfPreferences } from "./use-thread-list-v2-shelf-preferences";
 import { usePendingThreadOrder } from "../../state/thread-order";
 import { threadListEnvironmentsAtom } from "../../state/server";
@@ -147,6 +148,7 @@ function ThreadNavigationSidebarPane(
   const {
     archiveThread,
     confirmDeleteThread,
+    hideThread,
     settleThread,
     snoozeThread,
     unsnoozeThread,
@@ -369,7 +371,7 @@ function ThreadNavigationSidebarPane(
     threadListInboxReturns.observe(workingShelfEnabled ? threads : null);
     return buildThreadListV2Items({
       pendingOrder,
-      threads: threads.filter((thread) => thread.archivedAt === null),
+      threads: threads.filter((thread) => thread.archivedAt === null && !isThreadHidden(thread)),
       environmentId: options.selectedEnvironmentId,
       projectRefs: selectedProjectScope === null ? null : selectedProjectScope.projectRefs,
       searchQuery: props.searchQuery,
@@ -581,6 +583,7 @@ function ThreadNavigationSidebarPane(
   }, []);
   const handleSelectThread = useCallback(
     (thread: EnvironmentThreadShell) => {
+      if (isThreadHidden(thread)) return;
       props.onSelectThread(thread);
       openSwipeableRef.current?.close();
     },
@@ -722,6 +725,7 @@ function ThreadNavigationSidebarPane(
               }
               fullSwipeWidth={props.width - 20}
               onSelectThread={handleSelectThread}
+              onHideThread={hideThread}
               onDeleteThread={confirmDeleteThread}
               onArchiveThread={archiveThread}
               onRenameThread={renameThread}
@@ -798,6 +802,7 @@ function ThreadNavigationSidebarPane(
       confirmDeletePendingTask,
       confirmDeleteThread,
       handleSelectThread,
+      hideThread,
       handleSwipeableClose,
       handleSwipeableWillOpen,
       machineByEnvironmentId,

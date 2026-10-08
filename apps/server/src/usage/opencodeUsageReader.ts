@@ -1,16 +1,17 @@
-// node:sqlite reads live OpenCode databases; Node fs walks legacy JSON history.
+// Node fs walks legacy JSON history; SQLite uses the active runtime's native driver.
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import * as NodeSqlite from "node:sqlite";
 import * as NodeTimersPromises from "node:timers/promises";
 
+import { openRuntimeSqliteReadOnly } from "../persistence/RuntimeSqliteClient.ts";
 import { totalTokens, type UsageRecord } from "./usageTranscripts.ts";
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
 function object(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
+  return isRecord(value) ? value : {};
 }
 
 function tokens(value: unknown): number {
@@ -106,9 +107,9 @@ export async function readOpenCodeUsage(
     found = true;
     const file = { path: NodePath.join(root, name), records: [] as UsageRecord[] };
     files.push(file);
-    let database: NodeSqlite.DatabaseSync | undefined;
+    let database: Awaited<ReturnType<typeof openRuntimeSqliteReadOnly>> | undefined;
     try {
-      database = new NodeSqlite.DatabaseSync(NodePath.join(root, name), { readOnly: true });
+      database = await openRuntimeSqliteReadOnly(NodePath.join(root, name));
       // A busy live provider should fail this source promptly rather than
       // stalling the server while SQLite waits for its writer.
       database.exec("PRAGMA busy_timeout = 100");
@@ -116,7 +117,10 @@ export async function readOpenCodeUsage(
         database
           .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
           .all()
-          .map((row) => row.name),
+          .flatMap((value) => {
+            const name = text(object(value).name);
+            return name ? [name] : [];
+          }),
       );
       if (!tables.has("message") && !tables.has("session_message")) error = true;
       for (const table of ["message", "session_message"] as const) {
@@ -125,7 +129,10 @@ export async function readOpenCodeUsage(
           database
             .prepare(`PRAGMA table_info(${table})`)
             .all()
-            .map((row) => row.name),
+            .flatMap((value) => {
+              const name = text(object(value).name);
+              return name ? [name] : [];
+            }),
         );
         const timestamp = columns.has("time_created") ? "time_created" : "NULL";
         const predicates = table === "session_message" ? ["type = 'assistant'"] : [];
@@ -135,7 +142,8 @@ export async function readOpenCodeUsage(
           `SELECT id, session_id, data, ${timestamp} AS created FROM ${table}${where}`,
         );
         let count = 0;
-        for (const row of statement.iterate(...(timestamp === "NULL" ? [] : [sinceMs]))) {
+        for (const value of statement.iterate(...(timestamp === "NULL" ? [] : [sinceMs]))) {
+          const row = object(value);
           append(
             file.records,
             parseOpenCodeMessage(text(row.data), {

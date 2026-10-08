@@ -1,7 +1,11 @@
+import { GitCommandError } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import { NETWORK_BLOCKING_HINT } from "./network.ts";
 import { isTransportConnectionErrorMessage, sanitizeThreadErrorMessage } from "./transport.ts";
+
+const decodeGitCommandError = Schema.decodeUnknownSync(GitCommandError);
 
 describe("isTransportConnectionErrorMessage", () => {
   it("returns true for SocketCloseError", () => {
@@ -71,6 +75,21 @@ describe("isTransportConnectionErrorMessage", () => {
 });
 
 describe("sanitizeThreadErrorMessage", () => {
+  it("keeps a decoded Git failure's safe detail visible", () => {
+    const error = decodeGitCommandError({
+      _tag: "GitCommandError",
+      operation: "create-worktree",
+      command: "git worktree add",
+      cwd: "/repo",
+      detail: "The requested worktree path already exists.",
+      worktreeReason: "path_exists",
+    });
+
+    expect(sanitizeThreadErrorMessage(error.message)).toBe(
+      "Git command failed in create-worktree (/repo): The requested worktree path already exists.",
+    );
+  });
+
   it("strips transport errors", () => {
     expect(sanitizeThreadErrorMessage("SocketCloseError: oops")).toBeNull();
   });

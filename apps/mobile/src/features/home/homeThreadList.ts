@@ -7,6 +7,7 @@ import {
   getThreadSortTimestamp,
   toSortableTimestamp,
 } from "@t3tools/client-runtime/state/thread-sort";
+import { isThreadHidden } from "@t3tools/client-runtime/state/thread-hidden";
 import type {
   EnvironmentId,
   ScopedProjectRef,
@@ -89,7 +90,7 @@ export function sortHomeProjectScopes(input: {
   };
 
   for (const thread of input.threads) {
-    if (thread.archivedAt !== null) continue;
+    if (thread.archivedAt !== null || isThreadHidden(thread)) continue;
     recordActivity(
       scopeKeyByProjectRef.get(scopedProjectKey(thread.environmentId, thread.projectId)),
       getThreadSortTimestamp(thread, input.projectSortOrder),

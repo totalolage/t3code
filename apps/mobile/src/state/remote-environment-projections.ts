@@ -43,6 +43,12 @@ export function createRemoteEnvironmentProjectionAtoms(input: {
       }
 
       const displayUrl = connectionCatalogDisplayUrl(presentation.entry) ?? "";
+      const profile = Option.getOrNull(presentation.entry.profile);
+      const queryParameters =
+        presentation.entry.target._tag === "BearerConnectionTarget" &&
+        profile?._tag === "BearerConnectionProfile"
+          ? profile.queryParameters
+          : undefined;
       const httpBaseUrl = prepared?.httpBaseUrl ?? displayUrl;
       const socketUrl = prepared?.socketUrl ?? "";
       const wsBaseUrl =
@@ -66,6 +72,7 @@ export function createRemoteEnvironmentProjectionAtoms(input: {
         displayUrl,
         httpBaseUrl,
         wsBaseUrl,
+        ...(queryParameters === undefined ? {} : { queryParameters }),
         bearerToken: authorization?._tag === "Bearer" ? authorization.token : null,
         ...(relayManaged
           ? {

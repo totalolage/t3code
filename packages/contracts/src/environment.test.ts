@@ -44,7 +44,10 @@ describe("ExecutionEnvironmentDescriptor", () => {
   });
 
   it("treats a missing pull-request capability as unsupported under version skew", () => {
-    expect(decodeDescriptor(descriptor).capabilities.pullRequests).toBeUndefined();
+    const decoded = decodeDescriptor(descriptor);
+
+    expect(decoded.capabilities).toEqual(descriptor.capabilities);
+    expect(decoded.capabilities.pullRequests).toBeUndefined();
   });
 
   it("preserves an advertised pull-request capability", () => {
@@ -53,6 +56,22 @@ describe("ExecutionEnvironmentDescriptor", () => {
         ...descriptor,
         capabilities: { ...descriptor.capabilities, pullRequests: true },
       }).capabilities.pullRequests,
+    ).toBe(true);
+  });
+
+  it("decodes missing, false, and true thread-hiding capability values", () => {
+    expect(decodeDescriptor(descriptor).capabilities.threadHiding).toBeUndefined();
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, threadHiding: false },
+      }).capabilities.threadHiding,
+    ).toBe(false);
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, threadHiding: true },
+      }).capabilities.threadHiding,
     ).toBe(true);
   });
 
@@ -66,6 +85,73 @@ describe("ExecutionEnvironmentDescriptor", () => {
         ...descriptor,
         capabilities: { ...descriptor.capabilities, attachmentUploads: true },
       }).capabilities.attachmentUploads,
+    ).toBe(true);
+  });
+
+  it("treats scheduled service updates as unsupported when the capability is absent", () => {
+    expect(decodeDescriptor(descriptor).capabilities.scheduledServiceUpdates).toBeUndefined();
+  });
+
+  it("preserves the versioned scheduled service-update capability", () => {
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, scheduledServiceUpdates: 1 },
+      }).capabilities.scheduledServiceUpdates,
+    ).toBe(1);
+    expect(() =>
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, scheduledServiceUpdates: true },
+      }),
+    ).toThrow();
+  });
+
+  it("treats missing orchestration capabilities as unsupported under version skew", () => {
+    expect(decodeDescriptor(descriptor).capabilities.orchestration).toBeUndefined();
+  });
+
+  it("defaults pending interactions and preserves orchestration capability flags", () => {
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: {
+          ...descriptor.capabilities,
+          orchestration: {
+            cliApiVersion: 2,
+            serverAuthoritativeCreate: true,
+            watchResume: false,
+            manualThreadCompaction: true,
+          },
+        },
+      }).capabilities.orchestration,
+    ).toEqual({
+      pendingInteractions: false,
+      cliApiVersion: 2,
+      serverAuthoritativeCreate: true,
+      watchResume: false,
+      manualThreadCompaction: true,
+    });
+  });
+
+  it("defaults pending interactions when orchestration is present but empty", () => {
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, orchestration: {} },
+      }).capabilities.orchestration,
+    ).toEqual({ pendingInteractions: false });
+  });
+
+  it("preserves an explicitly advertised pending-interactions capability", () => {
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: {
+          ...descriptor.capabilities,
+          orchestration: { pendingInteractions: true },
+        },
+      }).capabilities.orchestration?.pendingInteractions,
     ).toBe(true);
   });
 
@@ -95,5 +181,34 @@ describe("ExecutionEnvironmentDescriptor", () => {
         },
       }).capabilities.serverResolvedCommandContext,
     ).toBe(true);
+  });
+
+  it("preserves each orchestration capability", () => {
+    const orchestration = {
+      pendingInteractions: true,
+      cliApiVersion: 3,
+      serverAuthoritativeCreate: true,
+      watchResume: false,
+      manualThreadCompaction: true,
+    } as const;
+
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, orchestration },
+      }).capabilities.orchestration,
+    ).toEqual(orchestration);
+  });
+
+  it("rejects a non-integer orchestration CLI API version", () => {
+    expect(() =>
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: {
+          ...descriptor.capabilities,
+          orchestration: { cliApiVersion: 1.5 },
+        },
+      }),
+    ).toThrow();
   });
 });

@@ -15,17 +15,24 @@ const target = {
 
 it("captures native bytes from the selected remote host with its media credentials", async () => {
   const fetch = vi.fn(
-    async () =>
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
       new Response(new Uint8Array([137, 80, 78, 71]), { headers: { "Content-Type": "image/png" } }),
   );
   vi.stubGlobal("fetch", fetch);
   const image = await captureDeviceScreenshot(target, new AbortController().signal);
   expect(image.type).toBe("image/png");
   expect(Array.from(new Uint8Array(await image.arrayBuffer()))).toEqual([137, 80, 78, 71]);
-  expect(fetch).toHaveBeenCalledWith(
-    "https://remote.example/api/device-hub/hosts/remote/vendor/serve-emu/api/screenshot?device=phone%20with%20spaces&ticket=capture-ticket",
-    expect.objectContaining({ method: "POST", credentials: "omit" }),
+  expect(fetch).toHaveBeenCalledTimes(1);
+  const [requestInput, requestInit] = fetch.mock.calls[0]!;
+  const requestUrl = new URL(String(requestInput));
+  expect(`${requestUrl.origin}${requestUrl.pathname}`).toBe(
+    "https://remote.example/api/device-hub/hosts/remote/vendor/serve-emu/api/screenshot",
   );
+  expect([...requestUrl.searchParams.entries()]).toEqual([
+    ["device", "phone with spaces"],
+    ["ticket", "capture-ticket"],
+  ]);
+  expect(requestInit).toMatchObject({ method: "POST", credentials: "omit" });
 });
 
 it("preserves authorization failures and cancels an in-flight capture when its owner detaches", async () => {

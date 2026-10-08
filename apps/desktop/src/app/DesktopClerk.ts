@@ -125,7 +125,10 @@ export const make = Effect.gen(function* () {
     configure: Effect.gen(function* () {
       const electronApp = yield* ElectronApp.ElectronApp;
       const electronWindow = yield* ElectronWindow.ElectronWindow;
-      const context = yield* Effect.context<ElectronWindow.ElectronWindow>();
+      const args = yield* HostProcessArguments;
+      const context = yield* Effect.context<
+        ElectronApp.ElectronApp | ElectronWindow.ElectronWindow
+      >();
       const runPromise = Effect.runPromiseWith(context);
 
       // The SDK bridge holds Electron's single-instance lock (acquired at
@@ -182,7 +185,6 @@ export const make = Effect.gen(function* () {
         );
         return true;
       };
-      const args = yield* HostProcessArguments;
       args.some((value) => startProviderAuthHandoff(value));
       yield* electronApp.on("open-url", (event: { preventDefault: () => void }, url: string) => {
         if (startProviderAuthHandoff(url) || resumeProviderAuth(url)) event.preventDefault();
@@ -194,7 +196,11 @@ export const make = Effect.gen(function* () {
           Effect.gen(function* () {
             const mainWindow = yield* electronWindow.currentMainOrFirst;
             if (Option.isSome(mainWindow)) yield* electronWindow.reveal(mainWindow.value);
-          }),
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not reveal the desktop window", cause),
+            ),
+          ),
         );
       });
     }).pipe(Effect.withSpan("desktop.clerk.configure")),

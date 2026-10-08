@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { NavigationState } from "@react-navigation/native";
+import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 
 import type { RecentThreadShortcut } from "../../persistence/imperative";
 import {
@@ -17,6 +18,10 @@ function navState(route: { name: string; params?: unknown }): NavigationState {
 
 function thread(suffix: string, title = `Thread ${suffix}`): RecentThreadShortcut {
   return { environmentId: `env-${suffix}`, threadId: `thread-${suffix}`, title };
+}
+
+function threadRef(environmentId: string, threadId: string): ScopedThreadRef {
+  return { environmentId: EnvironmentId.make(environmentId), threadId: ThreadId.make(threadId) };
 }
 
 describe("withRecentThreadShortcut", () => {
@@ -77,6 +82,39 @@ describe("buildShortcutActions", () => {
     const actions = buildShortcutActions([thread("a", "  ")]);
     expect(actions[1]?.title).toBe("Thread");
   });
+
+  it("removes an excluded thread while retaining the new-task action", () => {
+    const actions = buildShortcutActions(
+      [thread("hidden"), thread("visible")],
+      [threadRef("env-hidden", "thread-hidden")],
+    );
+
+    expect(actions.map((action) => action.params?.href)).toEqual([
+      "/new",
+      "/threads/env-visible/thread-visible",
+    ]);
+  });
+
+  it("matches exclusions by environment and thread together", () => {
+    const actions = buildShortcutActions(
+      [
+        { environmentId: "env-one", threadId: "shared", title: "Hidden here" },
+        { environmentId: "env-two", threadId: "shared", title: "Visible there" },
+      ],
+      [threadRef("env-one", "shared")],
+    );
+
+    expect(actions).toHaveLength(2);
+    expect(actions[1]?.params?.href).toBe("/threads/env-two/shared");
+  });
+
+  it("shows a persisted recent again when its exclusion is reversed", () => {
+    const recents = [thread("a")];
+    const hidden = threadRef("env-a", "thread-a");
+
+    expect(buildShortcutActions(recents, [hidden])).toHaveLength(1);
+    expect(buildShortcutActions(recents)).toHaveLength(2);
+  });
 });
 
 describe("shortcutHref", () => {
@@ -88,6 +126,16 @@ describe("shortcutHref", () => {
     expect(
       shortcutHref({ id: "x", title: "x", params: { href: "/threads/env%201/thread%2F2" } }),
     ).toBe("/threads/env%201/thread%2F2");
+  });
+
+  it("keeps direct navigation valid even when a thread is hidden from generated actions", () => {
+    expect(
+      shortcutHref({
+        id: "stale-hidden-thread",
+        title: "Hidden thread",
+        params: { href: "/threads/env-a/thread-a" },
+      }),
+    ).toBe("/threads/env-a/thread-a");
   });
 
   it("rejects everything else", () => {

@@ -19,6 +19,7 @@ import {
 } from "@t3tools/shared/cliRelease";
 
 import * as ProcessRunner from "../processRunner.ts";
+import { resolveInstalledServiceRuntime, serviceRuntimeFiles } from "./serviceRuntime.ts";
 
 /**
  * A pinned runtime is an exact t3 release archive unpacked into
@@ -269,15 +270,44 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
 ) {
   const { fs } = input;
   const paths = pinnedRuntimePaths(input.path, input.baseDir, input.version, input.platform);
-  const [versionDirExists, entryExists, sentinel] = yield* Effect.all([
+  const runtimeFiles = serviceRuntimeFiles(input.baseDir, input.version);
+  const obsoleteStandaloneExecutablePath = input.path.join(runtimeFiles.versionDir, "bin", "t3");
+  const [
+    versionDirExists,
+    entryExists,
+    sentinel,
+    legacyNodeEntryExists,
+    obsoleteStandaloneExecutableExists,
+  ] = yield* Effect.all([
     fs.exists(paths.versionDir),
     fs.exists(paths.entryPath),
     fs.readFileString(paths.sentinelPath).pipe(Effect.option),
+    fs.exists(runtimeFiles.nodeEntryPath),
+    fs.exists(obsoleteStandaloneExecutablePath),
   ]).pipe(
     Effect.mapError(
       (cause) => new PinnedRuntimeInstallError({ step: "checking the pinned runtime", cause }),
     ),
   );
+  if (legacyNodeEntryExists || obsoleteStandaloneExecutableExists) {
+    const existingRuntime = yield* Effect.tryPromise({
+      try: () => resolveInstalledServiceRuntime(input.baseDir, input.version),
+      catch: (cause) =>
+        new PinnedRuntimeInstallError({
+          step: "checking an existing runtime format",
+          cause,
+        }),
+    });
+    return yield* new PinnedRuntimePreflightBlockedError({
+      version: input.version,
+      reason:
+        existingRuntime?.format === "node-entry"
+          ? "This version is already installed as a legacy Node entry; the archive installer will not replace it."
+          : obsoleteStandaloneExecutableExists
+            ? "An obsolete runtime executable exists; refusing to remove it."
+            : "A legacy Node entry exists; refusing to replace the version directory.",
+    });
+  }
   const alreadyPinned =
     entryExists && Option.isSome(sentinel) && sentinel.value.trim() === input.version;
   if (alreadyPinned) {

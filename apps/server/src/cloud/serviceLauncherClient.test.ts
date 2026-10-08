@@ -98,6 +98,39 @@ it.effect("returns the launcher-generated ID only after update acceptance", () =
   }),
 );
 
+it.effect("keeps private terminal launcher evidence out of the public trial outcome", () =>
+  Effect.gen(function* () {
+    const host = new FakeLauncherProcess({
+      protocol: SERVICE_LAUNCHER_PROTOCOL,
+      childVersion: "1.0.0",
+      update: {
+        id: "update-1",
+        fromVersion: "1.0.0",
+        targetVersion: "1.1.0",
+        status: "failed",
+        reason: "trial exited",
+        dbPath: "/private/state.sqlite",
+        quiescence: {
+          method: "child-exit",
+          populatedObserved: false,
+          childExited: true,
+          observedAt: "2026-10-06T00:00:00.000Z",
+        },
+      },
+    });
+    const client = yield* makeClient(host, "1.0.0");
+
+    expect(yield* client.prepareTrial).toEqual({
+      id: "update-1",
+      fromVersion: "1.0.0",
+      targetVersion: "1.1.0",
+      status: "failed",
+      reason: "trial exited",
+    });
+    expect(host.sent).toEqual([]);
+  }),
+);
+
 it.effect("preserves a launcher rejection as a distinct error", () =>
   Effect.gen(function* () {
     const host = new FakeLauncherProcess({

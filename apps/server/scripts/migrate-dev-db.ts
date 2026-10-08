@@ -41,6 +41,12 @@ import { Command, Flag } from "effect/cli";
 
 import * as ProjectionStore from "../src/orchestration-v2/ProjectionStore.ts";
 import { migrationManifest, runMigrations } from "../src/persistence/Migrations.ts";
+import {
+  classifyAppendedNativeWebhookJournal,
+  classifyNativeWebhookJournal,
+  isSupportedDeployedForkJournal,
+  isSupportedPriorPortJournal,
+} from "../src/persistence/ForkSqliteMigration.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 export class MigrateDevDbNotInWorktreeError extends Schema.TaggedError<MigrateDevDbNotInWorktreeError>()(
@@ -380,12 +386,30 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
  * was skipped, not applied. */
 const verifyMigrationSlots = Effect.fn("verifyMigrationSlots")(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const applied = yield* sql<{ migration_id: number; name: string }>`
-    SELECT migration_id, name FROM effect_sql_migrations`;
+  const tables = yield* sql<{ readonly name: string }>`
+    SELECT name FROM sqlite_schema
+    WHERE type = 'table' AND name = 'effect_sql_migrations'
+  `;
+  if (tables.length === 0) return;
+
+  const applied = yield* sql<{
+    readonly migration_id: number;
+    readonly name: string;
+    readonly created_at: string;
+  }>`
+    SELECT migration_id, name, created_at FROM effect_sql_migrations ORDER BY migration_id`;
+  const isSupportedHistory =
+    classifyNativeWebhookJournal(applied, migrationManifest) !== undefined ||
+    classifyAppendedNativeWebhookJournal(applied, migrationManifest) !== undefined ||
+    isSupportedDeployedForkJournal(applied, migrationManifest) ||
+    isSupportedPriorPortJournal(applied, migrationManifest);
+  if (isSupportedHistory) return;
+
   const appliedById = new Map(applied.map((row) => [Number(row.migration_id), row.name]));
   for (const [slot, codeName] of migrationManifest) {
     const appliedName = appliedById.get(slot);
-    if (appliedName !== undefined && appliedName !== codeName) {
+    const supportedThreadSummaryAlias = slot === 41 && appliedName === "ThreadSummaryTimeline";
+    if (appliedName !== undefined && appliedName !== codeName && !supportedThreadSummaryAlias) {
       return yield* new MigrateDevDbSlotCollisionError({ slot, codeName, appliedName });
     }
   }
@@ -474,6 +498,19 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
     // Running against the full snapshot also exercises new migrations on the
     // same data volume the real database would face.
     yield* Console.log("Running migrations on the snapshot...");
+    // Report a genuine journal-name collision with the command's specific
+    // diagnostic before the server's compatibility guard rejects it. This
+    // check reads only the disposable snapshot and accepts the same proven
+    // native/fork lineages as migration startup.
+    yield* verifyMigrationSlots().pipe(
+      Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })),
+      Effect.catchTags({
+        SqlError: (cause) =>
+          Effect.fail(
+            new MigrateDevDbPhaseError({ phase: "verify", databasePath: snapshotPath, cause }),
+          ),
+      }),
+    );
     const executed = yield* Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       // Mirror server boot (persistence/Sqlite.ts).

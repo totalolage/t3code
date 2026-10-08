@@ -43,6 +43,7 @@ import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as ServiceUpdateAdmission from "./ServiceUpdateAdmission.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadLaunchService from "./ThreadLaunchService.ts";
@@ -51,6 +52,9 @@ import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as PendingInteractionQuery from "./PendingInteractionQuery.ts";
+import * as PendingInteractionService from "./PendingInteractionService.ts";
+import * as PendingInteractionResponses from "../persistence/PendingInteractionResponses.ts";
 
 /** The shared application event log and its command receipts. */
 export const layerEventInfrastructure = Layer.mergeAll(
@@ -77,6 +81,9 @@ const layerStores = Layer.mergeAll(
   layerCommandReceiptStoreProvided,
   EffectOutbox.layer,
   TurnItemPositionStore.layer,
+);
+const serviceUpdateAdmissionProvided = ServiceUpdateAdmission.layer.pipe(
+  Layer.provide(layerStores),
 );
 
 export const layerEventSink = EventSink.layerFromStores.pipe(Layer.provide(layerStores));
@@ -132,6 +139,7 @@ const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
       IdAllocator.layer,
       layerProviderEventIngestorProvided,
       ProjectionStore.layer,
+      serviceUpdateAdmissionProvided,
     ),
   ),
 );
@@ -148,6 +156,7 @@ const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
       layerEventSinkProvided,
       IdAllocator.layer,
       layerProviderEventIngestorProvided,
+      serviceUpdateAdmissionProvided,
     ),
   ),
 );
@@ -206,6 +215,7 @@ const layerOrchestratorProvided = Orchestrator.layer.pipe(
       layerCheckpointServiceProvided,
       CommandPolicy.layer,
       layerStores,
+      serviceUpdateAdmissionProvided,
       layerEventSinkProvided,
       layerCommandReceiptStoreProvided,
       layerContextHandoffServiceProvided,
@@ -256,6 +266,7 @@ const layerThreadLaunchProvided = ThreadLaunchService.layer.pipe(
       layerThreadManagementProvided,
       layerCommandReceiptStoreProvided,
       IdAllocator.layer,
+      serviceUpdateAdmissionProvided,
     ),
   ),
 );
@@ -274,6 +285,20 @@ const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
     ),
   ),
 );
+const layerPendingInteractionQueryProvided =
+  PendingInteractionQuery.PendingInteractionQueryLive.pipe(
+    Layer.provide(Layer.merge(layerStores, layerProviderSessionManagerProvided)),
+  );
+const layerPendingInteractionServiceProvided =
+  PendingInteractionService.PendingInteractionServiceLive.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        PendingInteractionResponses.PendingInteractionResponseRepositoryLive,
+        layerPendingInteractionQueryProvided,
+        layerOrchestratorProvided,
+      ),
+    ),
+  );
 const layerProviderContinuationWorkerProvided = ProviderContinuationService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -303,7 +328,9 @@ const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
   ),
 );
 const layerEffectWorkerProvided = EffectWorker.layer.pipe(
-  Layer.provide(Layer.merge(layerStores, layerEffectExecutorProvided)),
+  Layer.provide(
+    Layer.mergeAll(layerStores, layerEffectExecutorProvided, serviceUpdateAdmissionProvided),
+  ),
 );
 const layerProviderRuntimeRecoveryProvided = ProviderRuntimeRecoveryService.layer.pipe(
   Layer.provide(
@@ -332,12 +359,24 @@ export const layer = Layer.mergeAll(
   layerOrchestratorProvided,
   layerMcpAppRequestsProvided,
   layerThreadManagementProvided,
+  // These are also consumed by runtimes layered around orchestration (for
+  // example the service-update drain). Export the same provided instances
+  // used by the orchestrator instead of letting adapters construct parallel
+  // stores or run trackers.
+  layerCommandReceiptStoreProvided,
+  EffectOutbox.layer,
+  layerEventSinkProvided,
+  layerEventStoreProvided,
+  layerRunExecutionServiceProvided,
   layerEffectWorkerProvided,
   layerProviderSessionManagerProvided,
   layerProviderAuthServiceProvided,
   layerProviderRuntimeRecoveryProvided,
   layerProjectionMaintenanceProvided,
   layerLegacyV1ThreadImporterProvided,
+  serviceUpdateAdmissionProvided,
+  layerPendingInteractionQueryProvided,
+  layerPendingInteractionServiceProvided,
 );
 
 export const layerProduction = Layer.mergeAll(

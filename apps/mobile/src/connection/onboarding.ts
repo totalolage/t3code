@@ -4,27 +4,21 @@ import {
   createRuntimeCommand,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId } from "@t3tools/contracts";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import * as Effect from "effect/Effect";
 
 import { connectionAtomRuntime } from "./runtime";
 
 const onboardingScheduler = createAtomCommandScheduler();
 
-export const connectPairingUrl = createRuntimeCommand(connectionAtomRuntime, {
-  label: "mobile:connection:connect-pairing-url",
+export const connectPairing = createRuntimeCommand(connectionAtomRuntime, {
+  label: "mobile:connection:connect-pairing",
   scheduler: onboardingScheduler,
   concurrency: {
     mode: "singleFlight",
-    // Adding a route to a different machine with the same link is its own
-    // operation: it must check its own expected machine.
-    key: (input: { readonly pairingUrl: string; readonly expectedEnvironmentId?: EnvironmentId }) =>
-      JSON.stringify([input.pairingUrl, input.expectedEnvironmentId ?? null]),
+    key: (input: ConnectionOnboarding.PairingConnectionInput) => JSON.stringify(input),
   },
-  execute: (input: {
-    readonly pairingUrl: string;
-    /** Set when adding a route to this saved machine. */
-    readonly expectedEnvironmentId?: EnvironmentId;
-  }) =>
+  execute: (input: ConnectionOnboarding.PairingConnectionInput) =>
     ConnectionOnboarding.ConnectionOnboarding.pipe(
       Effect.flatMap((onboarding) => onboarding.registerPairing(input)),
     ),
@@ -41,6 +35,7 @@ export const updateBearerConnection = createRuntimeCommand(connectionAtomRuntime
     readonly environmentId: EnvironmentId;
     readonly label: string;
     readonly httpBaseUrl: string;
+    readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
   }) =>
     ConnectionOnboarding.ConnectionOnboarding.pipe(
       Effect.flatMap((onboarding) => onboarding.updateBearer(input)),

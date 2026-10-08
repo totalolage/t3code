@@ -6,6 +6,7 @@ import {
   type EnvironmentProject,
   type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
+import { isThreadHidden } from "@t3tools/client-runtime/state/thread-hidden";
 import {
   threadSearchMatchKey,
   type EnvironmentThreadSearchMatch,
@@ -97,6 +98,7 @@ interface HomeScreenProps {
   readonly onOpenSettings: () => void;
   readonly onStartNewTask: () => void;
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
+  readonly onHideThread: (thread: EnvironmentThreadShell) => void;
   readonly onArchiveThread: (thread: EnvironmentThreadShell) => void;
   readonly onDeleteThread: (thread: EnvironmentThreadShell) => void;
   /** Resolves true iff the settle was dispatched and succeeded. */
@@ -597,7 +599,9 @@ export function HomeScreen(props: HomeScreenProps) {
     // "hidden from lists" meaning.
     return buildThreadListV2Items({
       pendingOrder,
-      threads: props.threads.filter((thread) => thread.archivedAt === null),
+      threads: props.threads.filter(
+        (thread) => thread.archivedAt === null && !isThreadHidden(thread),
+      ),
       environmentId: props.selectedEnvironmentId,
       projectRefs: v2ScopedProjectGroup === null ? null : v2ScopedProjectGroup.projectRefs,
       searchQuery: props.searchQuery,
@@ -800,6 +804,7 @@ export function HomeScreen(props: HomeScreenProps) {
           )}
           searchQuery={props.searchQuery}
           onSelectThread={props.onSelectThread}
+          onHideThread={props.onHideThread}
           onDeleteThread={handleDeleteThread}
           onArchiveThread={props.onArchiveThread}
           onRenameThread={handleRenameThread}
@@ -858,6 +863,7 @@ export function HomeScreen(props: HomeScreenProps) {
       primaryColumn,
       selectedThreadKey,
       fullSwipeWidth,
+      props.onHideThread,
       props.onNewThreadOnBranch,
       props.savedConnectionsById,
       resolveProviderInstance,
@@ -910,7 +916,8 @@ export function HomeScreen(props: HomeScreenProps) {
   // full-page "No threads yet". Settled threads are unarchived live shells,
   // so the archived-at check already covers the settled shelf.
   const hasAnyThreads =
-    props.threads.some((thread) => thread.archivedAt === null) || props.pendingTasks.length > 0;
+    props.threads.some((thread) => thread.archivedAt === null && !isThreadHidden(thread)) ||
+    props.pendingTasks.length > 0;
   const selectedEnvironmentLabel =
     props.selectedEnvironmentId === null
       ? null

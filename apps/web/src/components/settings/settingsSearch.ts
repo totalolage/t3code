@@ -23,7 +23,8 @@ export type SettingsPath =
   | "/settings/source-control"
   | "/settings/storage"
   | "/settings/connections"
-  | "/settings/archived";
+  | "/settings/archived"
+  | "/settings/hidden";
 
 /**
  * Where a setting can be edited. Device-local rows have no scope: they render
@@ -99,6 +100,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/storage": "Storage",
   "/settings/connections": "Connections",
   "/settings/archived": "Archive",
+  "/settings/hidden": "Hidden",
 };
 
 /** Anchor id of the first row bound to `command` on the Keybindings page. */
@@ -921,6 +923,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/archived",
     searchTerms: ["restore reopen deleted history projects"],
   },
+  {
+    id: "hidden",
+    title: "Hidden threads",
+    to: "/settings/hidden",
+    searchTerms: ["hide unhide invisible sidebar projects restore"],
+  },
 ] as const satisfies ReadonlyArray<SettingsSearchItem>;
 
 export type SettingsSearchItemId = (typeof SETTINGS_SEARCH_ITEMS)[number]["id"];
@@ -942,6 +950,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/connections": "connections",
   "/settings/scheduled-tasks": null,
   "/settings/archived": "project-defaults",
+  "/settings/hidden": "project-defaults",
 };
 
 /** Search keeps the selected target. A missing row can explain its owning scope instead. */

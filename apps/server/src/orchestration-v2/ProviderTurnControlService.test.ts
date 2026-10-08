@@ -70,6 +70,7 @@ function makeProjection(input: {
       settledOverride: null,
       settledAt: null,
       lastVisitedAt: null,
+      hiddenAt: null,
       deletedAt: null,
     },
     runs: [],
@@ -271,6 +272,7 @@ it.effect(
           closeInstance: () => Effect.void,
           release: () => Effect.void,
           detach: () => Effect.void,
+          observeActive: Effect.succeed({ active: [], changes: Stream.empty }),
         }),
       );
       const layerControl = ProviderTurnControlService.layer.pipe(

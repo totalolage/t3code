@@ -68,6 +68,7 @@ import {
   ProviderAdapterRollbackThreadError,
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2Event,
+  type ProviderAdapterV2MaintenanceInput,
   type ProviderAdapterV2TurnInput,
 } from "../ProviderAdapter.ts";
 import type { ProviderContinuationRequest } from "../ProviderContinuationRequests.ts";
@@ -641,6 +642,33 @@ describe("CodexAdapterV2 runtime policy", () => {
         omitServiceTier: true,
       });
       assert.equal(managed.serviceTier, undefined);
+    }),
+  );
+
+  it.effect("forwards supported verbosity on every turn and defaults to medium", () =>
+    Effect.gen(function* () {
+      const build = (verbosity: string | undefined, model = "gpt-5.6-sol") =>
+        CodexAdapterV2.buildCodexTurnStartParams({
+          nativeThreadId: "native-verbosity",
+          codexInput: [{ type: "text", text: "test" }],
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: "/workspace",
+          },
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model,
+            ...(verbosity === undefined
+              ? {}
+              : { options: [{ id: "verbosity", value: verbosity }] }),
+          },
+        });
+
+      assert.equal((yield* build("low")).verbosity, "low");
+      assert.equal((yield* build("high")).verbosity, "high");
+      assert.equal((yield* build(undefined)).verbosity, "medium");
+      assert.equal((yield* build("low", "gpt-5.4")).verbosity, "low");
     }),
   );
 });
@@ -1488,7 +1516,9 @@ function makeCodexTestAppThread(input: {
   readonly threadId: ThreadId;
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly now: DateTime.Utc;
+  readonly modelSelection?: ModelSelection;
 }): OrchestrationV2AppThread {
+  const modelSelection = input.modelSelection ?? CODEX_TEST_MODEL_SELECTION;
   return {
     createdBy: "user",
     creationSource: "web",
@@ -1496,7 +1526,7 @@ function makeCodexTestAppThread(input: {
     projectId: ProjectId.make(`project-${input.threadId}`),
     title: "Codex continuation test",
     providerInstanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
-    modelSelection: CODEX_TEST_MODEL_SELECTION,
+    modelSelection,
     runtimeMode: "full-access",
     interactionMode: "default",
     branch: null,
@@ -1514,6 +1544,7 @@ function makeCodexTestAppThread(input: {
     settledOverride: null,
     settledAt: null,
     lastVisitedAt: null,
+    hiddenAt: null,
     deletedAt: null,
   };
 }
@@ -1524,9 +1555,11 @@ function makeCodexTestTurnInput(input: {
   readonly now: DateTime.Utc;
   readonly attemptId: RunAttemptId;
   readonly text: string;
+  readonly modelSelection?: ModelSelection;
 }): ProviderAdapterV2TurnInput {
+  const modelSelection = input.modelSelection ?? CODEX_TEST_MODEL_SELECTION;
   return {
-    appThread: makeCodexTestAppThread(input),
+    appThread: makeCodexTestAppThread({ ...input, modelSelection }),
     threadId: input.threadId,
     runId: RunId.make(`run-${input.attemptId}`),
     runOrdinal: 1,
@@ -1541,7 +1574,7 @@ function makeCodexTestTurnInput(input: {
       text: input.text,
       attachments: [],
     },
-    modelSelection: CODEX_TEST_MODEL_SELECTION,
+    modelSelection,
     runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
   };
 }
@@ -1568,9 +1601,15 @@ function codexReplayPreamble(input: {
   readonly nativeThreadId: string;
   readonly nativeTurnId: string;
   readonly prompt: string;
+  readonly model?: string;
+  readonly verbosity?: "low" | "medium" | "high";
+  readonly turnStartRequestId?: number;
   /** Text the adapter should send, when it differs from what the user typed. */
   readonly sentPrompt?: string;
 }): Array<CodexReplay.CodexAppServerReplayEntry> {
+  const model = input.model ?? "gpt-5.4";
+  const verbosity =
+    input.verbosity ?? (model.toLowerCase().startsWith("gpt-5") ? "medium" : undefined);
   return [
     {
       type: "expect_outbound",
@@ -1640,7 +1679,7 @@ function codexReplayPreamble(input: {
             name: null,
             turns: [],
           },
-          model: "gpt-5.4",
+          model,
           modelProvider: "openai",
           serviceTier: null,
           cwd: "/workspace",
@@ -1656,17 +1695,18 @@ function codexReplayPreamble(input: {
       type: "expect_outbound",
       label: "turn/start",
       frame: {
-        id: 3,
+        id: input.turnStartRequestId ?? 3,
         method: "turn/start",
         params: {
           threadId: input.nativeThreadId,
           input: [{ type: "text", text: input.sentPrompt ?? input.prompt }],
           cwd: "/workspace",
-          model: "gpt-5.4",
+          model,
           approvalPolicy: "never",
           approvalsReviewer: "user",
           sandboxPolicy: { type: "dangerFullAccess" },
           summary: "detailed",
+          ...(verbosity === undefined ? {} : { verbosity }),
         },
       },
     },
@@ -1674,7 +1714,7 @@ function codexReplayPreamble(input: {
       type: "emit_inbound",
       label: "turn/start",
       frame: {
-        id: 3,
+        id: input.turnStartRequestId ?? 3,
         result: { turn: makeCodexReplayTurn({ id: input.nativeTurnId, status: "inProgress" }) },
       },
     },
@@ -1936,6 +1976,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   (client) =>
                     ({
                       ...client,
+                      raw: {
+                        ...client.raw,
+                        request: (method, params) =>
+                          onRequest(method, params).pipe(
+                            Effect.andThen(client.raw.request(method, params)),
+                          ),
+                      },
                       request: (method, params) =>
                         onRequest(method, params).pipe(
                           Effect.andThen(client.request(method, params)),
@@ -2019,6 +2066,97 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         firstTerminal: Deferred.await(firstTerminal),
       };
     });
+
+  it.effect("sends selected verbosity on initial and follow-up turn/start requests", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "verbosity-wire-thread";
+      const firstTurnId = "verbosity-wire-initial";
+      const secondTurnId = "verbosity-wire-follow-up";
+      const model = "gpt-5.6-sol";
+      const firstSelection: ModelSelection = {
+        ...CODEX_TEST_MODEL_SELECTION,
+        model,
+        options: [{ id: "verbosity", value: "low" }],
+      };
+      const secondSelection: ModelSelection = {
+        ...CODEX_TEST_MODEL_SELECTION,
+        model,
+        options: [{ id: "verbosity", value: "high" }],
+      };
+      const firstPreamble = codexReplayPreamble({
+        nativeThreadId,
+        nativeTurnId: firstTurnId,
+        prompt: "Initial turn",
+        model,
+        verbosity: "low",
+      });
+      const secondPreamble = codexReplayPreamble({
+        nativeThreadId,
+        nativeTurnId: secondTurnId,
+        prompt: "Follow-up turn",
+        model,
+        verbosity: "high",
+        turnStartRequestId: 4,
+      });
+      const transcript = makeCodexReplayTranscript({
+        scenario: "verbosity-per-turn-wire",
+        entries: [
+          ...firstPreamble,
+          {
+            type: "emit_inbound",
+            label: "turn/completed/initial",
+            frame: {
+              method: "turn/completed",
+              params: {
+                threadId: nativeThreadId,
+                turn: makeCodexReplayTurn({ id: firstTurnId, status: "completed" }),
+              },
+            },
+          },
+          ...secondPreamble.slice(5),
+          {
+            type: "emit_inbound",
+            label: "turn/completed/follow-up",
+            frame: {
+              method: "turn/completed",
+              params: {
+                threadId: nativeThreadId,
+                turn: makeCodexReplayTurn({ id: secondTurnId, status: "completed" }),
+              },
+            },
+          },
+        ],
+      });
+      const harness = yield* makeCodexReplayHarness(transcript);
+      const now = yield* DateTime.now;
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("verbosity-wire-initial"),
+          text: "Initial turn",
+          modelSelection: firstSelection,
+        }),
+      );
+      yield* harness.firstTerminal;
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("verbosity-wire-follow-up"),
+          text: "Follow-up turn",
+          modelSelection: secondSelection,
+        }),
+      );
+      yield* awaitUntil(() => harness.terminalEvents().length === 2, "follow-up turn completion");
+      assert.deepEqual(
+        harness.terminalEvents().map((event) => event.status),
+        ["completed", "completed"],
+      );
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
 
   it.effect.each(["supported", "unsupported", "invalid"] as const)(
     "delivers native history with %s app-server protocol",
@@ -2850,6 +2988,97 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect("starts native maintenance compaction without a user message", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const nativeThreadId = "maintenance-compact-thread";
+        const nativeTurnId = "maintenance-compact-turn";
+        const item = { type: "contextCompaction", id: "maintenance-compact-item" };
+        const transcript = makeCodexReplayTranscript({
+          scenario: "native-maintenance-compaction",
+          entries: [
+            ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "unused" }).slice(0, 5),
+            {
+              type: "expect_outbound",
+              label: "compact",
+              frame: {
+                id: 3,
+                method: "thread/compact/start",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            { type: "emit_inbound", label: "compact", frame: { id: 3, result: {} } },
+            {
+              type: "emit_inbound",
+              label: "start",
+              frame: {
+                method: "turn/started",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
+                },
+              },
+            },
+            ...(["item/started", "item/completed"] as const).map((method) => ({
+              type: "emit_inbound" as const,
+              label: method,
+              frame: { method, params: { threadId: nativeThreadId, turnId: nativeTurnId, item } },
+            })),
+            {
+              type: "emit_inbound",
+              label: "complete",
+              frame: {
+                method: "turn/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                },
+              },
+            },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        const attemptId = RunAttemptId.make("maintenance-compact-attempt");
+        const maintenanceInput: ProviderAdapterV2MaintenanceInput = {
+          appThread: makeCodexTestAppThread({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+          }),
+          threadId: harness.threadId,
+          runId: RunId.make(`run-${attemptId}`),
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId,
+          rootNodeId: NodeId.make(`node-${attemptId}`),
+          providerThread: harness.providerThread,
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+          purpose: "compaction",
+          requestCommandId: CommandId.make("maintenance-compact-command"),
+        };
+
+        assert.isFalse("message" in maintenanceInput);
+        assert.isDefined(harness.runtime.compactContext);
+        yield* harness.runtime.compactContext!(maintenanceInput);
+        yield* harness.firstTerminal;
+
+        const items = harness.events.flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "compaction"
+            ? [event.turnItem]
+            : [],
+        );
+        assert.deepEqual(
+          items.map((entry) => entry.status),
+          ["running", "completed"],
+        );
+        assert.equal(items[0]?.runId, maintenanceInput.runId);
+        assert.equal(items[0]?.nodeId, maintenanceInput.rootNodeId);
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
   it.effect("resumes a provider thread without requesting or decoding its history", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -3101,6 +3330,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   approvalsReviewer: "user",
                   sandboxPolicy: { type: "dangerFullAccess" },
                   summary: "detailed",
+                  verbosity: "medium",
                 },
               },
             },

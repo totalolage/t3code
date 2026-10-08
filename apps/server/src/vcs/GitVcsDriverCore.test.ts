@@ -15,8 +15,8 @@ import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
-import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -40,6 +40,7 @@ import {
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 
 const encodeGitCommandError = Schema.encodeEffect(Schema.fromJsonString(GitCommandError));
+const decodeReviewDiffPreviewInput = Schema.decodeEffect(ReviewDiffPreviewInput);
 
 const layerServerConfig = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-git-vcs-driver-test-",
@@ -48,6 +49,7 @@ const layerTest = GitVcsDriver.layer.pipe(
   Layer.provide(layerServerConfig),
   Layer.provideMerge(NodeServices.layer),
 );
+const encodeUnknownJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
 const makeNonRepositoryHandle = () =>
   ChildProcessSpawner.makeHandle({
@@ -329,13 +331,24 @@ it.effect("uses stable diagnostics for every parsed non-repository command", () 
     yield* driver.statusDetailsLocal(cwd);
     yield* driver.statusDetailsRemote(cwd, { refreshUpstream: false });
     yield* driver.listRefs({ cwd });
+    yield* driver
+      .createWorktree({ cwd, path: "/repo/worktree", refName: "HEAD" })
+      .pipe(Effect.flip);
 
-    assert.deepStrictEqual(commands, [
-      { args: ["rev-parse", "--git-path", "index"], lcAll: "C" },
-      { args: ["status", "--porcelain=2", "--branch"], lcAll: "C" },
-      { args: ["rev-parse", "--abbrev-ref", "HEAD"], lcAll: "C" },
-      { args: ["rev-parse", "--git-common-dir"], lcAll: "C" },
-    ]);
+    assert.deepStrictEqual(
+      commands.map(({ args }) => args),
+      [
+        ["rev-parse", "--git-path", "index"],
+        ["status", "--porcelain=2", "--branch"],
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+        ["rev-parse", "--git-common-dir"],
+        ["config", "--get", "checkout.workers"],
+        ["-c", "checkout.workers=0", "worktree", "add", "/repo/worktree", "HEAD"],
+      ],
+    );
+    assert.isTrue(
+      commands.filter(({ args }) => args[0] !== "config").every(({ lcAll }) => lcAll === "C"),
+    );
   }).pipe(Effect.provide(layer));
 });
 
@@ -1066,7 +1079,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect("appends the reason tag to a caller-supplied detail", () =>
+    it.effect("classifies a branch already checked out in another worktree", () =>
       Effect.gen(function* () {
         const parent = yield* makeTmpDir();
         const pathService = yield* Path.Path;
@@ -1091,8 +1104,12 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           })
           .pipe(Effect.flip);
 
-        assert.equal(error.detail, "git worktree add failed");
-        assert.include(error.message, "git worktree add failed (branch_checked_out_in_worktree)");
+        assert.equal(
+          error.detail,
+          "The requested branch is already checked out in another worktree.",
+        );
+        assert.equal(error.worktreeReason, "branch_in_use");
+        assert.include(error.message, error.detail);
       }),
     );
 
@@ -1865,6 +1882,11 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         yield* writeTextFile(cwd, "l.txt", "other\n");
         yield* writeTextFile(cwd, "binary.dat", "binary\0data");
         if ((yield* HostProcessPlatform) !== "win32") {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const pathService = yield* Path.Path;
+          const modeOnlyPath = pathService.join(cwd, "mode-only.sh");
+          yield* fileSystem.chmod(modeOnlyPath, 0o755);
+          assert.equal((yield* fileSystem.stat(modeOnlyPath)).mode & 0o777, 0o755);
           yield* writeTextFile(cwd, "tab\tand\nnewline.txt", "unusual path\n");
         }
         yield* git(cwd, ["add", "."]);
@@ -1877,7 +1899,11 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const branch = preview.sources.find((source) => source.kind === "branch-range")!;
         for (const path of ["renamed.md", "[literal].txt", " leading.txt", "mode-only.sh"]) {
           const stat = branch.files!.find((file) => file.path === path)!;
-          const request = yield* Schema.decodeEffect(ReviewDiffPreviewInput)({
+          assert.isDefined(
+            stat,
+            `Expected branch diff to include ${path}; got ${branch.files?.map((file) => file.path).join(", ") ?? "no files"}`,
+          );
+          const request = yield* decodeReviewDiffPreviewInput({
             cwd,
             baseRef: initialBranch,
             file: { path, previousPath: stat.previousPath, sourceKind: "branch-range" },
@@ -3243,6 +3269,91 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           yield* fileSystem.readFileString(pathService.join(worktreePath, "notes.txt")),
           "draft\n",
         );
+      }),
+    );
+
+    it.effect("reports safe classified errors for failed worktree creation", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const pathService = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const worktreesRoot = yield* makeTmpDir("git-worktrees-diagnostics-");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        yield* git(cwd, ["branch", "feature/already"]);
+        const branchExistsError = yield* driver
+          .createWorktree({
+            cwd,
+            path: pathService.join(worktreesRoot, "branch-exists"),
+            refName: initialBranch,
+            newRefName: "feature/already",
+          })
+          .pipe(Effect.flip);
+
+        const occupiedPath = pathService.join(worktreesRoot, "path-exists");
+        yield* writeTextFile(occupiedPath, "occupied.txt", "occupied\n");
+        const pathExistsError = yield* driver
+          .createWorktree({ cwd, path: occupiedPath, refName: initialBranch })
+          .pipe(Effect.flip);
+
+        const inUsePath = pathService.join(worktreesRoot, "in-use");
+        yield* driver.createWorktree({
+          cwd,
+          path: inUsePath,
+          refName: initialBranch,
+          newRefName: "feature/in-use",
+        });
+        const branchInUseError = yield* driver
+          .createWorktree({
+            cwd,
+            path: pathService.join(worktreesRoot, "branch-in-use"),
+            refName: "feature/in-use",
+          })
+          .pipe(Effect.flip);
+
+        const secret = "ref-secret-https://user:password@example.test";
+        const invalidRefError = yield* driver
+          .createWorktree({
+            cwd,
+            path: pathService.join(worktreesRoot, "invalid-ref"),
+            refName: `missing-${secret}`,
+          })
+          .pipe(Effect.flip);
+
+        for (const [error, reason] of [
+          [branchExistsError, "branch_exists"],
+          [pathExistsError, "path_exists"],
+          [branchInUseError, "branch_in_use"],
+          [invalidRefError, "unknown"],
+        ] as const) {
+          assert.equal(error.worktreeReason, reason);
+          assert.equal(error.operation, "GitVcsDriver.createWorktree");
+          assert.equal(error.command, "git");
+          assert.equal(error.cwd, cwd);
+          assert.isNumber(error.argumentCount);
+          assert.isNumber(error.exitCode);
+          assert.isNumber(error.stdoutLength);
+          assert.isAbove(error.stderrLength ?? 0, 0);
+          assert.notInclude(error.detail, secret);
+          assert.notInclude(error.message, secret);
+          const serialized = yield* encodeUnknownJson(error);
+          assert.notInclude(serialized, secret);
+          assert.notProperty(error, "stderr");
+        }
+
+        const successPath = pathService.join(worktreesRoot, "success");
+        const created = yield* driver.createWorktree({
+          cwd,
+          path: successPath,
+          refName: initialBranch,
+          newRefName: "feature/success",
+        });
+        assert.deepStrictEqual(created.worktree, {
+          path: successPath,
+          refName: "feature/success",
+        });
+        assert.equal(yield* fileSystem.exists(successPath), true);
       }),
     );
 

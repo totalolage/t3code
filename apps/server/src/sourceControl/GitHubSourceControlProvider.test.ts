@@ -9,6 +9,8 @@ import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/process";
 import * as TestClock from "effect/testing/TestClock";
 
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubApi from "./GitHubApi.ts";
@@ -964,4 +966,200 @@ it("names the environment token that overrides the Settings choice", () => {
     ),
   );
   assert.strictEqual(auth.accounts?.[2]?.environmentVariable, "GH_TOKEN");
+});
+
+describe("GitHubSourceControlProvider selected fork repository", () => {
+  it.effect.each([
+    ["git@github.com:totalolage/t3code.git", "github.com"],
+    ["git@enterprise.test:totalolage/t3code.git", "enterprise.test"],
+    ["https://enterprise.test:8443/totalolage/t3code.git", "enterprise.test:8443"],
+    [
+      "https://fixture:fixture@ghe.example.test/totalolage/t3code.git/?fixture=1#fragment",
+      "ghe.example.test",
+    ],
+  ] as const)(
+    "targets the selected repository for reads, writes and checkout (%s)",
+    ([remoteUrl, host]) => {
+      const reads: Array<GitHubApi.GitHubGraphQlInput> = [];
+      const writes: Array<GitHubApi.GitHubRestInput> = [];
+      const context = {
+        provider: { kind: "github" as const, name: "GitHub", baseUrl: `https://${host}` },
+        remoteName: "selected",
+        remoteUrl,
+      };
+      const { layer, git } = harness({
+        remotes: remotesOutput(
+          ["upstream", "git@github.com:pingdotgg/t3code.git"],
+          ["selected", remoteUrl],
+        ),
+        api: {
+          graphql: (input) =>
+            Effect.sync(() => {
+              reads.push(input);
+              return encodeJson({
+                data: {
+                  repository:
+                    input.variables?.number === undefined
+                      ? { h0: { nodes: [node(5, "feature/x")] } }
+                      : { pullRequest: node(5, "feature/x") },
+                },
+              });
+            }),
+          rest: (input) =>
+            Effect.sync(() => {
+              writes.push(input);
+              return restResponse({
+                full_name: "totalolage/t3code",
+                html_url: `https://${host}/totalolage/t3code`,
+                ssh_url: `git@${host}:totalolage/t3code.git`,
+                default_branch: "trunk",
+              });
+            }),
+        },
+      });
+      return Effect.gen(function* () {
+        const gh = yield* GitHubSourceControlProvider.make;
+        const openLookup = yield* gh
+          .listChangeRequests({
+            cwd: "/repo",
+            headSelector: "feature/x",
+            state: "open",
+            context,
+          })
+          .pipe(Effect.forkChild);
+        yield* TestClock.adjust("500 millis");
+        yield* Fiber.join(openLookup);
+        const allLookup = yield* gh
+          .listChangeRequests({
+            cwd: "/repo",
+            headSelector: "feature/x",
+            state: "all",
+            context,
+          })
+          .pipe(Effect.forkChild);
+        yield* TestClock.adjust("500 millis");
+        yield* Fiber.join(allLookup);
+        yield* gh.getChangeRequest({ cwd: "/repo", reference: "5", context });
+        const fs = yield* FileSystem.FileSystem;
+        const bodyFile = yield* fs.makeTempFileScoped({ suffix: ".md" });
+        yield* fs.writeFileString(bodyFile, "Fork PR");
+        yield* gh.createChangeRequest({
+          cwd: "/repo",
+          baseRefName: "main",
+          headSelector: "feature/x",
+          title: "Fork",
+          bodyFile,
+          context,
+        });
+        assert.strictEqual(yield* gh.getDefaultBranch({ cwd: "/repo", context }), "trunk");
+        yield* gh.checkoutChangeRequest({ cwd: "/repo", reference: "5", context });
+        assert.strictEqual(reads.length, 4);
+        for (const read of reads) {
+          assert.strictEqual(read.host, host);
+          assert.strictEqual(read.variables?.owner, "totalolage");
+          assert.strictEqual(read.variables?.name, "t3code");
+        }
+        assert.deepStrictEqual(
+          writes.map((write) => [write.host, write.path]),
+          [
+            [host, "repos/totalolage/t3code/pulls"],
+            [host, "repos/totalolage/t3code"],
+          ],
+        );
+        assert.deepStrictEqual(git[0], [
+          "fetchRemoteTrackingBranch",
+          { cwd: "/repo", remoteName: "selected", remoteBranch: "feature/x" },
+        ]);
+      }).pipe(
+        Effect.provide(layer),
+        Effect.provideService(HostProcessEnvironment, {
+          GH_REPO: "github.com/unrelated/repository",
+        }),
+      );
+    },
+  );
+
+  it.effect("keeps the selected repository in a branch lookup's open-to-all fallback", () => {
+    const reads: Array<GitHubApi.GitHubGraphQlInput> = [];
+    const { layer } = harness({
+      remotes: remotesOutput(["upstream", "git@github.com:other/repo.git"]),
+      api: {
+        graphql: (input) =>
+          Effect.sync(() => {
+            reads.push(input);
+            return encodeJson({
+              data: {
+                repository: { h0: { nodes: reads.length === 1 ? [] : [node(9, "merged")] } },
+              },
+            });
+          }),
+      },
+    });
+    return Effect.gen(function* () {
+      const gh = yield* GitHubSourceControlProvider.make;
+      const lookup = yield* gh
+        .getChangeRequest({
+          cwd: "/repo",
+          reference: "merged",
+          context: githubContext("enterprise.test"),
+        })
+        .pipe(Effect.forkChild);
+      yield* TestClock.adjust("1 second");
+      const result = yield* Fiber.join(lookup);
+      assert.strictEqual(result.number, 9);
+      assert.deepStrictEqual(
+        reads.map((read) => [
+          read.host,
+          read.variables?.owner,
+          read.variables?.name,
+          read.variables?.s0,
+        ]),
+        [
+          ["enterprise.test", "acme", "web", ["OPEN"]],
+          ["enterprise.test", "acme", "web", ["OPEN", "CLOSED", "MERGED"]],
+        ],
+      );
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect(
+    "keeps an explicit URL authoritative and does not use another host's identical remote",
+    () => {
+      const reads: Array<GitHubApi.GitHubGraphQlInput> = [];
+      const { layer, git } = harness({
+        remotes: remotesOutput(
+          ["wrong", "git@github.com:acme/web.git"],
+          ["right", "git@enterprise.test:acme/web.git"],
+        ),
+        api: {
+          graphql: (input) =>
+            Effect.sync(() => {
+              reads.push(input);
+              return encodeJson({ data: { repository: { pullRequest: node(5, "feature/x") } } });
+            }),
+        },
+      });
+      return Effect.gen(function* () {
+        const gh = yield* GitHubSourceControlProvider.make;
+        const input = {
+          cwd: "/repo",
+          reference: "https://enterprise.test/acme/web/pull/5",
+          context: githubContext("github.com"),
+        };
+        yield* gh.getChangeRequest(input);
+        yield* gh.checkoutChangeRequest(input);
+        assert.deepStrictEqual(
+          reads.map((read) => [read.host, read.variables?.owner, read.variables?.name]),
+          [
+            ["enterprise.test", "acme", "web"],
+            ["enterprise.test", "acme", "web"],
+          ],
+        );
+        assert.deepStrictEqual(git[0], [
+          "fetchRemoteTrackingBranch",
+          { cwd: "/repo", remoteName: "right", remoteBranch: "feature/x" },
+        ]);
+      }).pipe(Effect.provide(layer));
+    },
+  );
 });

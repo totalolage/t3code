@@ -57,7 +57,10 @@ import {
   connectionRoutes,
   connectionStatusText,
   environmentMcpUrl,
+  type ConnectionOnboarding,
+  type BearerConnectionProfile,
 } from "@t3tools/client-runtime/connection";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -97,6 +100,12 @@ import {
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
 import { GitHubRoutingSettings } from "./GitHubRoutingSettings";
+import { RemoteConnectionFields } from "./RemoteConnectionFields";
+import {
+  getEditableRemoteBearerProfile,
+  resolveRemoteConnectionFields,
+  type RemoteConnectionFieldsValue,
+} from "./remoteConnectionFields";
 import { Input } from "../ui/input";
 import { CommandShortcut } from "../ui/command";
 import {
@@ -143,8 +152,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "..
 import { AnimatedHeight } from "../AnimatedHeight";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { Textarea } from "../ui/textarea";
-import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "../../pairingUrl";
-import { readHostedPairingRequest } from "../../hostedPairing";
+import { setPairingTokenOnUrl } from "../../pairingUrl";
 import {
   createServerPairingCredential,
   revokeOtherServerClientSessions,
@@ -171,6 +179,7 @@ import { environmentCatalog } from "~/connection/catalog";
 import {
   connectPairing as connectPairingAtom,
   connectSshEnvironment as connectSshEnvironmentAtom,
+  updateBearer as updateBearerAtom,
 } from "~/connection/onboarding";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { useEnvironmentQuery } from "~/state/query";
@@ -207,6 +216,8 @@ import {
   threadJumpCommandForIndex,
   threadJumpIndexFromCommand,
 } from "../../keybindings";
+
+type BearerConnectionUpdateInput = ConnectionOnboarding.BearerConnectionUpdateInput;
 
 const DEFAULT_TAILSCALE_SERVE_PORT = 443;
 const EMPTY_ADVERTISED_ENDPOINTS: ReadonlyArray<AdvertisedEndpoint> = [];
@@ -418,55 +429,6 @@ function parseManualDesktopSshTarget(input: {
     username,
     port,
   };
-}
-
-function parsePairingUrlFields(
-  input: string,
-): { readonly host: string; readonly pairingCode: string } | null {
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-
-  try {
-    const urlLikeInput =
-      /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//u.test(trimmed) || trimmed.startsWith("//")
-        ? trimmed
-        : `https://${trimmed}`;
-    const url = new URL(urlLikeInput, window.location.origin);
-    const hostedPairingRequest = readHostedPairingRequest(url);
-    if (hostedPairingRequest) {
-      return {
-        host: hostedPairingRequest.host,
-        pairingCode: hostedPairingRequest.token,
-      };
-    }
-
-    const pairingCode = getPairingTokenFromUrl(url);
-    if (!pairingCode) return null;
-    return {
-      host: url.origin,
-      pairingCode,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function parseRemotePairingFields(input: { readonly host: string; readonly pairingCode: string }): {
-  readonly host: string;
-  readonly pairingCode: string;
-} {
-  const parsedPairingUrl = parsePairingUrlFields(input.host);
-  if (parsedPairingUrl) return parsedPairingUrl;
-
-  const host = input.host.trim();
-  const pairingCode = input.pairingCode.trim();
-  if (!host) {
-    throw new Error("Enter a backend host.");
-  }
-  if (!pairingCode) {
-    throw new Error("Enter a pairing code.");
-  }
-  return { host, pairingCode };
 }
 
 function formatDesktopSshConnectionError(error: unknown): string {
@@ -1528,12 +1490,132 @@ function NetworkAccessDescription({
   );
 }
 
+type SavedBackendUpdateResult = "success" | "interrupted";
+
+function EditRemoteConnectionDialog({
+  environmentId,
+  initialLabel,
+  profile,
+  onSave,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly initialLabel: string;
+  readonly profile: BearerConnectionProfile;
+  readonly onSave: (input: BearerConnectionUpdateInput) => Promise<SavedBackendUpdateResult>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [label, setLabel] = useState(initialLabel);
+  const [fields, setFields] = useState<RemoteConnectionFieldsValue>(() => ({
+    host: profile.httpBaseUrl,
+    pairingCode: "",
+    queryParameters: [...profile.queryParameters],
+  }));
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const previousOpenRef = useRef(false);
+
+  useEffect(() => {
+    if (open && !previousOpenRef.current) {
+      setLabel(initialLabel);
+      setFields({
+        host: profile.httpBaseUrl,
+        pairingCode: "",
+        queryParameters: [...profile.queryParameters],
+      });
+      setSaveError(null);
+    }
+    previousOpenRef.current = open;
+  }, [initialLabel, open, profile]);
+
+  const handleOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      if (isSaving) return;
+      setOpen(nextOpen);
+      if (!nextOpen) setSaveError(null);
+    },
+    [isSaving],
+  );
+
+  const handleSave = useCallback(async () => {
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      const result = await onSave({
+        environmentId,
+        label,
+        httpBaseUrl: fields.host,
+        queryParameters: fields.queryParameters,
+      });
+      if (result === "success") setOpen(false);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Failed to update environment.");
+    } finally {
+      setIsSaving(false);
+    }
+  }, [environmentId, fields, label, onSave]);
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogTrigger
+        render={<Button size="xs" variant="outline" aria-label={`Edit ${initialLabel}`} />}
+      >
+        Edit
+      </DialogTrigger>
+      <DialogPopup className="max-h-[80dvh] sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Edit environment</DialogTitle>
+          <DialogDescription>
+            Update this saved backend&apos;s label, URL, and query parameters. Its saved access
+            token stays unchanged.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel>
+          <div className="space-y-5">
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-medium text-foreground">Label</span>
+              <Input
+                value={label}
+                onChange={(event) => setLabel(event.currentTarget.value)}
+                placeholder="Environment label"
+                disabled={isSaving}
+                autoFocus
+              />
+            </label>
+            <RemoteConnectionFields
+              value={fields}
+              onChange={setFields}
+              disabled={isSaving}
+              hostLabel="Backend URL"
+              showPairingCode={false}
+              pairingUrlHint="Paste a full pairing URL here to fill the backend URL and query parameters automatically."
+            />
+            {saveError ? (
+              <p role="alert" className="text-xs text-destructive">
+                {saveError}
+              </p>
+            ) : null}
+          </div>
+        </DialogPanel>
+        <DialogFooter>
+          <Button variant="outline" disabled={isSaving} onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button disabled={isSaving} onClick={() => void handleSave()}>
+            {isSaving ? "Saving…" : "Save"}
+          </Button>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
+  );
+}
+
 type SavedBackendListRowProps = {
   environment: EnvironmentPresentation;
   removingEnvironmentId: EnvironmentId | null;
   onSetEnabled: (environmentId: EnvironmentId, enabled: boolean) => void;
   onRemove: (environment: EnvironmentPresentation) => void;
   onAddRoute: (environment: EnvironmentPresentation) => void;
+  onUpdate: (input: BearerConnectionUpdateInput) => Promise<SavedBackendUpdateResult>;
 };
 
 /**
@@ -1584,6 +1666,7 @@ function SavedBackendListRow({
   onSetEnabled,
   onRemove,
   onAddRoute,
+  onUpdate,
 }: SavedBackendListRowProps) {
   const [routesOpen, setRoutesOpen] = useState(false);
   const environmentId = environment.environmentId;
@@ -1704,6 +1787,7 @@ function SavedBackendListRow({
       ? `\nUpdate available: ${versionMismatch.serverVersion} → ${versionMismatch.clientVersion}`
       : ""
   }`;
+  const editableProfile = getEditableRemoteBearerProfile(environment.entry);
 
   return (
     <EnvironmentRow
@@ -1846,6 +1930,14 @@ function SavedBackendListRow({
           </MenuItem>
         </MenuPopup>
       </Menu>
+      {editableProfile ? (
+        <EditRemoteConnectionDialog
+          environmentId={environmentId}
+          initialLabel={environment.label}
+          profile={editableProfile}
+          onSave={onUpdate}
+        />
+      ) : null}
     </EnvironmentRow>
   );
 }
@@ -2098,6 +2190,7 @@ export function ConnectionsSettings() {
   const connectSshEnvironment = useAtomCommand(connectSshEnvironmentAtom, {
     reportFailure: false,
   });
+  const updateBearer = useAtomCommand(updateBearerAtom, { reportFailure: false });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const registerEnvironment = useAtomCommand(environmentCatalog.register, {
     reportFailure: false,
@@ -2232,6 +2325,9 @@ export function ConnectionsSettings() {
   const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "ssh">("remote");
   const [savedBackendHost, setSavedBackendHost] = useState("");
   const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
+  const [savedBackendQueryParameters, setSavedBackendQueryParameters] = useState<
+    ReadonlyArray<RemoteQueryParameter>
+  >([]);
   const [savedBackendSshHost, setSavedBackendSshHost] = useState("");
   const [savedBackendSshUsername, setSavedBackendSshUsername] = useState("");
   const [savedBackendSshPort, setSavedBackendSshPort] = useState("");
@@ -2621,6 +2717,7 @@ export function ConnectionsSettings() {
 
       setSavedBackendHost("");
       setSavedBackendPairingCode("");
+      setSavedBackendQueryParameters([]);
       setSavedBackendSshHost("");
       setSavedBackendSshUsername("");
       setSavedBackendSshPort("");
@@ -2657,11 +2754,12 @@ export function ConnectionsSettings() {
 
     setIsAddingSavedBackend(true);
     setSavedBackendError(null);
-    let remotePairingInput: ReturnType<typeof parseRemotePairingFields>;
+    let remotePairingTarget: ReturnType<typeof resolveRemoteConnectionFields>;
     try {
-      remotePairingInput = parseRemotePairingFields({
+      remotePairingTarget = resolveRemoteConnectionFields({
         host: savedBackendHost,
         pairingCode: savedBackendPairingCode,
+        queryParameters: savedBackendQueryParameters,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to add backend.";
@@ -2678,7 +2776,9 @@ export function ConnectionsSettings() {
     }
 
     const result = await connectPairing({
-      ...remotePairingInput,
+      host: remotePairingTarget.httpBaseUrl,
+      pairingCode: remotePairingTarget.credential,
+      queryParameters: remotePairingTarget.queryParameters,
       ...(routeTarget ? { expectedEnvironmentId: routeTarget.environmentId } : {}),
     });
     if (result._tag === "Failure") {
@@ -2700,6 +2800,7 @@ export function ConnectionsSettings() {
 
     setSavedBackendHost("");
     setSavedBackendPairingCode("");
+    setSavedBackendQueryParameters([]);
     setSavedBackendSshHost("");
     setSavedBackendSshUsername("");
     setSavedBackendSshPort("");
@@ -2725,6 +2826,7 @@ export function ConnectionsSettings() {
     savedBackendHost,
     savedBackendMode,
     savedBackendPairingCode,
+    savedBackendQueryParameters,
     savedBackendSshHost,
     savedBackendSshPort,
     savedBackendSshUsername,
@@ -2884,6 +2986,17 @@ export function ConnectionsSettings() {
     [removeSavedBackend],
   );
 
+  const handleUpdateSavedBackend = useCallback(
+    async (input: BearerConnectionUpdateInput): Promise<SavedBackendUpdateResult> => {
+      const result = await updateBearer(input);
+      if (result._tag === "Success") return "success";
+      if (isAtomCommandInterrupted(result)) return "interrupted";
+      const error = squashAtomCommandFailure(result);
+      throw error instanceof Error ? error : new Error("Failed to update backend.");
+    },
+    [updateBearer],
+  );
+
   const visibleDesktopPairingLinks = desktopPairingLinks;
   const tailscaleHttpsEndpoint = useMemo(
     () => desktopAdvertisedEndpoints.find(isTailscaleHttpsEndpoint) ?? null,
@@ -2926,15 +3039,14 @@ export function ConnectionsSettings() {
     },
     [setDefaultAdvertisedEndpointKey],
   );
-  const handleSavedBackendHostChange = useCallback((value: string) => {
-    const parsedPairingUrl = parsePairingUrlFields(value);
-    if (parsedPairingUrl) {
-      setSavedBackendHost(parsedPairingUrl.host);
-      setSavedBackendPairingCode(parsedPairingUrl.pairingCode);
-      return;
-    }
-    setSavedBackendHost(value);
-  }, []);
+  const handleSavedBackendRemoteFieldsChange = useCallback(
+    (fields: RemoteConnectionFieldsValue) => {
+      setSavedBackendHost(fields.host);
+      setSavedBackendPairingCode(fields.pairingCode);
+      setSavedBackendQueryParameters(fields.queryParameters);
+    },
+    [],
+  );
 
   const renderConnectionModeCard = (input: {
     readonly mode: "remote" | "ssh";
@@ -2979,35 +3091,16 @@ export function ConnectionsSettings() {
   };
 
   const renderRemoteFields = () => (
-    <div className="space-y-3">
-      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
-        <label className="block">
-          <span className="mb-1.5 block text-xs font-medium text-foreground">Host</span>
-          <Input
-            value={savedBackendHost}
-            onChange={(event) => handleSavedBackendHostChange(event.target.value)}
-            placeholder="backend.example.com"
-            disabled={isAddingSavedBackend}
-            spellCheck={false}
-          />
-        </label>
-        <label className="block">
-          <span className="mb-1.5 block text-xs font-medium text-foreground">Pairing code</span>
-          <Input
-            value={savedBackendPairingCode}
-            onChange={(event) => setSavedBackendPairingCode(event.target.value)}
-            placeholder="PAIRCODE"
-            disabled={isAddingSavedBackend}
-            spellCheck={false}
-          />
-        </label>
-      </div>
-      <div>
-        <span className="mt-1 block text-2xs text-muted-foreground">
-          Paste a full pairing URL here to fill both fields automatically.
-        </span>
-      </div>
-    </div>
+    <RemoteConnectionFields
+      value={{
+        host: savedBackendHost,
+        pairingCode: savedBackendPairingCode,
+        queryParameters: savedBackendQueryParameters,
+      }}
+      onChange={handleSavedBackendRemoteFieldsChange}
+      disabled={isAddingSavedBackend}
+      autoFocus
+    />
   );
   // T3 Connect is offered as a route when this account can reach the machine
   // through it and it is not one of the machine's routes yet.
@@ -4191,6 +4284,7 @@ export function ConnectionsSettings() {
               setSavedBackendError(null);
               setAddBackendDialogOpen(true);
             }}
+            onUpdate={handleUpdateSavedBackend}
           />
         ))}
         <CloudRemoteEnvironmentRows

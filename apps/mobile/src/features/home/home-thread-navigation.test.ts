@@ -24,7 +24,7 @@ vi.mock("@react-navigation/native", () => {
   return { CommonActions, StackActions };
 });
 
-import { createHomeThreadNavigationAction } from "./home-thread-navigation";
+import { createHomeThreadNavigationAction, shouldSelectHomeThread } from "./home-thread-navigation";
 
 const { StackActions, StackRouter } = loadRouters();
 const routeNames = ["Home", "Thread"];
@@ -41,10 +41,15 @@ const routerOptions = {
 
 type ThreadSelection = Parameters<typeof createHomeThreadNavigationAction>[0]["thread"];
 
-function thread(id: string): ThreadSelection {
+function thread(
+  id: string,
+  environmentId = "environment-1",
+  hiddenAt?: string | null,
+): ThreadSelection {
   return {
-    environmentId: "environment-1",
+    environmentId,
     id,
+    hiddenAt,
   } as ThreadSelection;
 }
 
@@ -83,6 +88,17 @@ function dismissRoute(state: ReturnType<typeof initialState>, routeKey: string) 
     target: state.key,
   });
 }
+
+describe("shouldSelectHomeThread", () => {
+  it("blocks hidden normal selections while allowing legacy, unhidden, and other-environment rows", () => {
+    expect(
+      shouldSelectHomeThread(thread("same-thread-id", "environment-1", "2026-06-02T00:00:00.000Z")),
+    ).toBe(false);
+    expect(shouldSelectHomeThread(thread("same-thread-id", "environment-2", null))).toBe(true);
+    expect(shouldSelectHomeThread(thread("legacy-thread"))).toBe(true);
+    expect(shouldSelectHomeThread({ hiddenAt: undefined })).toBe(true);
+  });
+});
 
 describe("createHomeThreadNavigationAction", () => {
   it("coalesces ordinary repeat selections onto the current thread route", () => {

@@ -107,6 +107,8 @@ export function shouldPublishAgentAwarenessEvent(
     case "provider-thread.updated":
       return true;
     case "thread.settled":
+    case "thread.hidden":
+    case "thread.unhidden":
     case "thread.unsettled":
     case "thread.snoozed":
     case "thread.unsnoozed":

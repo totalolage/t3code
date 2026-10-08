@@ -42,14 +42,17 @@ import {
   OrchestrationV2ProviderSessionJson as OrchestrationV2ProviderSessionJsonSchema,
   OrchestrationV2ProviderThreadJson as OrchestrationV2ProviderThreadJsonSchema,
   OrchestrationV2ProviderTurnJson as OrchestrationV2ProviderTurnJsonSchema,
+  OrchestrationV2RestartCancelledBackgroundWork,
   OrchestrationV2RunAttemptJson as OrchestrationV2RunAttemptJsonSchema,
   OrchestrationV2RunJson as OrchestrationV2RunJsonSchema,
+  OrchestrationV2RunStatus,
   OrchestrationV2RuntimeRequestJson as OrchestrationV2RuntimeRequestJsonSchema,
   OrchestrationV2SubagentJson as OrchestrationV2SubagentJsonSchema,
   OrchestrationV2TurnItemJson as OrchestrationV2TurnItemJsonSchema,
   orchestrationV2RunWorkStartedAt,
   RunId,
   RuntimeRequestId,
+  PositiveInt,
   CheckpointScopeId,
   ThreadId,
   TurnItemId,
@@ -138,6 +141,12 @@ export type ProjectionRecoveryKind =
   | "subagent-results"
   | "delegated-completions";
 
+export interface QueuedRunAcceptance {
+  readonly run: OrchestrationV2Run;
+  readonly acceptedSequence: number | null;
+  readonly blockedReason: "missing-run-created" | "contradictory-run-created" | null;
+}
+
 /** Persisted state needed for limit recovery, without transcript or fork history. */
 export type ProjectionLimitRecoveryCandidate = Pick<
   OrchestrationV2ThreadShell,
@@ -196,7 +205,7 @@ export type ProjectionSettlementCandidate = Pick<
 
 const ProjectionCheckpointContext = Schema.Struct({
   runs: Schema.Array(
-    OrchestrationV2RunJsonSchema.mapFields(({ id, ordinal, status }) => ({ id, ordinal, status })),
+    Schema.Struct({ id: RunId, ordinal: PositiveInt, status: OrchestrationV2RunStatus }),
   ),
   checkpointScopes: Schema.Array(
     OrchestrationV2CheckpointScopeJsonSchema.mapFields(({ id, runId, kind, cwd }) => ({
@@ -333,6 +342,7 @@ export interface ProjectionStoreV2Shape {
 
   readonly apply: (
     event: OrchestrationV2DomainEvent,
+    sequence?: number,
   ) => Effect.Effect<void, ProjectionStoreV2Error>;
   /**
    * `unsettledOnly` is for background sweeps, not clients: it skips settled
@@ -673,8 +683,10 @@ export function applyToProjection(
         ...base,
         thread: event.payload,
       };
-    // Visited tracking is read state, not activity: skip the updatedAt bump so
-    // viewing a thread does not surface it as recently active.
+    // Visibility and visited tracking are not activity: skip the updatedAt
+    // bump so hiding or viewing a thread does not surface it as recently active.
+    case "thread.hidden":
+    case "thread.unhidden":
     case "thread.visited":
     case "thread.marked-unread":
       return {
@@ -960,7 +972,7 @@ const encodeThreadPayload = Schema.encodeEffect(
 );
 const encodeRunPayload = Schema.encodeEffect(Schema.fromJsonString(OrchestrationV2RunJsonSchema));
 const encodeRestartCancelledBackgroundWork = Schema.encodeEffect(
-  Schema.fromJsonString(OrchestrationV2RunJsonSchema.fields.restartCancelledBackgroundWork),
+  Schema.fromJsonString(Schema.Array(OrchestrationV2RestartCancelledBackgroundWork)),
 );
 const encodeRunAttemptPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2RunAttemptJsonSchema),
@@ -1010,6 +1022,146 @@ const decodeThreadPayload = Schema.decodeUnknownEffect(
 );
 const decodeRunPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2RunJsonSchema),
+);
+
+/** Enumerates queued runs directly and recovers only their indexed run.created envelopes. */
+export const getQueuedRunAcceptanceOrder = Effect.fn("ProjectionStore.getQueuedRunAcceptanceOrder")(
+  function* (scope: { readonly threadId?: ThreadId }) {
+    const sql = yield* SqlClient.SqlClient;
+    const scopedThreadId = scope?.threadId;
+    return yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const queuedRows =
+          scopedThreadId === undefined
+            ? yield* sql<{
+                readonly run_id: string;
+                readonly thread_id: string;
+                readonly accepted_sequence: number | null;
+                readonly payload_json: string;
+              }>`
+              SELECT run_id, thread_id, accepted_sequence, payload_json
+              FROM orchestration_v2_projection_runs
+              WHERE status = 'queued'
+              ORDER BY accepted_sequence IS NULL, accepted_sequence, run_id
+            `
+            : yield* sql<{
+                readonly run_id: string;
+                readonly thread_id: string;
+                readonly accepted_sequence: number | null;
+                readonly payload_json: string;
+              }>`
+              SELECT run_id, thread_id, accepted_sequence, payload_json
+              FROM orchestration_v2_projection_runs
+              WHERE status = 'queued' AND thread_id = ${scopedThreadId}
+              ORDER BY accepted_sequence IS NULL, accepted_sequence, run_id
+            `;
+        const queuedRuns: Array<QueuedRunAcceptance> = [];
+
+        for (const row of queuedRows) {
+          const run = yield* decodeRunPayload(row.payload_json);
+          const runId = RunId.make(row.run_id);
+          const threadId = ThreadId.make(row.thread_id);
+          const recoveryThreadId = scopedThreadId ?? threadId;
+
+          if (row.accepted_sequence !== null) {
+            queuedRuns.push({
+              run,
+              acceptedSequence: row.accepted_sequence,
+              blockedReason: null,
+            });
+            continue;
+          }
+
+          const createdRows = yield* sql<{
+            readonly sequence: number;
+            readonly stream_id: string;
+            readonly event_run_id: string | null;
+            readonly payload_json: string;
+          }>`
+            SELECT sequence, stream_id,
+              CASE WHEN json_valid(metadata_json)
+                THEN json_extract(metadata_json, '$.runId')
+                ELSE NULL END AS event_run_id,
+              payload_json
+            FROM orchestration_events INDEXED BY idx_orchestration_events_agent_stream_sequence
+            WHERE application_event_version = 2
+              AND aggregate_kind = 'thread'
+              AND stream_id = ${recoveryThreadId}
+              AND event_type = 'run.created'
+              AND (
+                CASE WHEN json_valid(metadata_json)
+                  THEN json_extract(metadata_json, '$.runId') = ${runId}
+              ELSE 0 END
+              OR CASE WHEN json_valid(payload_json)
+                THEN json_extract(payload_json, '$.id') = ${runId}
+                ELSE 0 END
+              )
+            ORDER BY sequence
+          `;
+          let malformed = false;
+          const matching: Array<number> = [];
+          for (const createdRow of createdRows) {
+            const decoded = yield* decodeRunPayload(createdRow.payload_json).pipe(
+              Effect.match({
+                onFailure: () => ({ malformed: true as const }),
+                onSuccess: (run) => ({ malformed: false as const, run }),
+              }),
+            );
+            if (decoded.malformed) {
+              malformed = true;
+              continue;
+            }
+            if (
+              createdRow.event_run_id !== runId ||
+              createdRow.stream_id !== threadId ||
+              decoded.run.id !== runId ||
+              decoded.run.threadId !== threadId
+            ) {
+              malformed = true;
+              continue;
+            }
+            matching.push(createdRow.sequence);
+          }
+
+          if (malformed || matching.length > 1) {
+            queuedRuns.push({
+              run,
+              acceptedSequence: null,
+              blockedReason: "contradictory-run-created",
+            });
+            continue;
+          }
+          const recoveredSequence = matching[0];
+          if (recoveredSequence === undefined) {
+            queuedRuns.push({
+              run,
+              acceptedSequence: null,
+              blockedReason: "missing-run-created",
+            });
+            continue;
+          }
+
+          yield* sql`
+            UPDATE orchestration_v2_projection_runs
+            SET accepted_sequence = ${recoveredSequence}
+            WHERE run_id = ${runId} AND accepted_sequence IS NULL
+          `;
+          queuedRuns.push({
+            run,
+            acceptedSequence: recoveredSequence,
+            blockedReason: null,
+          });
+        }
+
+        return queuedRuns.toSorted((left, right) => {
+          if (left.acceptedSequence === null) return right.acceptedSequence === null ? 0 : 1;
+          if (right.acceptedSequence === null) return -1;
+          return left.acceptedSequence - right.acceptedSequence;
+        });
+      }),
+    );
+  },
+  Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
 );
 const decodeRunAttemptPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2RunAttemptJsonSchema),
@@ -1461,6 +1613,7 @@ export function threadShellFromProjection(
     createdAt: projection.thread.createdAt,
     updatedAt: projection.updatedAt,
     archivedAt: projection.thread.archivedAt,
+    hiddenAt: projection.thread.hiddenAt,
     settledOverride: projection.thread.settledOverride,
     settledAt: projection.thread.settledAt,
     unsettledAt: projection.thread.unsettledAt ?? null,
@@ -1716,6 +1869,7 @@ function shellFromState(input: {
     createdAt: input.state.thread.createdAt,
     updatedAt: input.state.updatedAt,
     archivedAt: input.state.thread.archivedAt,
+    hiddenAt: input.state.thread.hiddenAt,
     settledOverride: input.state.thread.settledOverride,
     settledAt: input.state.thread.settledAt,
     unsettledAt: input.state.thread.unsettledAt ?? null,
@@ -1751,10 +1905,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       END
     `;
 
-    const apply: ProjectionStoreV2Shape["apply"] = (event) =>
+    const apply: ProjectionStoreV2Shape["apply"] = (event, sequence) =>
       Effect.gen(function* () {
         switch (event.type) {
           case "thread.created":
+          case "thread.hidden":
+          case "thread.unhidden":
           case "thread.archived":
           case "thread.unarchived":
           case "thread.deleted":
@@ -1838,6 +1994,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 provider_instance_id,
                 provider_thread_id,
                 status,
+                accepted_sequence,
                 requested_at,
                 completed_at,
                 payload_json
@@ -1850,6 +2007,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${event.payload.providerInstanceId},
                 ${event.payload.providerThreadId},
                 ${event.payload.status},
+                ${event.type === "run.created" ? (sequence ?? null) : null},
                 ${stringField(payload, "requestedAt")},
                 ${nullableStringField(payload, "completedAt")},
                 ${payloadJson}
@@ -1862,8 +2020,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 provider_instance_id = excluded.provider_instance_id,
                 provider_thread_id = excluded.provider_thread_id,
                 status = excluded.status,
+                accepted_sequence = COALESCE(
+                  orchestration_v2_projection_runs.accepted_sequence,
+                  excluded.accepted_sequence
+                ),
                 requested_at = excluded.requested_at,
                 completed_at = excluded.completed_at,
+                service_update_resume_after_update = CASE
+                  WHEN excluded.status = 'queued'
+                    THEN orchestration_v2_projection_runs.service_update_resume_after_update
+                  ELSE 0
+                END,
                 payload_json = ${keepRecordedRunField(
                   keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
                   "$.restartCancelledBackgroundWork",
@@ -2587,6 +2754,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
         if (
           event.type !== "thread.created" &&
+          event.type !== "thread.hidden" &&
+          event.type !== "thread.unhidden" &&
           event.type !== "thread.archived" &&
           event.type !== "thread.unarchived" &&
           event.type !== "thread.deleted" &&

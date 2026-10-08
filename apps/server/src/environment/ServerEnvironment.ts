@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   ORCHESTRATION_PROTOCOL_VERSION,
+  ORCHESTRATION_CLI_API_VERSION,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   type ExecutionEnvironmentDescriptor,
 } from "@t3tools/contracts";
@@ -238,6 +239,7 @@ export const make = Effect.gen(function* () {
       usagePriceOverrides: true,
       usageModelAliases: true,
       threadPinning: true,
+      threadHiding: true,
       threadPinReorder: true,
       threadActiveReorder: true,
       threadAutoSettleOptOut: true,
@@ -250,6 +252,12 @@ export const make = Effect.gen(function* () {
       serverResolvedCommandContext: true,
       environmentIcon: true,
       projectCloneTracking: true,
+      orchestration: {
+        cliApiVersion: ORCHESTRATION_CLI_API_VERSION,
+        serverAuthoritativeCreate: true,
+        pendingInteractions: false,
+        manualThreadCompaction: true,
+      },
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
       ...(serverInstallation === null ? {} : { serverInstallation }),
       // V2 restart recovery uses the environment-owned opt-in. The old
@@ -259,6 +267,15 @@ export const make = Effect.gen(function* () {
         : {}),
       ...(desktopAppUpdate ? { desktopAppUpdate: true } : {}),
       serverBrowser: true,
+      // The full scheduled chain (source + drain + runtime + authority +
+      // containment + scheduler) is bound in `server.ts` whenever the runtime
+      // reports supported: launcher-managed boot-service on linux-x64.
+      ...(serverSelfUpdate === "boot-service" &&
+      launcher.managed &&
+      hostPlatform === "linux" &&
+      hostArchitecture === "x64"
+        ? { scheduledServiceUpdates: 1 as const }
+        : {}),
     },
   };
 

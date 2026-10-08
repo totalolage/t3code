@@ -102,6 +102,9 @@ it("loads packaged Cursor catalog chunks without credentials or checkout depende
       format: "esm",
       dts: false,
       logLevel: "error",
+      define: {
+        __T3_BUN_STANDALONE__: "false",
+      },
       deps: {
         alwaysBundle: shouldBundleCliDependency,
         neverBundle: isExternalCliDependency,

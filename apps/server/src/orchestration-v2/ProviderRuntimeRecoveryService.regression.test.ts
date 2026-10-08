@@ -16,6 +16,7 @@ import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { layerMemory } from "../persistence/Sqlite.ts";
 
 it("uses the thread provider for stale background work without provider threads", async () => {
   const threadId = ThreadId.make("thread_recovery_background_no_provider_threads");
@@ -47,6 +48,7 @@ it("uses the thread provider for stale background work without provider threads"
     ],
   } as unknown as OrchestrationV2ThreadProjection;
   const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provideMerge(layerMemory),
     Layer.provide(ServerSettings.layerTest()),
     Layer.provide(
       Layer.mergeAll(

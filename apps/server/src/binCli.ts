@@ -17,6 +17,7 @@ import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { sharedServerCommandFlags } from "./cli/config.ts";
 import { projectCommand } from "./cli/project.ts";
 import { runDefaultServerCommand, serveCommand, startCommand } from "./cli/server.ts";
+import { localOrchestrationCommands, remoteCommand } from "./cli/remote.ts";
 import { updateCommand } from "./cli/update.ts";
 import { uninstallCommand } from "./cli/uninstall.ts";
 import { serviceLauncherCommand } from "./cli/serviceLauncher.ts";
@@ -74,6 +75,8 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
       authCommand,
       browserCommand,
       projectCommand,
+      remoteCommand,
+      ...localOrchestrationCommands,
       serviceCommand,
       updateCommand,
       uninstallCommand,

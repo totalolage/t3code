@@ -1,10 +1,13 @@
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
+import * as NodeChildProcess from "node:child_process";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -512,6 +515,186 @@ effectIt.layer(NodeServices.layer)("resolveCommandPath", (it) => {
 });
 
 effectIt.layer(NodeServices.layer)("resolveSpawnCommand", (it) => {
+  const windowsHost = HostProcessPlatform.defaultValue() === "win32";
+  const posixSpawnCommandName = `t3-posix-spawn-${process.pid}.cmd`;
+  const posixSpawnValues = [
+    "",
+    "value with spaces",
+    "quote \"value\" and 'apostrophe'",
+    "$HOME",
+    "$(echo should-not-run)",
+    "semi;colon",
+    "ampersand & value",
+    "back\\slash",
+    "line\nbreak",
+  ];
+  const posixSpawnArgs = [
+    "-e",
+    "process.stdout.write(JSON.stringify(process.argv.slice(1)))",
+    "--",
+    ...posixSpawnValues,
+  ];
+  const decodePosixSpawnValues = Schema.decodeUnknownSync(
+    Schema.fromJsonString(Schema.Array(Schema.String)),
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "resolves the first executable POSIX PATH candidate and preserves literal arguments",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3-posix-spawn-" });
+        const nonExecutableBin = path.join(fixture, "non-executable");
+        const directoryBin = path.join(fixture, "directory");
+        const firstBin = path.join(fixture, "first");
+        const secondBin = path.join(fixture, "second");
+        const nonExecutableCandidate = path.join(nonExecutableBin, posixSpawnCommandName);
+
+        yield* fs.makeDirectory(nonExecutableBin);
+        yield* fs.makeDirectory(directoryBin);
+        yield* fs.makeDirectory(firstBin);
+        yield* fs.makeDirectory(secondBin);
+        yield* fs.writeFileString(nonExecutableCandidate, "not executable");
+        yield* fs.chmod(nonExecutableCandidate, 0o644);
+        yield* fs.makeDirectory(path.join(directoryBin, posixSpawnCommandName));
+
+        const firstExecutable = path.join(firstBin, posixSpawnCommandName);
+        const secondExecutable = path.join(secondBin, posixSpawnCommandName);
+        yield* fs.symlink(process.execPath, firstExecutable);
+        yield* fs.symlink(process.execPath, secondExecutable);
+
+        const resolved = yield* resolveSpawnCommand(posixSpawnCommandName, posixSpawnArgs, {
+          env: {
+            PATH: [nonExecutableBin, directoryBin, firstBin, secondBin].join(":"),
+          },
+        }).pipe(
+          Effect.provideService(HostProcessPlatform, "linux"),
+          Effect.provideService(HostProcessEnvironment, { PATH: secondBin }),
+        );
+
+        expect(path.isAbsolute(resolved.command)).toBe(true);
+        expect(resolved.command).toBe(firstExecutable);
+        expect(resolved.shell).toBe(false);
+        expect(resolved.args).toEqual(posixSpawnArgs);
+
+        const spawned = NodeChildProcess.spawnSync(resolved.command, resolved.args, {
+          encoding: "utf8",
+          shell: false,
+        });
+        expect(spawned.error).toBeUndefined();
+        expect(spawned.status).toBe(0);
+        expect(decodePosixSpawnValues(String(spawned.stdout))).toEqual(posixSpawnValues);
+      }),
+  );
+
+  it.effect.skipIf(windowsHost)("leaves a missing POSIX command and its arguments unchanged", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const missingPath = yield* fs.makeTempDirectoryScoped({ prefix: "t3-posix-missing-" });
+      const args = ["value with spaces", "$HOME", "$(echo should-not-run)"];
+      const resolved = yield* resolveSpawnCommand(posixSpawnCommandName, args, {
+        env: { PATH: missingPath },
+      }).pipe(
+        Effect.provideService(HostProcessPlatform, "linux"),
+        Effect.provideService(HostProcessEnvironment, { PATH: missingPath }),
+      );
+
+      expect(resolved).toEqual({
+        command: posixSpawnCommandName,
+        args,
+        shell: false,
+      });
+    }),
+  );
+
+  it.effect.skipIf(windowsHost)("uses the host environment by default on POSIX", () =>
+    Effect.gen(function* () {
+      let resolvedEnvironment: NodeJS.ProcessEnv | undefined;
+      const resolved = yield* resolveSpawnCommand(posixSpawnCommandName, ["arg"]).pipe(
+        Effect.provideService(HostProcessPlatform, "linux"),
+        Effect.provideService(HostProcessEnvironment, {
+          PATH: "/host/bin",
+          T3_HOST_ONLY: "host",
+        }),
+        Effect.provideService(SpawnExecutableResolution, (_command, _platform, env) => {
+          resolvedEnvironment = env;
+          return "/resolved/posix-command";
+        }),
+      );
+
+      expect(resolvedEnvironment).toEqual({
+        PATH: "/host/bin",
+        T3_HOST_ONLY: "host",
+      });
+      expect(resolved).toEqual({
+        command: "/resolved/posix-command",
+        args: ["arg"],
+        shell: false,
+      });
+    }),
+  );
+
+  it.effect.skipIf(windowsHost)("extends the host environment when requested on POSIX", () =>
+    Effect.gen(function* () {
+      let resolvedEnvironment: NodeJS.ProcessEnv | undefined;
+      const resolved = yield* resolveSpawnCommand(posixSpawnCommandName, ["arg"], {
+        env: { T3_REQUEST_ONLY: "request" },
+        extendEnv: true,
+      }).pipe(
+        Effect.provideService(HostProcessPlatform, "linux"),
+        Effect.provideService(HostProcessEnvironment, {
+          PATH: "/host/bin",
+          T3_HOST_ONLY: "host",
+        }),
+        Effect.provideService(SpawnExecutableResolution, (_command, _platform, env) => {
+          resolvedEnvironment = env;
+          return "/resolved/posix-command";
+        }),
+      );
+
+      expect(resolvedEnvironment).toEqual({
+        PATH: "/host/bin",
+        T3_HOST_ONLY: "host",
+        T3_REQUEST_ONLY: "request",
+      });
+      expect(resolved).toEqual({
+        command: "/resolved/posix-command",
+        args: ["arg"],
+        shell: false,
+      });
+    }),
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "does not inherit PATH when extending the POSIX environment is disabled",
+    () =>
+      Effect.gen(function* () {
+        let resolvedEnvironment: NodeJS.ProcessEnv | undefined;
+        const resolved = yield* resolveSpawnCommand(posixSpawnCommandName, ["arg"], {
+          env: { T3_REQUEST_ONLY: "request" },
+          extendEnv: false,
+        }).pipe(
+          Effect.provideService(HostProcessPlatform, "linux"),
+          Effect.provideService(HostProcessEnvironment, {
+            PATH: "/host/bin",
+            T3_HOST_ONLY: "host",
+          }),
+          Effect.provideService(SpawnExecutableResolution, (_command, _platform, env) => {
+            resolvedEnvironment = env;
+            return undefined;
+          }),
+        );
+
+        expect(resolvedEnvironment).toEqual({ T3_REQUEST_ONLY: "request" });
+        expect(resolved).toEqual({
+          command: posixSpawnCommandName,
+          args: ["arg"],
+          shell: false,
+        });
+      }),
+  );
+
   it.effect("runs Windows executables directly without a shell", () =>
     Effect.gen(function* () {
       const command = yield* resolveSpawnCommand("node.exe", ["script.js", "hello & goodbye"], {

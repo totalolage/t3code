@@ -381,6 +381,7 @@ const makeAppThread = Effect.fnUntraced(function* (model: string, threadId = THR
     createdAt: now,
     updatedAt: now,
     archivedAt: null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     lastVisitedAt: null,

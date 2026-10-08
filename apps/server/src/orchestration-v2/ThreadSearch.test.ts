@@ -79,6 +79,7 @@ const thread = (
     createdAt: at(0),
     updatedAt: at(0),
     archivedAt: overrides.archivedAt ?? null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     lastVisitedAt: null,

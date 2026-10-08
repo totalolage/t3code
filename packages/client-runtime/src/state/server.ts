@@ -484,7 +484,7 @@ export function applyServerWelcomeEvent(
   current: EnvironmentServerWelcomeState,
   session: RpcSession,
   event: {
-    readonly type: "welcome" | "ready" | "legacyThreadMigration";
+    readonly type: "welcome" | "ready" | "legacyThreadMigration" | "serviceUpdate";
     readonly payload: unknown;
   },
 ): EnvironmentServerWelcomeState {

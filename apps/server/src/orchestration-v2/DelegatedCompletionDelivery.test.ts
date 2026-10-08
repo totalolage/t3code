@@ -836,6 +836,7 @@ const seedRestartCancelledChild = (input: {
             createdAt: input.now,
             updatedAt: input.now,
             archivedAt: null,
+            hiddenAt: null,
             settledOverride: null,
             settledAt: null,
             lastVisitedAt: null,

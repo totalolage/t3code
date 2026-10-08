@@ -12,6 +12,7 @@ import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contract
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/reactivity";
 import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+import { isThreadHidden } from "@t3tools/client-runtime/state/thread-hidden";
 import {
   effectiveSnoozed,
   type ThreadSnoozeShell,
@@ -569,6 +570,7 @@ export function isSidebarSubagentThread(thread: Pick<SidebarThreadSummary, "line
 
 export function filterSidebarV2VisibleThreads<
   T extends Pick<SidebarThreadSummary, "archivedAt" | "lineage"> & {
+    readonly hiddenAt?: string | null | undefined;
     environmentId: string;
     projectId: string;
   },
@@ -576,6 +578,7 @@ export function filterSidebarV2VisibleThreads<
   return threads.filter(
     (thread) =>
       thread.archivedAt === null &&
+      !isThreadHidden(thread) &&
       !isSidebarSubagentThread(thread) &&
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
@@ -868,6 +871,12 @@ export function getSidebarThreadIdsToPrewarm<TThreadId>(
   limit = SIDEBAR_THREAD_PREWARM_LIMIT,
 ): TThreadId[] {
   return visibleThreadIds.slice(0, Math.max(0, limit));
+}
+
+export function filterHiddenSidebarThreads<T extends { readonly hiddenAt?: string | null }>(
+  threads: readonly T[],
+): T[] {
+  return threads.filter((thread) => !isThreadHidden(thread));
 }
 
 export function resolveAdjacentThreadId<T>(input: {
@@ -1279,7 +1288,8 @@ export function getFallbackThreadIdAfterDelete<
         (thread) =>
           thread.projectId === deletedThread.projectId &&
           thread.id !== deletedThreadId &&
-          !deletedThreadIds?.has(thread.id),
+          !deletedThreadIds?.has(thread.id) &&
+          !isThreadHidden(thread),
       ),
       sortOrder,
     )[0]?.id ?? null
@@ -1338,6 +1348,7 @@ export function sortProjectsForSidebar<
 ): TProject[] {
   const threadsByProjectId = new Map<string, TThread[]>();
   for (const thread of threads) {
+    if (isThreadHidden(thread)) continue;
     const existing = threadsByProjectId.get(thread.projectId) ?? [];
     existing.push(thread);
     threadsByProjectId.set(thread.projectId, existing);
@@ -1369,7 +1380,7 @@ export function sortLogicalProjectsForSidebar<
   );
   const threadsByProjectKey = new Map<string, TThread[]>();
   for (const thread of threads) {
-    if (thread.archivedAt !== null) continue;
+    if (thread.archivedAt !== null || isThreadHidden(thread)) continue;
     const projectKey = groupKeyByProjectRef.get(`${thread.environmentId}\0${thread.projectId}`);
     if (!projectKey) continue;
     const existing = threadsByProjectKey.get(projectKey);
@@ -1421,7 +1432,7 @@ export function sortScopedProjectsForSidebar<
     `${environmentId}\u0000${projectId}`;
   const threadsByProject = new Map<string, TThread[]>();
   for (const thread of threads) {
-    if (thread.archivedAt !== null) {
+    if (thread.archivedAt !== null || isThreadHidden(thread)) {
       continue;
     }
     const key = scopedKey(thread.environmentId, thread.projectId);

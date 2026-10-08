@@ -93,6 +93,7 @@ function shell(overrides: Partial<SettlementShell> = {}): SettlementShell {
     createdAt: at(-30 * DAY_MS),
     updatedAt: at(-10 * DAY_MS),
     archivedAt: null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     snoozedUntil: null,
@@ -762,7 +763,7 @@ describe("ThreadSettlementServiceV2 worker", () => {
           const commands = yield* Ref.get(fixture.commands);
           expect(commands).toHaveLength(1);
           expect(commands[0]?.settledAt).toEqual(thread.latestRunCompletedAt);
-          expect(commands[0]?.snapshotAt).toEqual(thread.updatedAt);
+          expect(commands[0]).toEqual(expect.objectContaining({ snapshotAt: thread.updatedAt }));
         }).pipe(Effect.provide(fixture.layer));
       }),
     ),
@@ -1049,6 +1050,7 @@ describe("ThreadSettlementServiceV2 terminals", () => {
       createdAt: DateTime.makeUnsafe(NOW),
       updatedAt: DateTime.makeUnsafe(NOW),
       archivedAt: null,
+      hiddenAt: null,
       settledOverride,
       settledAt: settledOverride === "settled" ? DateTime.makeUnsafe(NOW) : null,
       lastVisitedAt: null,

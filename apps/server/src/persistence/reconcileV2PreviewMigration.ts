@@ -23,6 +23,9 @@ export const reconcileV2PreviewMigration = Effect.fn("reconcileV2PreviewMigratio
           row.name === "OrchestrationV2" && (row.migration_id === 53 || row.migration_id === 54),
       );
       if (!legacy) return [];
+      const hasPullRequestFilesViewed = history.some(
+        (row) => row.migration_id === 53 && row.name === "PullRequestFilesViewed",
+      );
       const valid = history.every(
         (row) =>
           row === legacy ||
@@ -37,7 +40,7 @@ export const reconcileV2PreviewMigration = Effect.fn("reconcileV2PreviewMigratio
         });
       }
       const executed: Array<readonly [number, string]> = [];
-      if (legacy.migration_id === 53) {
+      if (!hasPullRequestFilesViewed) {
         yield* PullRequestFilesViewed;
         executed.push([53, "PullRequestFilesViewed"]);
       }
@@ -46,7 +49,7 @@ export const reconcileV2PreviewMigration = Effect.fn("reconcileV2PreviewMigratio
       // Move the later entry first to avoid a primary-key collision.
       yield* sql`UPDATE effect_sql_migrations SET migration_id = 56 WHERE migration_id = 55 AND name = 'RemoveRedundantProjectionIndexes'`;
       yield* sql`UPDATE effect_sql_migrations SET migration_id = 55 WHERE migration_id = ${legacy.migration_id} AND name = 'OrchestrationV2'`;
-      if (legacy.migration_id === 53) {
+      if (!hasPullRequestFilesViewed) {
         yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (53, 'PullRequestFilesViewed')`;
       }
       yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (54, 'ProjectionThreadsAutoSettleDisabledAt')`;

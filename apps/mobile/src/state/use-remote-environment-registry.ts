@@ -1,21 +1,24 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigation } from "@react-navigation/native";
+import type { ConnectionOnboarding } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId } from "@t3tools/contracts";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import * as Cause from "effect/Cause";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { Alert } from "react-native";
 
 import { useConnectionController } from "../features/connection/useConnectionController";
 import { environmentPresentations } from "./presentation";
 import { useWorkspaceConnectionState, useWorkspaceEnvironments } from "./workspace";
-import type { SavedRemoteConnection } from "../lib/connection";
+import { pairingConnectionInputFromUrl, type SavedRemoteConnection } from "../lib/connection";
 import { appAtomRegistry } from "./atom-registry";
 import type { ConnectedEnvironmentSummary, EnvironmentRuntimeState } from "./remote-runtime-types";
 import { environmentSession } from "./session";
 import { environmentCatalog } from "../connection/catalog";
 import { createRemoteEnvironmentProjectionAtoms } from "./remote-environment-projections";
 import { serverEnvironment } from "./server";
+import { includeSavedConnectionQueryParameters } from "./workspaceModel";
 
 const connectionPairingUrlAtom = Atom.make("").pipe(
   Atom.keepAlive,
@@ -87,9 +90,13 @@ export function useRemoteEnvironmentRuntime(
 
 export function useRemoteConnectionStatus() {
   const state = useWorkspaceConnectionState();
-  const connectedEnvironments: ReadonlyArray<ConnectedEnvironmentSummary> =
-    useWorkspaceEnvironments();
+  const workspaceEnvironments = useWorkspaceEnvironments();
+  const savedConnectionsById = useAtomValue(savedConnectionsByIdAtom);
   const pendingConnectionError = useAtomValue(pendingConnectionErrorAtom);
+  const connectedEnvironments = useMemo<ReadonlyArray<ConnectedEnvironmentSummary>>(
+    () => includeSavedConnectionQueryParameters(workspaceEnvironments, savedConnectionsById),
+    [savedConnectionsById, workspaceEnvironments],
+  );
 
   return {
     connectedEnvironments,
@@ -110,10 +117,10 @@ export function useRemoteConnections() {
   }, []);
 
   const onConnectPress = useCallback(
-    async (pairingUrl?: string, expectedEnvironmentId?: EnvironmentId) => {
-      const nextPairingUrl = pairingUrl ?? connectionPairingUrl;
+    async (pairingInput?: ConnectionOnboarding.PairingConnectionInput) => {
+      const nextPairingInput = pairingInput ?? pairingConnectionInputFromUrl(connectionPairingUrl);
       setPendingConnectionError(null);
-      const result = await controller.connectPairingUrl(nextPairingUrl, expectedEnvironmentId);
+      const result = await controller.connectPairing(nextPairingInput);
       if (AsyncResult.isFailure(result)) {
         const error = Cause.squash(result.cause);
         const message =
@@ -148,7 +155,11 @@ export function useRemoteConnections() {
   const onUpdateEnvironment = useCallback(
     (
       environmentId: EnvironmentId,
-      updates: { readonly label: string; readonly displayUrl: string },
+      updates: {
+        readonly label: string;
+        readonly displayUrl: string;
+        readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
+      },
     ) => controller.updateEnvironment(environmentId, updates),
     [controller],
   );

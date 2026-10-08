@@ -10,6 +10,7 @@ import {
   CheckpointRef,
   CheckpointScopeId,
   CommandId,
+  ApprovalRequestId,
   ContextHandoffId,
   ContextTransferId,
   EventId,
@@ -33,10 +34,11 @@ import {
   RuntimeRequestId,
   ScheduledTaskId,
   ThreadId,
+  TurnId,
   TrimmedNonEmptyString,
   TurnItemId,
 } from "./baseSchemas.ts";
-import { ChatAttachment } from "./chatAttachment.ts";
+import { ChatAttachment, UploadChatAttachment } from "./chatAttachment.ts";
 import {
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetFullThreadDiffResult,
@@ -62,9 +64,12 @@ import {
   UserInputAttachments,
   UserInputAttachmentAnswerPayload,
   RuntimeMode,
+  DEFAULT_PROVIDER_INTERACTION_MODE,
 } from "./providerPolicy.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { OrchestrationProjectShell } from "./orchestrationProject.ts";
+import { ProjectFaviconPath, ProjectIconOverride, ProjectScript } from "./project.ts";
+import { ThreadEnvMode } from "./environment.ts";
 import {
   TurnTokenUsage,
   ToolActivitySurface,
@@ -395,6 +400,9 @@ export const OrchestrationV2AppThread = Schema.Struct({
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   archivedAt: Schema.NullOr(Schema.DateTimeUtc),
+  hiddenAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   settledOverride: Schema.NullOr(Schema.Literals(["settled", "active"])).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -519,17 +527,20 @@ export const OrchestrationV2ThreadLaunchWorkspaceStrategy = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("root"),
     branch: Schema.optional(TrimmedNonEmptyString),
+    runSetupScript: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("existing_worktree"),
     worktreePath: TrimmedNonEmptyString,
     branch: Schema.optional(TrimmedNonEmptyString),
+    runSetupScript: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("worktree"),
     baseRef: TrimmedNonEmptyString,
     branch: Schema.optional(TrimmedNonEmptyString),
     startFromOrigin: Schema.optional(Schema.Boolean),
+    runSetupScript: Schema.optional(Schema.Boolean),
   }),
 ]);
 export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
@@ -538,14 +549,13 @@ export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
 /** Failure code on the error item a failed workspace preparation leaves. */
 export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_preparation_failed";
 
-export const OrchestrationV2Run = Schema.Struct({
+const OrchestrationV2RunBaseFields = {
   id: RunId,
   threadId: ThreadId,
   ordinal: PositiveInt,
   providerInstanceId: ProviderInstanceId,
   modelSelection: ModelSelection,
   providerThreadId: Schema.NullOr(ProviderThreadId),
-  userMessageId: MessageId,
   rootNodeId: Schema.NullOr(NodeId),
   activeAttemptId: Schema.NullOr(RunAttemptId),
   status: OrchestrationV2RunStatus,
@@ -581,7 +591,29 @@ export const OrchestrationV2Run = Schema.Struct({
   delegatedCompletion: Schema.optional(OrchestrationV2DelegatedCompletionCohort),
   /** How a launch prepares this run's workspace; prepared-run.retry repeats it. */
   workspacePreparation: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
+};
+
+const OrchestrationV2UserRun = Schema.Struct({
+  ...OrchestrationV2RunBaseFields,
+  /** Absent on historical user runs; explicit on current user-turn runs. */
+  purpose: Schema.optional(Schema.Literal("user")),
+  userMessageId: MessageId,
 });
+export type OrchestrationV2UserRun = typeof OrchestrationV2UserRun.Type;
+
+const OrchestrationV2CompactionRun = Schema.Struct({
+  ...OrchestrationV2RunBaseFields,
+  purpose: Schema.Literal("compaction"),
+  requestCommandId: CommandId,
+  /** A maintenance run has no conversation message identity. */
+  userMessageId: Schema.optional(Schema.Never),
+});
+export type OrchestrationV2CompactionRun = typeof OrchestrationV2CompactionRun.Type;
+
+export const OrchestrationV2Run = Schema.Union([
+  OrchestrationV2UserRun,
+  OrchestrationV2CompactionRun,
+]);
 export type OrchestrationV2Run = typeof OrchestrationV2Run.Type;
 
 /**
@@ -1650,6 +1682,8 @@ export const OrchestrationV2DomainEvent = Schema.Union([
     type: Schema.Literals([
       "thread.archived",
       "thread.unarchived",
+      "thread.hidden",
+      "thread.unhidden",
       "thread.deleted",
       "thread.settled",
       "thread.unsettled",
@@ -1894,6 +1928,9 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   archivedAt: Schema.NullOr(Schema.DateTimeUtc),
+  hiddenAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   settledOverride: Schema.NullOr(Schema.Literals(["settled", "active"])),
   settledAt: Schema.NullOr(Schema.DateTimeUtc),
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -1990,6 +2027,9 @@ export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((
   createdAt: Schema.DateTimeUtcFromString,
   updatedAt: Schema.DateTimeUtcFromString,
   archivedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  hiddenAt: Schema.NullOr(Schema.DateTimeUtcFromString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   settledAt: Schema.NullOr(Schema.DateTimeUtcFromString).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -2013,13 +2053,20 @@ export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((
 }));
 export type OrchestrationV2AppThreadJson = typeof OrchestrationV2AppThreadJson.Type;
 
-export const OrchestrationV2RunJson = OrchestrationV2Run.mapFields((fields) => ({
-  ...fields,
+const OrchestrationV2RunJsonFields = {
   requestedAt: Schema.DateTimeUtcFromString,
   startedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   completedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   workStartedAt: Schema.optional(Schema.DateTimeUtcFromString),
-}));
+};
+
+export const OrchestrationV2RunJson = Schema.Union([
+  OrchestrationV2UserRun.mapFields((fields) => ({ ...fields, ...OrchestrationV2RunJsonFields })),
+  OrchestrationV2CompactionRun.mapFields((fields) => ({
+    ...fields,
+    ...OrchestrationV2RunJsonFields,
+  })),
+]);
 export type OrchestrationV2RunJson = typeof OrchestrationV2RunJson.Type;
 
 export const OrchestrationV2RunAttemptJson = OrchestrationV2RunAttempt.mapFields((fields) => ({
@@ -2417,6 +2464,9 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   createdAt: Schema.DateTimeUtcFromString,
   updatedAt: Schema.DateTimeUtcFromString,
   archivedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  hiddenAt: Schema.NullOr(Schema.DateTimeUtcFromString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   settledAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
@@ -2469,6 +2519,8 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
     type: Schema.Literals([
       "thread.archived",
       "thread.unarchived",
+      "thread.hidden",
+      "thread.unhidden",
       "thread.deleted",
       "thread.settled",
       "thread.unsettled",
@@ -2605,6 +2657,277 @@ export const OrchestrationV2StoredEventJson = Schema.Struct({
 });
 export type OrchestrationV2StoredEventJson = typeof OrchestrationV2StoredEventJson.Type;
 
+const OrchestrationCliDispatchProjectCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("project.create"),
+    commandId: CommandId,
+    projectId: ProjectId,
+    title: TrimmedNonEmptyString,
+    workspaceRoot: TrimmedNonEmptyString,
+    createWorkspaceRootIfMissing: Schema.optional(Schema.Boolean),
+    defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
+    createdAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("project.meta.update"),
+    commandId: CommandId,
+    projectId: ProjectId,
+    title: Schema.optional(TrimmedNonEmptyString),
+    workspaceRoot: Schema.optional(TrimmedNonEmptyString),
+    defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
+    defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
+    autoPull: Schema.optional(Schema.Boolean),
+    faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
+    projectIcon: Schema.optional(Schema.NullOr(ProjectIconOverride)),
+    scripts: Schema.optional(Schema.Array(ProjectScript)),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("project.delete"),
+    commandId: CommandId,
+    projectId: ProjectId,
+    force: Schema.optional(Schema.Boolean),
+  }),
+]);
+
+const OrchestrationCliDispatchThreadCreate = Schema.Struct({
+  type: Schema.Literal("thread.create"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  projectId: ProjectId,
+  title: TrimmedNonEmptyString,
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
+  ),
+  branch: Schema.NullOr(TrimmedNonEmptyString),
+  worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+  historyImport: Schema.optional(Schema.Literal(true)),
+});
+
+const OrchestrationCliDispatchTurnStartBootstrap = Schema.Struct({
+  createThread: Schema.optional(
+    Schema.Struct({
+      projectId: ProjectId,
+      title: TrimmedNonEmptyString,
+      modelSelection: ModelSelection,
+      runtimeMode: RuntimeMode,
+      interactionMode: ProviderInteractionMode,
+      branch: Schema.NullOr(TrimmedNonEmptyString),
+      worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+      createdAt: IsoDateTime,
+    }),
+  ),
+  prepareWorktree: Schema.optional(
+    Schema.Struct({
+      projectCwd: TrimmedNonEmptyString,
+      baseBranch: TrimmedNonEmptyString,
+      branch: Schema.optional(TrimmedNonEmptyString),
+      startFromOrigin: Schema.optional(Schema.Boolean),
+    }),
+  ),
+  runSetupScript: Schema.optional(Schema.Boolean),
+});
+
+const OrchestrationCliDispatchThreadCommand = Schema.Union([
+  OrchestrationCliDispatchThreadCreate,
+  Schema.Struct({
+    type: Schema.Literal("thread.delete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.archive"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.unarchive"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.settle"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.auto-settle"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    snapshotSequence: NonNegativeInt,
+    settledAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.unsettle"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    reason: Schema.Literal("user"),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.snooze"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    snoozedUntil: IsoDateTime,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.unsnooze"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    reason: Schema.Literal("user"),
+  }),
+  Schema.Struct({ type: Schema.Literal("thread.pin"), commandId: CommandId, threadId: ThreadId }),
+  Schema.Struct({ type: Schema.Literal("thread.unpin"), commandId: CommandId, threadId: ThreadId }),
+  Schema.Struct({
+    type: Schema.Literal("thread.pin.reorder"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    orderKey: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.active.reorder"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    orderKey: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({ type: Schema.Literal("thread.hide"), commandId: CommandId, threadId: ThreadId }),
+  Schema.Struct({
+    type: Schema.Literal("thread.unhide"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.meta.update"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    title: Schema.optional(TrimmedNonEmptyString),
+    regenerateTitle: Schema.optional(Schema.Literal(true)),
+    modelSelection: Schema.optional(ModelSelection),
+    branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+    expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+    worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+    linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  }).check(
+    Schema.makeFilter(
+      (input) =>
+        !(input.title !== undefined && input.regenerateTitle === true) ||
+        "title and regenerateTitle cannot be specified together",
+    ),
+  ),
+  Schema.Struct({
+    type: Schema.Literal("thread.pull-request.link"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    ...ThreadPullRequestKey.fields,
+    url: TrimmedNonEmptyString,
+    source: ThreadPullRequestLinkSource,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.pull-request.unlink"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    ...ThreadPullRequestKey.fields,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.runtime-mode.set"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runtimeMode: RuntimeMode,
+    createdAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.interaction-mode.set"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    interactionMode: ProviderInteractionMode,
+    createdAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.turn.start"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    message: Schema.Struct({
+      messageId: MessageId,
+      role: Schema.Literal("user"),
+      text: Schema.String,
+      attachments: Schema.Array(Schema.Union([UploadChatAttachment, ChatAttachment])),
+      context: Schema.optional(OrchestrationMessageContext),
+    }),
+    modelSelection: Schema.optional(ModelSelection),
+    titleSeed: Schema.optional(TrimmedNonEmptyString),
+    runtimeMode: RuntimeMode,
+    interactionMode: ProviderInteractionMode,
+    bootstrap: Schema.optional(OrchestrationCliDispatchTurnStartBootstrap),
+    sourceProposedPlan: Schema.optional(Schema.Struct({ threadId: ThreadId, planId: PlanId })),
+    createdAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.turn.interrupt"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    turnId: Schema.optional(TurnId),
+    createdAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.compact"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    createdAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.approval.respond"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: ApprovalRequestId,
+    decision: ProviderApprovalDecision,
+    createdAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.user-input.respond"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: ApprovalRequestId,
+    answers: ProviderUserInputAnswers,
+    createdAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.user-input.dismiss"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: ApprovalRequestId,
+    createdAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.checkpoint.revert"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    turnCount: NonNegativeInt,
+    createdAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.conversation.revert"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    turnCount: NonNegativeInt,
+    createdAt: IsoDateTime,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.session.stop"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    createdAt: IsoDateTime,
+    onlyIfSettled: Schema.optional(Schema.Boolean),
+  }),
+]);
+
+/** F/I-compatible HTTP command input; the native orchestrator remains V2-only. */
+export const OrchestrationCliDispatchCommand = Schema.Union([
+  OrchestrationCliDispatchProjectCommand,
+  OrchestrationCliDispatchThreadCommand,
+]);
+export type OrchestrationCliDispatchCommand = typeof OrchestrationCliDispatchCommand.Type;
+
 export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.create"),
@@ -2630,6 +2953,21 @@ export const OrchestrationV2Command = Schema.Union([
     ),
   }),
   Schema.Struct({
+    type: Schema.Literal("thread.hide"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.unhide"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.compact"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
     type: Schema.Literal("thread.archive"),
     commandId: CommandId,
     threadId: ThreadId,
@@ -2650,19 +2988,23 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     settledAt: Schema.optional(Schema.DateTimeUtc),
   }),
-  /**
-   * Server-internal settlement (#8600): dispatched by the settlement sweep,
-   * never by clients. Rejected when the thread changed after `snapshotAt` or
-   * carries any explicit settled override, so automatic settlement can never
-   * race a user action or clobber an explicit un-settle.
-   */
-  Schema.Struct({
-    type: Schema.Literal("thread.auto-settle"),
-    commandId: CommandId,
-    threadId: ThreadId,
-    snapshotAt: Schema.DateTimeUtc,
-    settledAt: Schema.optional(Schema.DateTimeUtc),
-  }),
+  /** Native timestamp and F sequence watermarks share the same serialized command. */
+  Schema.Union([
+    Schema.Struct({
+      type: Schema.Literal("thread.auto-settle"),
+      commandId: CommandId,
+      threadId: ThreadId,
+      snapshotAt: Schema.DateTimeUtc,
+      settledAt: Schema.optional(Schema.DateTimeUtc),
+    }),
+    Schema.Struct({
+      type: Schema.Literal("thread.auto-settle"),
+      commandId: CommandId,
+      threadId: ThreadId,
+      snapshotSequence: NonNegativeInt,
+      settledAt: Schema.DateTimeUtc,
+    }),
+  ]),
   Schema.Struct({
     type: Schema.Literal("thread.unsettle"),
     commandId: CommandId,
@@ -2740,7 +3082,9 @@ export const OrchestrationV2Command = Schema.Union([
     title: Schema.optional(TrimmedNonEmptyString),
     /** Kick off (true) or abandon (false) an async title regeneration. */
     regenerateTitle: Schema.optional(Schema.Boolean),
+    modelSelection: Schema.optional(ModelSelection),
     branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+    expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     expectedWorktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     /** Reject unless no message or run has landed on this thread. */
@@ -3126,6 +3470,14 @@ const OrchestrationV2InternalCommand = Schema.Union([
     placeholder: Schema.optional(Schema.String),
     secretStatus: OrchestrationV2SecretRequestStatus,
   }),
+  /** Stops only the live provider sessions currently attached to this thread. */
+  Schema.Struct({
+    type: Schema.Literal("thread.session.stop"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    createdAt: Schema.DateTimeUtc,
+    onlyIfSettled: Schema.optional(Schema.Boolean),
+  }),
 ]);
 export type OrchestrationV2InternalCommand = typeof OrchestrationV2InternalCommand.Type;
 
@@ -3191,6 +3543,7 @@ export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
       messageId: Schema.optional(MessageId),
       text: Schema.String,
       context: Schema.optional(OrchestrationMessageContext),
+      sourcePlanRef: Schema.optional(Schema.Struct({ threadId: ThreadId, planId: PlanId })),
       attachments: Schema.Array(ChatAttachment),
     }),
   ),

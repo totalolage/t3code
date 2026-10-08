@@ -86,6 +86,8 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { resolveAttachmentPath, resolveAttachmentPathById } from "../../attachmentStore.ts";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
+import { resolveCodexSessionVerbosity } from "../../provider/CodexModelManifest.ts";
+import { BUNDLED_MODEL_MANIFEST } from "../../provider/ModelManifest.ts";
 import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import {
@@ -153,6 +155,7 @@ import {
   type ProviderAdapterV2Shape,
   type ProviderAdapterV2Event,
   type ProviderAdapterV2ForkThreadInput,
+  type ProviderAdapterV2MaintenanceInput,
   type ProviderAdapterV2RollbackThreadInput,
   type ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2McpApps,
@@ -662,10 +665,12 @@ const decodeTurnSandboxPolicy = Schema.decodeUnknownEffect(
 const decodeTurnReasoningEffort = Schema.decodeUnknownEffect(
   Schema.Union([CodexSchema.V2TurnStartParams__ReasoningEffort, Schema.Null]),
 );
+const decodeCodexTurnStartResponse = Schema.decodeUnknownEffect(CodexSchema.V2TurnStartResponse);
 
 const CodexTurnStartParamsWithCollaborationMode = CodexSchema.V2TurnStartParams.pipe(
   Schema.fieldsAssign({
     collaborationMode: Schema.optionalKey(CodexSchema.ClientRequest__CollaborationMode),
+    verbosity: Schema.optionalKey(CodexSchema.V2ConfigReadResponse__Verbosity),
     additionalContext: Schema.optionalKey(
       Schema.Record(Schema.String, CodexSchema.V2TurnStartParams__AdditionalContextEntry),
     ),
@@ -754,6 +759,11 @@ export function buildCodexTurnStartParams(input: {
       input.omitServiceTier === true
         ? undefined
         : getCodexServiceTierOptionValue(input.modelSelection);
+    const verbosity = resolveCodexSessionVerbosity(
+      BUNDLED_MODEL_MANIFEST,
+      input.modelSelection.model,
+      getModelSelectionStringOptionValue(input.modelSelection, "verbosity"),
+    );
     const developerInstructions =
       input.hasT3Mcp !== true
         ? undefined
@@ -810,6 +820,7 @@ export function buildCodexTurnStartParams(input: {
       ...(approvalPolicy === undefined ? {} : { approvalPolicy }),
       ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
       ...(effort === undefined ? {} : { effort }),
+      ...(verbosity === undefined ? {} : { verbosity }),
       ...(serviceTier === undefined ? {} : { serviceTier }),
       ...(collaborationMode === undefined ? {} : { collaborationMode }),
     });
@@ -1129,7 +1140,7 @@ interface ActiveCodexTurnContext {
     readonly failure: OrchestrationV2ProviderFailure;
   };
   readonly nativeStartReady?: Deferred.Deferred<void>;
-  readonly input: ProviderAdapterV2TurnInput;
+  readonly input: CodexRootTurnInput;
   readonly projectionAppThread: OrchestrationV2AppThread;
   readonly projectionThreadId: ThreadId;
   readonly projectionRunId: ProviderAdapterV2TurnInput["runId"] | null;
@@ -1152,6 +1163,8 @@ interface ActiveCodexTurnContext {
     { readonly ordinal: number; readonly startedAt: DateTime.Utc }
   >;
 }
+
+type CodexRootTurnInput = Omit<ProviderAdapterV2TurnInput, "message">;
 
 interface ActiveCodexProviderRetry {
   readonly nativeMessage: string;
@@ -1831,7 +1844,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             context.nativeTurnId,
           ).hasSubagents = true;
         };
-        const pendingRootTurns = yield* Ref.make(new Map<string, ProviderAdapterV2TurnInput>());
+        const pendingRootTurns = yield* Ref.make(new Map<string, CodexRootTurnInput>());
         const turnWaiters = yield* Ref.make(new Map<string, Deferred.Deferred<void, never>>());
         const subagentThreads = yield* Ref.make(new Map<string, CodexSubagentThreadContext>());
         const subagentModels = new Map<string, string>();
@@ -1958,7 +1971,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
         });
 
         const registerRootTurn = (input: {
-          readonly turnInput: ProviderAdapterV2TurnInput;
+          readonly turnInput: CodexRootTurnInput;
           readonly nativeTurnId: string;
           readonly startedAt: DateTime.Utc;
           readonly waitForNativeStart?: boolean;
@@ -6133,7 +6146,24 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               else next.delete(threadId);
               return next;
             });
-            const started = yield* client.request("turn/start", turnStartParams);
+            const started =
+              turnStartParams.verbosity === undefined
+                ? yield* client.request("turn/start", turnStartParams)
+                : yield* client.raw
+                    .request("turn/start", turnStartParams)
+                    .pipe(
+                      Effect.flatMap((response) =>
+                        decodeCodexTurnStartResponse(response).pipe(
+                          Effect.mapError((error) =>
+                            CodexErrors.CodexAppServerRequestError.invalidPayload(
+                              "turn/start",
+                              "decode-payload",
+                              error,
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
             yield* registerRootTurn({
               turnInput,
               nativeTurnId: started.turn.id,
@@ -6326,6 +6356,36 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             }).pipe(Effect.mapError(mcpAppsError("Codex MCP resource read failed."))),
         };
 
+        const startNativeCompaction = (
+          turnInput: ProviderAdapterV2TurnInput | ProviderAdapterV2MaintenanceInput,
+        ) =>
+          Effect.gen(function* () {
+            const threadId = yield* getNativeThreadId(turnInput.providerThread);
+            yield* Ref.update(pendingRootTurns, (current) =>
+              new Map(current).set(threadId, turnInput),
+            );
+            yield* client.request("thread/compact/start", { threadId }).pipe(
+              Effect.tapError(() =>
+                Ref.update(pendingRootTurns, (current) => {
+                  const next = new Map(current);
+                  next.delete(threadId);
+                  return next;
+                }),
+              ),
+            );
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterTurnStartError({
+                  driver: CODEX_PROVIDER,
+                  threadId: turnInput.threadId,
+                  providerThreadId: turnInput.providerThread.id,
+                  runId: turnInput.runId,
+                  cause,
+                }),
+            ),
+          );
+
         const runtime: ProviderAdapterV2SessionRuntime = {
           instanceId: adapterOptions.instanceId,
           driver: CODEX_PROVIDER,
@@ -6504,6 +6564,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                   }),
               ),
             ),
+          compactContext: startNativeCompaction,
           injectHistory: (input) =>
             Effect.gen(function* () {
               const threadId = yield* getNativeThreadId(input.providerThread);

@@ -19,6 +19,7 @@ import * as Schema from "effect/Schema";
 import { sweepStalePendingAttachments } from "./attachmentStore.ts";
 import { DEFAULT_SIGNAL_EXPORT, type SignalExport } from "@t3tools/shared/observability";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+import { resolveStandaloneStaticDir } from "./standaloneAssets.ts";
 
 export const DEFAULT_PORT = 3773;
 
@@ -252,6 +253,9 @@ export const layerTest = (cwd: string, baseDirOrPrefix: string | { readonly pref
   Layer.effect(ServerConfig, makeTest(cwd, baseDirOrPrefix));
 
 export const resolveStaticDir = Effect.fn(function* () {
+  const standaloneStaticDir = resolveStandaloneStaticDir();
+  if (standaloneStaticDir !== undefined) return standaloneStaticDir;
+
   const { join, resolve } = yield* Path.Path;
   const { exists } = yield* FileSystem.FileSystem;
   const bundledClient = resolve(join(import.meta.dirname, "client"));

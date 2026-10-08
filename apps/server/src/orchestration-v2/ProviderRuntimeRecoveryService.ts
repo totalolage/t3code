@@ -15,11 +15,13 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { isQueuedRunMarkedForUpdate } from "./ServiceUpdateQueuedRuns.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { restartContinuationRun } from "./RestartContinuation.ts";
 import {
@@ -185,6 +187,48 @@ export const make = Effect.gen(function* () {
   const eventSink = yield* EventSink.EventSinkV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const outbox = yield* EffectOutbox.EffectOutboxV2;
+  const sql = yield* SqlClient.SqlClient;
+  const canPreserveOwnedQueuedRun = Effect.fn(
+    "ProviderRuntimeRecoveryService.canPreserveOwnedQueuedRun",
+  )(function* (
+    projection: ProjectionStore.ProjectionRuntimeRecoveryState,
+    run: OrchestrationV2ThreadProjection["runs"][number],
+  ) {
+    if (run.activeAttemptId === null) return false;
+    const attempt = projection.attempts.find((candidate) => candidate.id === run.activeAttemptId);
+    if (
+      attempt === undefined ||
+      attempt.runId !== run.id ||
+      attempt.status !== "pending" ||
+      attempt.startedAt !== null ||
+      attempt.providerTurnId !== null ||
+      projection.providerTurns.some((turn) => turn.runAttemptId === attempt.id)
+    ) {
+      return false;
+    }
+    const updaterMarked = yield* isQueuedRunMarkedForUpdate(sql, run.id).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderRuntimeRecoveryError({
+            operation: "reconcile",
+            threadId: projection.thread.id,
+            cause,
+          }),
+      ),
+    );
+    if (!updaterMarked) return false;
+    const dispatchEvidence = yield* outbox.hasProviderStartDispatchEvidence(run.id).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderRuntimeRecoveryError({
+            operation: "reconcile",
+            threadId: projection.thread.id,
+            cause,
+          }),
+      ),
+    );
+    return !dispatchEvidence;
+  });
   const reconcileProjection = Effect.fn("ProviderRuntimeRecoveryService.reconcileProjection")(
     function* (
       projection: ProjectionStore.ProjectionRuntimeRecoveryState,
@@ -288,6 +332,7 @@ export const make = Effect.gen(function* () {
       // identities and order, but require explicit consent before draining them.
       for (const run of projection.runs) {
         if (run.status !== "queued" || run.queueHeld === true) continue;
+        if (yield* canPreserveOwnedQueuedRun(projection, run)) continue;
         events.push({
           id: yield* allocateEventId(),
           type: "run.updated",

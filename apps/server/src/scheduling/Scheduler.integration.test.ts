@@ -68,6 +68,7 @@ it.effect.each(["on time", "after restart"])(
         createdAt: now,
         updatedAt: now,
         archivedAt: null,
+        hiddenAt: null,
         settledOverride: null,
         settledAt: null,
         lastVisitedAt: null,

@@ -4,6 +4,7 @@ import {
   type ExecutionEnvironmentDescriptor,
 } from "@t3tools/contracts";
 import { RelayEnvironmentConnectScope } from "@t3tools/contracts/relay";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
 import {
   exchangeRemoteDpopAccessToken,
@@ -68,6 +69,7 @@ export class RemoteEnvironmentAuthorization extends Context.Service<
       readonly wsBaseUrl: string;
       readonly bearerToken: string;
       readonly connectionMethod: ClientConnectionMethod;
+      readonly queryParameters?: readonly RemoteQueryParameter[];
     }) => Effect.Effect<AuthorizedRemoteEnvironment, ConnectionAttemptError>;
     readonly authorizeDpop: (input: {
       readonly expectedEnvironmentId: EnvironmentId;
@@ -99,10 +101,12 @@ function mapDpopSocketError(error: RemoteEnvironmentAuthError | ConnectionAttemp
 const fetchDescriptor = Effect.fn("clientRuntime.connection.remote.fetchDescriptor")(function* (
   httpBaseUrl: string,
   connectionMethod: ClientConnectionMethod,
+  queryParameters?: readonly RemoteQueryParameter[],
 ) {
-  return yield* fetchRemoteEnvironmentDescriptor({ httpBaseUrl }).pipe(
-    Effect.mapError((error) => mapRemoteEnvironmentError(error, connectionMethod)),
-  );
+  return yield* fetchRemoteEnvironmentDescriptor({
+    httpBaseUrl,
+    ...(queryParameters === undefined ? {} : { queryParameters }),
+  }).pipe(Effect.mapError((error) => mapRemoteEnvironmentError(error, connectionMethod)));
 });
 
 export const make = Effect.gen(function* () {
@@ -135,6 +139,7 @@ export const make = Effect.gen(function* () {
         readonly httpBaseUrl: string;
         readonly descriptor: ExecutionEnvironmentDescriptor;
         readonly validatedAtEpochMs: number;
+        readonly queryParametersFingerprint: string;
       }
     >
   >(new Map());
@@ -149,17 +154,26 @@ export const make = Effect.gen(function* () {
       readonly expectedEnvironmentId: EnvironmentId;
       readonly httpBaseUrl: string;
       readonly connectionMethod: ClientConnectionMethod;
+      readonly queryParameters?: readonly RemoteQueryParameter[];
     }) {
       const now = yield* Clock.currentTimeMillis;
+      // This fingerprint is an internal cache identity, not a value to expose in telemetry.
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      const queryParametersFingerprint = JSON.stringify(
+        (input.queryParameters ?? []).map(({ key, value }) => [key, value]),
+      );
       const cachedDescriptor = (yield* Ref.get(bearerDescriptors)).get(input.expectedEnvironmentId);
       const canReuseDescriptor =
         cachedDescriptor?.httpBaseUrl === input.httpBaseUrl &&
+        cachedDescriptor.queryParametersFingerprint === queryParametersFingerprint &&
         cachedDescriptor.validatedAtEpochMs + BEARER_DESCRIPTOR_CACHE_TTL_MS > now;
       const descriptor = canReuseDescriptor
         ? cachedDescriptor.descriptor
-        : yield* fetchDescriptor(input.httpBaseUrl, input.connectionMethod).pipe(
-            Effect.provideService(HttpClient.HttpClient, httpClient),
-          );
+        : yield* fetchDescriptor(
+            input.httpBaseUrl,
+            input.connectionMethod,
+            input.queryParameters,
+          ).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
       if (descriptor.environmentId !== input.expectedEnvironmentId) {
         return yield* environmentMismatchError({
           expected: input.expectedEnvironmentId,
@@ -173,6 +187,7 @@ export const make = Effect.gen(function* () {
             httpBaseUrl: input.httpBaseUrl,
             descriptor,
             validatedAtEpochMs: now,
+            queryParametersFingerprint,
           });
           return next;
         });
@@ -190,6 +205,7 @@ export const make = Effect.gen(function* () {
       readonly wsBaseUrl: string;
       readonly bearerToken: string;
       readonly connectionMethod: ClientConnectionMethod;
+      readonly queryParameters?: readonly RemoteQueryParameter[];
     }) {
       const descriptor = yield* verifyDirectEndpoint(input);
       const socketUrl = yield* resolveRemoteWebSocketConnectionUrl({
@@ -198,6 +214,7 @@ export const make = Effect.gen(function* () {
         bearerToken: input.bearerToken,
         clientMetadata: presentation.metadata,
         connectionMethod: input.connectionMethod,
+        ...(input.queryParameters === undefined ? {} : { queryParameters: input.queryParameters }),
       }).pipe(
         Effect.mapError(mapRemoteEnvironmentError),
         Effect.provideService(HttpClient.HttpClient, httpClient),

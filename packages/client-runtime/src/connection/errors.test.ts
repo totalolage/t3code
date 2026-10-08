@@ -1,4 +1,8 @@
-import { EnvironmentAuthInvalidError } from "@t3tools/contracts";
+import {
+  EnvironmentAuthInvalidError,
+  EnvironmentConflictError,
+  EnvironmentThreadCompactionError,
+} from "@t3tools/contracts";
 import {
   RelayAuthInvalidError,
   RelayEnvironmentEndpointTimedOutError,
@@ -116,6 +120,22 @@ describe("mapRemoteDpopEnvironmentError", () => {
     expect(mapped.message).toBe(`The environment credential is invalid. ${DPOP_UNKNOWN_HINT}`);
   });
 
+  it("maps an orchestration worktree conflict to a configuration block", () => {
+    const error = new EnvironmentConflictError({
+      code: "conflict",
+      reason: "worktree_branch_exists",
+      message: "The requested branch already exists locally.",
+      traceId: "trace-conflict",
+    });
+
+    expect(mapRemoteEnvironmentError(error)).toMatchObject({
+      _tag: "ConnectionBlockedError",
+      reason: "configuration",
+      detail: error.message,
+      traceId: "trace-conflict",
+    });
+  });
+
   it("uses a neutral hint for a non-clock DPoP error from a new server", () => {
     const mapped = mapRemoteDpopEnvironmentError(
       new EnvironmentAuthInvalidError({
@@ -127,5 +147,35 @@ describe("mapRemoteDpopEnvironmentError", () => {
     );
 
     expect(mapped.message).toBe(`The environment credential is invalid. ${DPOP_RETRY_HINT}`);
+  });
+});
+
+describe("mapRemoteEnvironmentError compaction outcomes", () => {
+  it("preserves each typed reason as a safe connection message", () => {
+    const cases = [
+      ["active-thread", "The thread is active and cannot be compacted."],
+      ["unsupported-provider", "The selected provider does not support thread compaction."],
+      ["provider-rejected", "The provider rejected thread compaction."],
+      ["request-interrupted", "Thread compaction was interrupted."],
+      ["recovery-required", "Thread compaction requires recovery before it can continue."],
+    ] as const;
+
+    for (const [reason, message] of cases) {
+      const mapped = mapRemoteEnvironmentError(
+        new EnvironmentThreadCompactionError({
+          code: "thread_compaction_failed",
+          reason,
+          traceId: "trace-compaction",
+        }),
+      );
+
+      expect(mapped).toMatchObject({
+        _tag: "ConnectionTransientError",
+        reason: "remote-unavailable",
+        detail: message,
+        traceId: "trace-compaction",
+      });
+      expect(mapped.message).toBe(message);
+    }
   });
 });

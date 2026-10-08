@@ -282,6 +282,7 @@ layer("OrchestrationEventStore", (it) => {
               createdAt: occurredAt,
               updatedAt: occurredAt,
               archivedAt: null,
+              hiddenAt: null,
               settledOverride: null,
               settledAt: null,
               lastVisitedAt: null,

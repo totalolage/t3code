@@ -81,6 +81,29 @@ on the signing runner. The
 `pull_request_target` cleanup job in the publish workflow removes the download when the PR closes, or
 when the label is removed by hand before a build consumed it, and never checks out PR code.
 
+## f8y fork releases
+
+Run `.github/workflows/f8y-release.yml` on `main` in `totalolage/t3code`. The workflow also runs on pushes to that branch.
+Keep the existing `dev.f8y.t3code` desktop and Android identity so installations retain their data.
+
+Configure `F8Y_ANDROID_KEYSTORE_BASE64`, `F8Y_ANDROID_STORE_PASSWORD`, and
+`F8Y_ANDROID_KEY_PASSWORD` with the existing Android signing key. Keep the `t3code-f8y` alias.
+The workflow decodes the keystore into a temporary file and uses the shipped `build:apk:f8y` command.
+If a previous published APK exists, the verifier compares its signing certificate and version code.
+
+The workflow verifies the platform artifacts and checksum sidecars before publishing a prerelease.
+It then invokes the fork's AUR publication workflow. Linux desktop updates use the `f8y` channel in
+`totalolage/t3code`. macOS builds use ad-hoc signing and require manual installation.
+
+To build a standalone Linux CLI locally, first build the matching web client, then run:
+
+```sh
+bun apps/server/scripts/buildStandaloneBinary.ts --target bun-linux-x64-baseline --outfile /path/t3-<version>-linux-x64 --version <version>
+```
+
+For macOS, use `--target bun-darwin-arm64` and the matching output name. Verify that `--version`
+prints `t3 v<version>` before distributing the binary.
+
 ## Required release credentials
 
 Stable releases require these GitHub Actions secrets in addition to the platform and deployment
@@ -366,8 +389,8 @@ One-time Vercel dashboard setup:
 
 ## Server self-update release invariant
 
-Connected servers update to the client's exact version, not to an npm dist-tag. Every released
-desktop or hosted client version must therefore have a matching `t3@<version>` package available on
+For upstream stable and nightly releases, connected servers update to the client's exact version,
+not to an npm dist-tag. Every released desktop or hosted client version must therefore have a matching `t3@<version>` package available on
 npm before users can receive that client.
 
 The workflow enforces this ordering:
@@ -383,7 +406,10 @@ The workflow enforces this ordering:
 Preserve these dependencies when changing the release graph. Publishing a client first would leave
 the **Update server** action targeting a package version that does not exist yet.
 
-For a release smoke test, confirm `npm view t3@<version> version` returns the expected version, then
+The f8y workflow publishes standalone binaries to GitHub instead of npm. Scheduled fork service
+updates use the configured GitHub release and each binary's `.sha256` sidecar.
+
+For an upstream release smoke test, confirm `npm view t3@<version> version` returns the expected version, then
 connect the new client to a server on the previous version and verify that the update action
 reconnects to the matching server. When the release adds database migrations, verify that the
 remote update applies them and reconnects. A failed trial must restore the database snapshot and

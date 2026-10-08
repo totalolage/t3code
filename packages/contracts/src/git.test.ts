@@ -3,11 +3,13 @@ import * as Schema from "effect/Schema";
 
 import {
   VcsCreateWorktreeInput,
+  GitCommandError,
   GitPreparePullRequestThreadInput,
   GitPreparePullRequestThreadResult,
   GitRunStackedActionResult,
   GitRunStackedActionInput,
   GitResolvePullRequestResult,
+  isGitWorktreeCreateConflict,
 } from "./git.ts";
 
 const decodeCreateWorktreeInput = Schema.decodeUnknownSync(VcsCreateWorktreeInput);
@@ -20,6 +22,63 @@ const decodePreparePullRequestThreadResult = Schema.decodeUnknownSync(
 const decodeRunStackedActionInput = Schema.decodeUnknownSync(GitRunStackedActionInput);
 const decodeRunStackedActionResult = Schema.decodeUnknownSync(GitRunStackedActionResult);
 const decodeResolvePullRequestResult = Schema.decodeUnknownSync(GitResolvePullRequestResult);
+const encodeGitCommandError = Schema.encodeUnknownSync(GitCommandError);
+const decodeGitCommandError = Schema.decodeUnknownSync(GitCommandError);
+
+describe("GitCommandError", () => {
+  it("decodes legacy payloads and keeps their safe detail in the message", () => {
+    const error = decodeGitCommandError({
+      _tag: "GitCommandError",
+      operation: "create-worktree",
+      command: "git worktree add",
+      cwd: "/repo",
+      detail: "The requested branch already exists.",
+    });
+
+    expect(error._tag).toBe("GitCommandError");
+    expect(error.detail).toBe("The requested branch already exists.");
+    expect(error.worktreeReason).toBeUndefined();
+    expect(error.message).toBe(
+      "Git command failed in create-worktree (/repo): The requested branch already exists.",
+    );
+    expect(isGitWorktreeCreateConflict(error)).toBe(false);
+  });
+
+  it("round-trips reasons and classifies only worktree conflicts", () => {
+    const conflictReasons = new Set([
+      "branch_exists",
+      "path_exists",
+      "branch_in_use",
+      "registration_conflict",
+    ]);
+    const reasons = [
+      "branch_exists",
+      "path_exists",
+      "branch_in_use",
+      "registration_conflict",
+      "unknown",
+    ] as const;
+
+    for (const worktreeReason of reasons) {
+      const error = decodeGitCommandError(
+        encodeGitCommandError(
+          new GitCommandError({
+            operation: "create-worktree",
+            command: "git worktree add",
+            cwd: "/repo",
+            detail: "The requested worktree could not be created.",
+            worktreeReason,
+          }),
+        ),
+      );
+
+      expect(error.detail).toBe("The requested worktree could not be created.");
+      expect(error.worktreeReason).toBe(worktreeReason);
+      expect(error.message).toContain("The requested worktree could not be created.");
+      expect(isGitWorktreeCreateConflict(error)).toBe(conflictReasons.has(worktreeReason));
+    }
+  });
+});
 
 describe("VcsCreateWorktreeInput", () => {
   it("accepts omitted newRefName for existing-refName worktrees", () => {

@@ -95,6 +95,19 @@ export const ServerSelfUpdateCapability = Schema.Literals([
 ]);
 export type ServerSelfUpdateCapability = typeof ServerSelfUpdateCapability.Type;
 
+/** Version of the environment orchestration CLI capability, independent of the wire protocol. */
+export const ORCHESTRATION_CLI_API_VERSION = 1 as const;
+
+export const ExecutionEnvironmentOrchestrationCapabilities = Schema.Struct({
+  pendingInteractions: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  cliApiVersion: Schema.optionalKey(Schema.Int),
+  serverAuthoritativeCreate: Schema.optionalKey(Schema.Boolean),
+  watchResume: Schema.optionalKey(Schema.Boolean),
+  manualThreadCompaction: Schema.optionalKey(Schema.Boolean),
+});
+export type ExecutionEnvironmentOrchestrationCapabilities =
+  typeof ExecutionEnvironmentOrchestrationCapabilities.Type;
+
 export const ExecutionEnvironmentCapabilities = Schema.Struct({
   repositoryIdentity: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   connectionProbe: Schema.optionalKey(Schema.Boolean),
@@ -150,6 +163,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server understands thread.pin / thread.unpin commands. Same
       version-skew contract as threadSettlement. */
   threadPinning: Schema.optionalKey(Schema.Boolean),
+  /** Server understands thread.hide / thread.unhide commands. Same
+      version-skew contract as threadSettlement. */
+  threadHiding: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.pin.reorder (and orderKey on thread.pin).
       Same version-skew contract as threadSettlement. */
   threadPinReorder: Schema.optionalKey(Schema.Boolean),
@@ -212,6 +228,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       "server"`) and streams them over `/api/preview-stream`. Clients
       without a local browser runtime open server tabs here. */
   serverBrowser: Schema.optionalKey(Schema.Boolean),
+  /** Server has the complete scheduled service-update source, drain, runtime,
+      and shared manual/scheduled authority binding. */
+  scheduledServiceUpdates: Schema.optionalKey(Schema.Literal(1)),
+  /** Optional orchestration feature capabilities, absent on older servers. */
+  orchestration: Schema.optionalKey(ExecutionEnvironmentOrchestrationCapabilities),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 

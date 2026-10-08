@@ -2,7 +2,11 @@ import type {
   EnvironmentPresentation,
   PreparedConnection,
 } from "@t3tools/client-runtime/connection";
-import { PrimaryConnectionTarget } from "@t3tools/client-runtime/connection";
+import {
+  BearerConnectionProfile,
+  BearerConnectionTarget,
+  PrimaryConnectionTarget,
+} from "@t3tools/client-runtime/connection";
 import type { ServerConfig } from "@t3tools/contracts";
 import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
@@ -47,6 +51,32 @@ function prepared(
     socketUrl: `wss://${endpoint}.example.test/ws?token=redacted`,
     httpAuthorization: { _tag: "Bearer", token },
     target: target(environmentId, endpoint),
+  };
+}
+
+function bearerPresentation(
+  environmentId: EnvironmentId,
+  queryParameters: ReadonlyArray<{ readonly key: string; readonly value: string }>,
+): EnvironmentPresentation {
+  const connectionId = `bearer:${environmentId}`;
+  const label = `Environment ${environmentId}`;
+  return {
+    entry: {
+      target: new BearerConnectionTarget({ environmentId, label, connectionId }),
+      profile: Option.some(
+        new BearerConnectionProfile({
+          connectionId,
+          environmentId,
+          label,
+          httpBaseUrl: "https://stored.example.test",
+          wsBaseUrl: "wss://stored.example.test",
+          queryParameters,
+        }),
+      ),
+      enabled: true,
+    },
+    connection: { phase: "offline", error: null, traceId: null },
+    serverConfig: null,
   };
 }
 
@@ -147,6 +177,27 @@ describe("remote environment projections", () => {
     expect(harness.registry.get(savedAtom)).toBe(savedInitial);
     expect(harness.registry.get(runtimeAtom)).not.toBe(runtimeInitial);
     expect(harness.registry.get(runtimeAtom)?.serverConfig).toBe(config);
+  });
+
+  it("retains stored bearer query parameters without a prepared connection", () => {
+    const harness = makeHarness();
+    const queryParameters = [
+      { key: "  proxy  ", value: " first " },
+      { key: "proxy", value: "second" },
+      { key: "", value: "" },
+      { key: "empty", value: "" },
+    ];
+    harness.registry.set(
+      harness.presentationAtom(ENVIRONMENT_ID),
+      bearerPresentation(ENVIRONMENT_ID, queryParameters),
+    );
+
+    const saved = harness.registry.get(harness.projections.savedConnectionAtom(ENVIRONMENT_ID));
+
+    expect(saved).toMatchObject({
+      environmentId: ENVIRONMENT_ID,
+      queryParameters,
+    });
   });
 
   it("keeps missing environments null", () => {

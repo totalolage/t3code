@@ -1,9 +1,13 @@
-import * as NodeSqlite from "node:sqlite";
-
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
+
+import { assertSqliteDatabaseCompatible, SqliteCompatibilityError } from "./SqliteCompatibility.ts";
+import * as RuntimeSqliteClient from "./RuntimeSqliteClient.ts";
+
+const isSqliteCompatibilityError = Schema.is(SqliteCompatibilityError);
 
 export class V2DatabaseImportError extends Schema.TaggedError<V2DatabaseImportError>()(
   "V2DatabaseImportError",
@@ -25,19 +29,20 @@ export const initializeV2Database = Effect.fn("initializeV2Database")(function* 
   yield* Effect.gen(function* () {
     if (yield* fs.exists(destinationPath)) return;
     if (!(yield* fs.exists(sourcePath))) return;
+    yield* assertSqliteDatabaseCompatible(sourcePath);
     const temporaryDirectory = yield* fs.makeTempDirectoryScoped({
       directory,
       prefix: ".v2-import-",
     });
     const snapshotPath = path.join(temporaryDirectory, "snapshot.sqlite");
-    yield* Effect.tryPromise(async () => {
-      const database = new NodeSqlite.DatabaseSync(sourcePath, { readOnly: true });
-      try {
-        await NodeSqlite.backup(database, snapshotPath);
-      } finally {
-        database.close();
-      }
+    const sourceLayer = RuntimeSqliteClient.makeRuntimeSqliteLayer({
+      filename: sourcePath,
+      readonly: true,
     });
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`VACUUM INTO ${snapshotPath}`;
+    }).pipe(Effect.scoped, Effect.provide(sourceLayer));
     // Publish only a complete snapshot, without replacing an existing V2 database.
     yield* fs
       .link(snapshotPath, destinationPath)
@@ -48,6 +53,10 @@ export const initializeV2Database = Effect.fn("initializeV2Database")(function* 
       );
   }).pipe(
     Effect.scoped,
-    Effect.mapError((cause) => new V2DatabaseImportError({ sourcePath, destinationPath, cause })),
+    Effect.mapError((cause) =>
+      isSqliteCompatibilityError(cause)
+        ? cause
+        : new V2DatabaseImportError({ sourcePath, destinationPath, cause }),
+    ),
   );
 });

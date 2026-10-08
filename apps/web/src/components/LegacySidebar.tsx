@@ -70,6 +70,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
+import { isThreadHidden } from "@t3tools/client-runtime/state/thread-hidden";
 import { useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import {
   MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
@@ -89,6 +90,7 @@ import { isMacPlatform } from "../lib/utils";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import {
+  readEnvironmentSupportsHiding,
   readThreadShell,
   useProjects,
   useThreadShells,
@@ -189,6 +191,7 @@ import {
   archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
   deleteSelectedThreadEntries,
+  filterHiddenSidebarThreads,
   getSidebarThreadIdsToPrewarm,
   resolveAdjacentThreadId,
   isContextMenuPointerDown,
@@ -1167,6 +1170,7 @@ interface SidebarProjectItemProps {
   newThreadShortcutLabel: string | null;
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
+  hideThread: ReturnType<typeof useThreadActions>["hideThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
   threadJumpLabelByKey: ReadonlyMap<string, string>;
@@ -1189,6 +1193,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     newThreadShortcutLabel,
     handleNewThread,
     archiveThread,
+    hideThread,
     deleteThread,
     markThreadUnread,
     threadJumpLabelByKey,
@@ -1375,7 +1380,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       });
     };
     const visibleProjectThreads = sortThreads(
-      projectThreads.filter((thread) => thread.archivedAt === null),
+      projectThreads.filter((thread) => thread.archivedAt === null && !isThreadHidden(thread)),
       threadSortOrder,
     );
     const projectStatus = resolveProjectStatusIndicator(
@@ -2172,7 +2177,22 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     },
     [archiveThread],
   );
-
+  const attemptHideThread = useCallback(
+    async (threadRef: ScopedThreadRef) => {
+      const result = await hideThread(threadRef, { navigateAway: true });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to hide thread",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      }
+    },
+    [hideThread],
+  );
   const cancelRename = useCallback(() => {
     setRenamingThreadKey(null);
     renamingInputRef.current = null;
@@ -2324,6 +2344,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         thread.environmentId,
         AuthOrchestrationOperateScope,
       );
+      const supportsHiding = readEnvironmentSupportsHiding(thread.environmentId);
       const clicked = await api.contextMenu.show(
         [
           ...(thread.branch
@@ -2331,6 +2352,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             : []),
           { id: "rename", label: "Rename thread", disabled: !canOperateThread },
           { id: "mark-unread", label: "Mark unread" },
+          ...(supportsHiding
+            ? [
+                {
+                  id: "hide",
+                  label: "Hide from sidebar",
+                  icon: "eye-off",
+                },
+              ]
+            : []),
           { id: "copy-path", label: "Copy Path" },
           { id: "copy-thread-id", label: "Copy Thread ID" },
           { id: "project-settings", label: "Project settings" },
@@ -2387,6 +2417,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         markThreadUnread(threadRef);
         return;
       }
+      if (clicked === "hide") {
+        await attemptHideThread(threadRef);
+        return;
+      }
       if (clicked === "copy-path") {
         if (!threadWorkspacePath) {
           toastManager.add(
@@ -2434,6 +2468,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     },
     [
       appSettingsConfirmThreadDelete,
+      attemptHideThread,
       copyPathToClipboard,
       copyThreadIdToClipboard,
       deleteThread,
@@ -2984,6 +3019,7 @@ interface SidebarProjectsContentProps {
   handleProjectDragCancel: (event: DragCancelEvent) => void;
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
+  hideThread: ReturnType<typeof useThreadActions>["hideThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
   sortedProjects: readonly SidebarProjectSnapshot[];
@@ -3027,6 +3063,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     handleProjectDragCancel,
     handleNewThread,
     archiveThread,
+    hideThread,
     deleteThread,
     markThreadUnread,
     sortedProjects,
@@ -3168,6 +3205,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         newThreadShortcutLabel={newThreadShortcutLabel}
                         handleNewThread={handleNewThread}
                         archiveThread={archiveThread}
+                        hideThread={hideThread}
                         deleteThread={deleteThread}
                         markThreadUnread={markThreadUnread}
                         threadJumpLabelByKey={threadJumpLabelByKey}
@@ -3202,6 +3240,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 newThreadShortcutLabel={newThreadShortcutLabel}
                 handleNewThread={handleNewThread}
                 archiveThread={archiveThread}
+                hideThread={hideThread}
                 deleteThread={deleteThread}
                 markThreadUnread={markThreadUnread}
                 threadJumpLabelByKey={threadJumpLabelByKey}
@@ -3239,7 +3278,7 @@ export default function LegacySidebar() {
   const sidebarThreadPreviewCount = useClientSettings((s) => s.sidebarThreadPreviewCount);
   const updateSettings = useUpdateClientSettings();
   const handleNewThread = useNewThreadHandler();
-  const { archiveThread, deleteThread, markThreadUnread } = useThreadActions();
+  const { archiveThread, hideThread, deleteThread, markThreadUnread } = useThreadActions();
   const { isMobile, setOpenMobile } = useSidebar();
   const routeTarget = useParams({
     strict: false,
@@ -3388,7 +3427,7 @@ export default function LegacySidebar() {
   // are displayed together.
   const threadsByProjectKey = useMemo(() => {
     const next = new Map<string, SidebarThreadSummary[]>();
-    for (const thread of sidebarThreads) {
+    for (const thread of filterHiddenSidebarThreads(sidebarThreads)) {
       const physicalKey =
         projectPhysicalKeyByScopedRef.get(
           scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
@@ -3511,7 +3550,7 @@ export default function LegacySidebar() {
   }, []);
 
   const visibleThreads = useMemo(
-    () => sidebarThreads.filter((thread) => thread.archivedAt === null),
+    () => filterHiddenSidebarThreads(sidebarThreads).filter((thread) => thread.archivedAt === null),
     [sidebarThreads],
   );
   const sortedProjects = useMemo(() => {
@@ -3890,6 +3929,7 @@ export default function LegacySidebar() {
         handleProjectDragCancel={handleProjectDragCancel}
         handleNewThread={handleNewThread}
         archiveThread={archiveThread}
+        hideThread={hideThread}
         deleteThread={deleteThread}
         markThreadUnread={markThreadUnread}
         sortedProjects={sortedProjects}

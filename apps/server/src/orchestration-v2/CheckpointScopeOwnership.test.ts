@@ -74,6 +74,7 @@ it.effect("resolves the thread baseline after a second root run replaces scope o
         createdAt: now,
         updatedAt: now,
         archivedAt: null,
+        hiddenAt: null,
         settledOverride: null,
         settledAt: null,
         lastVisitedAt: null,

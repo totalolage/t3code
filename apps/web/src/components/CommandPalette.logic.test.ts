@@ -704,6 +704,30 @@ describe("buildThreadActionItems", () => {
 
     expect(items.map((item) => item.value)).toEqual(["thread:thread-active"]);
   });
+
+  it("filters hidden threads out of normal thread search items", () => {
+    const items = buildThreadActionItems({
+      threads: [
+        makeThread({
+          id: ThreadId.make("thread-visible"),
+          title: "Visible thread",
+          updatedAt: "2026-03-19T00:00:00.000Z",
+        }),
+        makeThread({
+          id: ThreadId.make("thread-hidden"),
+          title: "Hidden thread",
+          hiddenAt: "2026-03-20T00:00:00.000Z",
+          updatedAt: "2026-03-20T00:00:00.000Z",
+        }),
+      ],
+      projectTitleById: new Map([[PROJECT_ID, "Project"]]),
+      sortOrder: "updated_at",
+      icon: null,
+      runThread: async (_thread) => undefined,
+    });
+
+    expect(items.map((item) => item.value)).toEqual(["thread:thread-visible"]);
+  });
 });
 
 describe("buildBrowseGroups", () => {

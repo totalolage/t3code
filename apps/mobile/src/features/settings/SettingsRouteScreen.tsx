@@ -175,6 +175,11 @@ function SettingsIndexSections() {
         <SettingsRow icon="text.bubble" label="Thread behavior" target="SettingsThreads" />
         <SettingsRow icon="arrow.turn.left.up" label="Follow-ups" target="SettingsFollowUp" />
         <SettingsRow icon="archivebox" label="Archived Threads" target="SettingsArchive" />
+        <SettingsRow
+          icon={{ ios: "eye.slash", android: "visibility" }}
+          label="Hidden Threads"
+          target="SettingsHidden"
+        />
       </SettingsSection>
 
       <SettingsSection title="Server settings">

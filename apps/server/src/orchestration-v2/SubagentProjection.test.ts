@@ -65,6 +65,7 @@ function makeParentThread(): OrchestrationV2AppThread {
     createdAt: parentCreatedAt,
     updatedAt: snoozedAt,
     archivedAt: null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     lastVisitedAt: null,

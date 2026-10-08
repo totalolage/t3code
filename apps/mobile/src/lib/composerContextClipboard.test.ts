@@ -20,7 +20,13 @@ vi.mock("expo-file-system", () => ({
 }));
 vi.mock("../state/atom-registry", () => ({
   appAtomRegistry: {
-    get: () => ({ _tag: "Some", value: { httpBaseUrl: "https://source.example" } }),
+    get: () => ({
+      _tag: "Some",
+      value: {
+        httpBaseUrl: "https://source.example",
+        queryParameters: [{ key: "route", value: "source" }],
+      },
+    }),
   },
 }));
 vi.mock("../state/session", () => ({
@@ -98,6 +104,9 @@ describe("mobile context clipboard imports", () => {
     });
     expect(result?.context.records[1]).toMatchObject({ text: "Build failed" });
     expect(result?.text).toContain("/image/import-1)");
+    expect(mocks.download).toHaveBeenCalledWith(
+      expect.objectContaining({ url: "https://source.example/assets/source?route=source" }),
+    );
     expect(mocks.dispose).toHaveBeenCalledOnce();
   });
 

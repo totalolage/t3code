@@ -3,6 +3,31 @@ import { describe, expect, it } from "vite-plus/test";
 import { queuedRunsInDeliveryOrder } from "./QueuedRunOrder.ts";
 
 describe("queued run delivery order", () => {
+  it("does not surface message-free maintenance in the queued message order", () => {
+    const projection = {
+      messages: [{ id: "message:visible" }],
+      runs: [
+        {
+          id: "run:maintenance",
+          ordinal: 1,
+          queuePosition: 1,
+          status: "queued",
+          purpose: "compaction",
+          requestCommandId: "command:compact",
+        },
+        {
+          id: "run:visible",
+          ordinal: 2,
+          queuePosition: 2,
+          status: "queued",
+          userMessageId: "message:visible",
+        },
+      ],
+    } as never;
+
+    expect(queuedRunsInDeliveryOrder(projection).map((run) => run.id)).toEqual(["run:visible"]);
+  });
+
   it("keeps automatic completion delivery ahead of visible queued messages", () => {
     const projection = {
       messages: [

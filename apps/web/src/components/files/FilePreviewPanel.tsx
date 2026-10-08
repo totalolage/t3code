@@ -65,6 +65,7 @@ import { buildFileReviewComment } from "~/reviewCommentContext";
 import { assetEnvironment } from "~/state/assets";
 import { usePreviewAvailable } from "~/browser/previewRuntime";
 import { useEnvironmentHttpBaseUrl, usePrimaryEnvironmentId } from "~/state/environments";
+import { usePreparedConnection } from "~/state/session";
 import { previewEnvironment } from "~/state/preview";
 import { useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -1027,6 +1028,7 @@ export default function FilePreviewPanel({
   const remoteOpenState = useRemoteOpenState(environmentId);
   const environmentHttpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
   const previewAvailable = usePreviewAvailable(environmentId);
+  const preparedConnection = usePreparedConnection(environmentId);
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
   });
@@ -1173,13 +1175,20 @@ export default function FilePreviewPanel({
   };
 
   const handleOpenInBrowser = useCallback(() => {
-    if (!canReadFiles || !canOperatePreview || !absolutePath || !environmentHttpBaseUrl) return;
+    if (
+      !canReadFiles ||
+      !canOperatePreview ||
+      !absolutePath ||
+      !environmentHttpBaseUrl ||
+      preparedConnection._tag === "None"
+    )
+      return;
     void (async () => {
       const result = await openFileInPreview({
         threadRef,
         filePath: absolutePath,
         workspaceRoot: cwd,
-        httpBaseUrl: environmentHttpBaseUrl,
+        connection: preparedConnection.value,
         createAssetUrl,
         openPreview,
       });
@@ -1203,6 +1212,7 @@ export default function FilePreviewPanel({
     cwd,
     environmentHttpBaseUrl,
     openPreview,
+    preparedConnection,
     threadRef,
   ]);
 

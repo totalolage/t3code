@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off -- Installed before the SDK loads, outside an Effect runtime. stderr must match Node's default unhandled-rejection print.
 import * as NodeModule from "node:module";
+import { isBunStandaloneRuntime } from "@t3tools/shared/hostProcess";
 
 /**
  * The Cursor Agent SDK runs in this process and spawns a shell for tool
@@ -64,9 +65,13 @@ function installCursorShellSpawnGuard(): void {
 // Arm before the SDK loads. Its shell tools spawn from this process.
 installCursorShellSpawnGuard();
 
-// Cursor's Webpack chunks and local helpers must stay beside the SDK entry.
-// createRequire also loads that disk-backed package from a Node SEA executable.
+// Node SEA keeps the SDK and its Webpack chunks beside the executable. Bun's
+// standalone compiler must follow a package import so it embeds the SDK.
 const requireCursorSdk = NodeModule.createRequire(import.meta.url);
+const cursorSdk: typeof import("@cursor/sdk") = isBunStandaloneRuntime
+  ? await import("@cursor/sdk")
+  : (requireCursorSdk("@cursor/sdk") as typeof import("@cursor/sdk"));
+
 export const {
   Agent,
   AuthenticationError,
@@ -74,4 +79,4 @@ export const {
   Cursor,
   CursorSdkError,
   InMemoryCredentialStore,
-} = requireCursorSdk("@cursor/sdk") as typeof import("@cursor/sdk");
+} = cursorSdk;

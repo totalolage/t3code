@@ -5,6 +5,7 @@ import { assert, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import {
   type ApplicationStoredEvent,
+  AuthSessionId,
   CheckpointId,
   CheckpointRef,
   CommandId,
@@ -22,12 +23,16 @@ import {
   PullRequestOperationError,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
+  RemoteInteractionRequestId,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as FileSystem from "effect/FileSystem";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -74,6 +79,7 @@ import { shellStreamItemFromThreadShell } from "./ShellStream.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as PendingInteractionService from "./PendingInteractionService.ts";
 
 const layerPlatformTest = Layer.merge(
   NodeServices.layer,
@@ -282,6 +288,8 @@ const layerTest = Layer.mergeAll(
   Layer.provide(layerPlatformTest),
 );
 
+const TestLayer = layerTest;
+
 const layerLegacyImportTest = RuntimeLayer.layer.pipe(
   Layer.provide(McpSessionRegistryTestkit.layer),
   Layer.provideMerge(SqlitePersistence.layerMemory),
@@ -476,7 +484,77 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
   Layer.provide(layerPlatformTest),
 );
 
-it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
+it.layer(TestLayer)("OrchestrationV2LayerLive", (it) => {
+  it.effect("creates a native compaction run without a conversation message", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("runtime-layer-native-compaction");
+      const commandId = CommandId.make("runtime-layer-native-compaction-command");
+      const projectId = ProjectId.make("runtime-layer-native-compaction-project");
+      const now = yield* DateTime.now;
+      yield* seedProject({
+        projectId,
+        title: "Native compaction",
+        workspaceRoot: process.cwd(),
+        defaultModelSelection: modelSelection,
+        createdAt: DateTime.formatIso(now),
+      });
+
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-native-compaction-create"),
+        threadId,
+        projectId,
+        title: "Native compaction",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+
+      const accepted = yield* orchestrator.dispatch({
+        type: "thread.compact",
+        commandId,
+        threadId,
+      });
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      const run = projection.runs.find((candidate) => candidate.purpose === "compaction");
+
+      if (run === undefined || run.purpose !== "compaction") {
+        throw new Error("Expected a native compaction run.");
+      }
+      assert.equal(run.requestCommandId, commandId);
+      assert.isFalse("userMessageId" in run);
+      assert.isEmpty(projection.messages);
+      assert.isFalse(
+        projection.turnItems.some((item) => item.type === "user_message" && item.runId === run.id),
+      );
+      assert.isTrue(accepted.storedEvents.some((stored) => stored.event.type === "run.created"));
+
+      const steerError = yield* orchestrator
+        .dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("runtime-layer-native-compaction-steer"),
+          threadId,
+          messageId: MessageId.make("runtime-layer-native-compaction-steer"),
+          text: "Steer the active turn.",
+          attachments: [],
+          dispatchMode: { type: "steer_active", targetRunId: run.id },
+        })
+        .pipe(Effect.flip);
+      assert.equal(
+        steerError.cause,
+        "Wait for context compaction to finish before steering the thread.",
+      );
+      assert.isEmpty((yield* orchestrator.getThreadProjection(threadId)).messages);
+    }),
+  );
+
   it.effect("emits model updates separately from provider switches", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -1100,7 +1178,14 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
               updatedAt: now,
               requestId,
               responseMode: "message",
-              questions: [{ id: "color", header: "Color", question: "Which color?", options: [] }],
+              questions: [
+                {
+                  id: "color",
+                  header: "Color",
+                  question: "Which color?",
+                  options: [{ label: "Blue", description: "Choose blue.", value: "blue-private" }],
+                },
+              ],
             },
           },
         ],
@@ -1119,19 +1204,25 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       assert.equal(unanswered.runtimeRequests[0]?.status, "pending");
       assert.deepEqual(unanswered.messages, []);
 
-      const command = {
-        type: "runtime-request.respond" as const,
-        commandId: CommandId.make("runtime-async-question-answer"),
+      const pending = yield* PendingInteractionService.PendingInteractionService;
+      const responseInput = {
+        authSessionId: AuthSessionId.make("runtime-async-question-auth"),
         threadId,
-        requestId,
-        answers: { color: "  Blue  " },
+        requestId: RemoteInteractionRequestId.make(requestId),
+        idempotencyKey: "runtime-async-question-key",
+        action: "answer" as const,
+        answers: [{ questionId: "color", values: ["Blue"] }],
       };
-      const accepted = yield* orchestrator.dispatch(command);
-      const repeated = yield* orchestrator.dispatch(command);
-      assert.equal(repeated.sequence, accepted.sequence);
+      const accepted = yield* pending.respond(responseInput);
+      assert.isFalse(accepted.replayed);
+      const beforeReplay = yield* orchestrator.getThreadEventSequence(threadId);
+      const replayed = yield* pending.respond(responseInput);
+      assert.isTrue(replayed.replayed);
+      assert.equal(yield* orchestrator.getThreadEventSequence(threadId), beforeReplay);
+
       const answered = yield* orchestrator.getThreadProjection(threadId);
       assert.equal(answered.runtimeRequests[0]?.status, "resolved");
-      assert.deepEqual(answered.runtimeRequests[0]?.answers, command.answers);
+      assert.deepEqual(answered.runtimeRequests[0]?.answers, { color: "blue-private" });
       assert.equal(answered.nodes.find((node) => node.id === nodeId)?.status, "completed");
       assert.equal(answered.turnItems.find((item) => item.id === itemId)?.status, "completed");
       const answeredItem = answered.turnItems.find((item) => item.id === itemId);
@@ -1139,23 +1230,16 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       if (answeredItem?.type === "user_input_request") {
         assert.deepEqual(answeredItem.questionAnswer, {
           requestId,
-          answers: command.answers,
+          answers: { color: "blue-private" },
           attachmentsByQuestionId: {},
           questionTextById: { color: "Which color?" },
         });
       }
       assert.equal(answered.messages.length, 1);
-      assert.equal(answered.messages[0]?.text, "Which color?\nBlue");
+      assert.equal(answered.messages[0]?.text, "Which color?\nblue-private");
       assert.equal(answered.messages[0]?.role, "user");
       assert.equal(answered.runs.length, 1);
 
-      const duplicate = yield* orchestrator
-        .dispatch({
-          ...command,
-          commandId: CommandId.make("runtime-async-question-duplicate"),
-        })
-        .pipe(Effect.result);
-      assert.equal(duplicate._tag, "Failure");
       assert.equal((yield* orchestrator.getThreadProjection(threadId)).messages.length, 1);
     }),
   );
@@ -1960,6 +2044,384 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.isNotNull(projection.thread.archivedAt);
       assert.isNotNull(projection.thread.deletedAt);
     }),
+  );
+
+  it.effect("hides and unhides without changing active V2 work or thread activity", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-09-07T00:00:00.000Z"));
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-hidden-active-thread");
+      const projectId = ProjectId.make("runtime-layer-hidden-active-project");
+      yield* seedProject({
+        projectId,
+        title: "Hidden thread project",
+        workspaceRoot: "/workspace/hidden-thread",
+        defaultModelSelection: null,
+        createdAt: "2026-09-07T00:00:00.000Z",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-hidden-create"),
+        threadId,
+        projectId,
+        title: "Hidden thread",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+
+      yield* orchestrator.dispatch({
+        type: "thread.active.reorder",
+        commandId: CommandId.make("runtime-layer-hidden-active-order"),
+        threadId,
+        orderKey: "hidden-active-order",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.pin",
+        commandId: CommandId.make("runtime-layer-hidden-pin"),
+        threadId,
+        orderKey: "hidden-pin-order",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("runtime-layer-hidden-snooze"),
+        threadId,
+        snoozedUntil: "2099-09-07T00:00:00.000Z",
+      });
+
+      const runId = RunId.make("runtime-layer-hidden-active-run");
+      const messageId = MessageId.make("runtime-layer-hidden-history-message");
+      const providerSessionId = ProviderSessionId.make("runtime-layer-hidden-session");
+      const providerThreadId = ProviderThreadId.make("runtime-layer-hidden-provider-thread");
+      const now = yield* DateTime.now;
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("runtime-layer-hidden-active-run-event"),
+            type: "run.created",
+            threadId,
+            runId,
+            providerInstanceId: modelSelection.instanceId,
+            occurredAt: now,
+            payload: {
+              id: runId,
+              threadId,
+              ordinal: 1,
+              providerInstanceId: modelSelection.instanceId,
+              modelSelection,
+              providerThreadId,
+              userMessageId: messageId,
+              rootNodeId: null,
+              activeAttemptId: null,
+              status: "running",
+              requestedAt: now,
+              startedAt: now,
+              completedAt: null,
+              checkpointId: null,
+              contextHandoffId: null,
+            },
+          },
+          {
+            id: EventId.make("runtime-layer-hidden-session-attached"),
+            type: "provider-session.attached",
+            threadId,
+            driver,
+            providerInstanceId: modelSelection.instanceId,
+            occurredAt: now,
+            payload: {
+              id: providerSessionId,
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              status: "running",
+              cwd: "/workspace/hidden-thread",
+              model: modelSelection.model,
+              capabilities: CodexProviderCapabilitiesV2,
+              createdAt: now,
+              updatedAt: now,
+              lastError: null,
+            },
+          },
+          {
+            id: EventId.make("runtime-layer-hidden-provider-thread-event"),
+            type: "provider-thread.updated",
+            threadId,
+            driver,
+            providerInstanceId: modelSelection.instanceId,
+            occurredAt: now,
+            payload: {
+              id: providerThreadId,
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              providerSessionId,
+              appThreadId: threadId,
+              ownerNodeId: null,
+              nativeThreadRef: {
+                driver,
+                nativeId: "native-runtime-layer-hidden-active-thread",
+                strength: "strong",
+              },
+              nativeConversationHeadRef: null,
+              status: "active",
+              firstRunOrdinal: 1,
+              lastRunOrdinal: 1,
+              handoffIds: [],
+              forkedFrom: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+          {
+            id: EventId.make("runtime-layer-hidden-history-message-event"),
+            type: "message.updated",
+            threadId,
+            runId,
+            occurredAt: now,
+            payload: {
+              createdBy: "user",
+              creationSource: "web",
+              id: messageId,
+              threadId,
+              runId,
+              nodeId: null,
+              role: "user",
+              text: "Keep this active conversation intact.",
+              attachments: [],
+              streaming: false,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+
+      const beforeHide = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(beforeHide.thread.hiddenAt, null);
+      assert.isNotNull(beforeHide.thread.pinnedAt);
+      assert.equal(beforeHide.thread.pinOrderKey, "hidden-pin-order");
+      assert.equal(beforeHide.thread.activeOrderKey, "hidden-active-order");
+      assert.isNotNull(beforeHide.thread.snoozedUntil);
+      assert.isNotNull(beforeHide.thread.snoozedAt);
+      assert.equal(beforeHide.runs[0]?.status, "running");
+      assert.equal(beforeHide.providerSessions[0]?.status, "running");
+      assert.equal(beforeHide.messages[0]?.id, messageId);
+
+      const firstHide = yield* orchestrator.dispatch({
+        type: "thread.hide",
+        commandId: CommandId.make("runtime-layer-hidden-first-hide"),
+        threadId,
+      });
+      assert.lengthOf(firstHide.storedEvents, 1);
+      const hiddenEvent = firstHide.storedEvents[0]?.event;
+      assert.equal(hiddenEvent?.type, "thread.hidden");
+      if (hiddenEvent?.type !== "thread.hidden") return;
+      const hiddenAt = hiddenEvent.payload.hiddenAt;
+      assert.isNotNull(hiddenAt);
+      if (hiddenAt === null) return;
+      assert.deepEqual((yield* orchestrator.getThreadProjection(threadId)).thread, {
+        ...beforeHide.thread,
+        hiddenAt,
+      });
+      assert.equal(
+        DateTime.toEpochMillis(hiddenEvent.payload.updatedAt),
+        DateTime.toEpochMillis(beforeHide.thread.updatedAt),
+      );
+      assert.deepEqual(
+        firstHide.storedEvents.map((stored) => stored.event.type),
+        ["thread.hidden"],
+      );
+
+      yield* TestClock.adjust("1 second");
+      const repeatedHide = yield* orchestrator.dispatch({
+        type: "thread.hide",
+        commandId: CommandId.make("runtime-layer-hidden-repeat-hide"),
+        threadId,
+      });
+      const repeatedHideEvent = repeatedHide.storedEvents[0]?.event;
+      assert.equal(repeatedHideEvent?.type, "thread.hidden");
+      if (repeatedHideEvent?.type !== "thread.hidden") return;
+      const repeatedHiddenAt = repeatedHideEvent.payload.hiddenAt;
+      assert.isNotNull(repeatedHiddenAt);
+      if (repeatedHiddenAt === null) return;
+      assert.equal(DateTime.toEpochMillis(repeatedHiddenAt), DateTime.toEpochMillis(hiddenAt));
+      assert.notEqual(
+        DateTime.toEpochMillis(repeatedHideEvent.occurredAt),
+        DateTime.toEpochMillis(hiddenAt),
+      );
+
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-hidden-turn-start"),
+        threadId,
+        messageId: MessageId.make("runtime-layer-hidden-next-message"),
+        text: "Continue while hidden.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "queue_after_active" },
+      });
+      const stillHidden = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(stillHidden.thread.hiddenAt, hiddenEvent.payload.hiddenAt);
+      assert.equal(stillHidden.runs.find((run) => run.id === runId)?.status, "running");
+      assert.equal(
+        stillHidden.providerSessions.find((session) => session.id === providerSessionId)?.status,
+        "running",
+      );
+
+      const beforeUnhide = yield* orchestrator.getThreadProjection(threadId);
+      yield* TestClock.adjust("1 second");
+      const firstUnhide = yield* orchestrator.dispatch({
+        type: "thread.unhide",
+        commandId: CommandId.make("runtime-layer-hidden-first-unhide"),
+        threadId,
+      });
+      const unhiddenEvent = firstUnhide.storedEvents[0]?.event;
+      assert.equal(unhiddenEvent?.type, "thread.unhidden");
+      if (unhiddenEvent?.type !== "thread.unhidden") return;
+      assert.equal(unhiddenEvent.payload.hiddenAt, null);
+      assert.deepEqual((yield* orchestrator.getThreadProjection(threadId)).thread, {
+        ...beforeUnhide.thread,
+        hiddenAt: null,
+      });
+
+      yield* TestClock.adjust("1 second");
+      const repeatedUnhide = yield* orchestrator.dispatch({
+        type: "thread.unhide",
+        commandId: CommandId.make("runtime-layer-hidden-repeat-unhide"),
+        threadId,
+      });
+      assert.equal(repeatedUnhide.storedEvents[0]?.event.type, "thread.unhidden");
+      const afterUnhide = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(afterUnhide.thread.hiddenAt, null);
+      assert.deepEqual(afterUnhide.runs, beforeUnhide.runs);
+      assert.deepEqual(afterUnhide.providerSessions, beforeUnhide.providerSessions);
+      assert.deepEqual(afterUnhide.messages, beforeUnhide.messages);
+    }),
+  );
+
+  it.effect(
+    "keeps hidden threads in their archive partition and rejects missing or deleted threads",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const threadId = ThreadId.make("runtime-layer-hidden-archived-thread");
+        const projectId = ProjectId.make("runtime-layer-hidden-archived-project");
+        yield* seedProject({
+          projectId,
+          title: "Hidden archive project",
+          workspaceRoot: "/workspace/hidden-archive",
+          defaultModelSelection: null,
+          createdAt: "2026-09-07T00:00:00.000Z",
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("runtime-layer-hidden-archived-create"),
+          threadId,
+          projectId,
+          title: "Archived hidden thread",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("runtime-layer-hidden-archived-archive"),
+          threadId,
+        });
+
+        const archivedBeforeHide = yield* orchestrator.getThreadProjection(threadId);
+        const hidden = yield* orchestrator.dispatch({
+          type: "thread.hide",
+          commandId: CommandId.make("runtime-layer-hidden-archived-hide"),
+          threadId,
+        });
+        const hiddenEvent = hidden.storedEvents[0]?.event;
+        assert.equal(hiddenEvent?.type, "thread.hidden");
+        if (hiddenEvent?.type !== "thread.hidden") return;
+        const hiddenAt = hiddenEvent.payload.hiddenAt;
+        assert.isNotNull(hiddenAt);
+        if (hiddenAt === null) return;
+        const hiddenProjection = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(
+          DateTime.toEpochMillis(hiddenProjection.thread.archivedAt!),
+          DateTime.toEpochMillis(archivedBeforeHide.thread.archivedAt!),
+        );
+        assert.equal(
+          DateTime.toEpochMillis(hiddenProjection.thread.updatedAt),
+          DateTime.toEpochMillis(archivedBeforeHide.thread.updatedAt),
+        );
+        const shell = yield* orchestrator.getShellSnapshot();
+        assert.notInclude(
+          shell.threads.map((thread) => thread.id),
+          threadId,
+        );
+        assert.include(
+          shell.archivedThreads.map((thread) => thread.id),
+          threadId,
+        );
+        assert.equal(
+          DateTime.toEpochMillis(
+            shell.archivedThreads.find((thread) => thread.id === threadId)!.hiddenAt!,
+          ),
+          DateTime.toEpochMillis(hiddenAt),
+        );
+
+        yield* orchestrator.dispatch({
+          type: "thread.unhide",
+          commandId: CommandId.make("runtime-layer-hidden-archived-unhide"),
+          threadId,
+        });
+        const archivedAfterUnhide = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(
+          DateTime.toEpochMillis(archivedAfterUnhide.thread.archivedAt!),
+          DateTime.toEpochMillis(archivedBeforeHide.thread.archivedAt!),
+        );
+        assert.equal(archivedAfterUnhide.thread.hiddenAt, null);
+        const afterUnhideShell = yield* orchestrator.getShellSnapshot();
+        assert.notInclude(
+          afterUnhideShell.threads.map((thread) => thread.id),
+          threadId,
+        );
+        assert.include(
+          afterUnhideShell.archivedThreads.map((thread) => thread.id),
+          threadId,
+        );
+
+        for (const type of ["thread.hide", "thread.unhide"] as const) {
+          const missing = yield* orchestrator
+            .dispatch({
+              type,
+              commandId: CommandId.make(`runtime-layer-hidden-missing-${type}`),
+              threadId: ThreadId.make("runtime-layer-hidden-missing"),
+            })
+            .pipe(Effect.flip);
+          assert.isNotNull(missing);
+        }
+        yield* orchestrator.dispatch({
+          type: "thread.delete",
+          commandId: CommandId.make("runtime-layer-hidden-archived-delete"),
+          threadId,
+        });
+        for (const type of ["thread.hide", "thread.unhide"] as const) {
+          const deleted = yield* orchestrator
+            .dispatch({
+              type,
+              commandId: CommandId.make(`runtime-layer-hidden-deleted-${type}`),
+              threadId,
+            })
+            .pipe(Effect.flip);
+          assert.isNotNull(deleted);
+        }
+      }),
   );
 
   it.effect("persists linked pull requests through projection rebuilds and unlinking", () =>

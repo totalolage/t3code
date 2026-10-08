@@ -8,7 +8,11 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 
 import {
   increment,
@@ -27,6 +31,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ServiceUpdateAdmission from "./ServiceUpdateAdmission.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 
 export class OrchestrationEffectExecutionError extends Schema.TaggedError<OrchestrationEffectExecutionError>()(
@@ -510,6 +515,20 @@ export interface OrchestrationEffectWorkerV2Shape {
     OrchestrationEffectWorkerError
   >;
   readonly drain: (maxEffects?: number) => Effect.Effect<number, OrchestrationEffectWorkerError>;
+  readonly observeActive: Effect.Effect<EffectWorkerObservation, never, Scope.Scope>;
+}
+
+export interface EffectWorkerActivity {
+  readonly id: number;
+  readonly workerId: string;
+  readonly effectId: string | null;
+  readonly effectType: string | null;
+  readonly threadId: EffectOutbox.OrchestrationEffectV2["threadId"] | null;
+}
+
+export interface EffectWorkerObservation {
+  readonly active: ReadonlyArray<EffectWorkerActivity>;
+  readonly changes: Stream.Stream<void>;
 }
 
 export class OrchestrationEffectWorkerV2 extends Context.Service<
@@ -528,16 +547,73 @@ export const layerWithOptions = (
 ): Layer.Layer<
   OrchestrationEffectWorkerV2,
   never,
-  EffectOutbox.EffectOutboxV2 | OrchestrationEffectExecutorV2
+  | EffectOutbox.EffectOutboxV2
+  | OrchestrationEffectExecutorV2
+  | ServiceUpdateAdmission.ServiceUpdateAdmission
 > =>
   Layer.effect(
     OrchestrationEffectWorkerV2,
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       const executor = yield* OrchestrationEffectExecutorV2;
+      const serviceUpdateAdmission = yield* ServiceUpdateAdmission.ServiceUpdateAdmission;
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
       const leaseDurationMs = Math.max(1, options.leaseDurationMs ?? 30_000);
       const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
+      const activeWorkers = yield* Ref.make<{
+        readonly nextId: number;
+        readonly active: ReadonlyMap<number, EffectWorkerActivity>;
+      }>({ nextId: 1, active: new Map() });
+      const activeWorkerChanges = yield* PubSub.unbounded<void>();
+      const publishActiveChange = PubSub.publish(activeWorkerChanges, undefined);
+      const registerWorker = Effect.uninterruptible(
+        Ref.modify(activeWorkers, (state) => {
+          const activity: EffectWorkerActivity = {
+            id: state.nextId,
+            workerId,
+            effectId: null,
+            effectType: null,
+            threadId: null,
+          };
+          const active = new Map(state.active);
+          active.set(activity.id, activity);
+          return [activity, { nextId: state.nextId + 1, active }] as const;
+        }).pipe(Effect.tap(() => publishActiveChange)),
+      );
+      const updateWorker = (id: number, effect: EffectOutbox.OrchestrationEffectV2) =>
+        Effect.uninterruptible(
+          Ref.update(activeWorkers, (state) => {
+            const current = state.active.get(id);
+            if (current === undefined) return state;
+            const active = new Map(state.active);
+            active.set(id, {
+              ...current,
+              effectId: effect.id,
+              effectType: effect.request.type,
+              threadId: effect.threadId,
+            });
+            return { ...state, active };
+          }).pipe(Effect.andThen(publishActiveChange)),
+        );
+      const finishWorker = (id: number) =>
+        Effect.uninterruptible(
+          Ref.update(activeWorkers, (state) => {
+            if (!state.active.has(id)) return state;
+            const active = new Map(state.active);
+            active.delete(id);
+            return { ...state, active };
+          }).pipe(Effect.andThen(publishActiveChange)),
+        );
+      const observeActive: OrchestrationEffectWorkerV2Shape["observeActive"] = Effect.gen(
+        function* () {
+          const changes = yield* PubSub.subscribe(activeWorkerChanges);
+          const state = yield* Ref.get(activeWorkers);
+          return {
+            active: [...state.active.values()],
+            changes: Stream.fromEffectRepeat(PubSub.take(changes)),
+          };
+        },
+      );
       const wasCancelled = (effectId: string) =>
         outbox.get(effectId).pipe(
           Effect.map(
@@ -628,7 +704,7 @@ export const layerWithOptions = (
           ? requeueClaim(effect, cause)
           : terminalizeClaim(effect, cause);
 
-      const runOnce = (excludeRestartContinuations = false) =>
+      const runOnceRegistered = (excludeRestartContinuations: boolean, activityId: number) =>
         Effect.gen(function* () {
           const claimExit = yield* Effect.exit(
             outbox.claimNext({ workerId, leaseDurationMs, excludeRestartContinuations }),
@@ -646,6 +722,7 @@ export const layerWithOptions = (
             return false;
           }
           const effect = claimed.value;
+          yield* updateWorker(activityId, effect);
           // Arm the process-local cancellation signal before re-reading durable
           // state. A cancellation that commits after the row read has begun can
           // then still win the execution race instead of falling into the gap
@@ -746,6 +823,43 @@ export const layerWithOptions = (
           ),
         );
 
+      const runOnce = (excludeRestartContinuations = false) =>
+        Effect.uninterruptibleMask((restore) => {
+          let registeredActivity: EffectWorkerActivity | undefined;
+          const operation = serviceUpdateAdmission
+            .withPrivateAdmission((sealed) =>
+              sealed
+                ? Effect.succeed(Option.none<EffectWorkerActivity>())
+                : registerWorker.pipe(
+                    Effect.tap((activity) =>
+                      Effect.sync(() => {
+                        registeredActivity = activity;
+                      }),
+                    ),
+                    Effect.map(Option.some),
+                  ),
+            )
+            .pipe(
+              Effect.flatMap(
+                Option.match({
+                  onNone: () => Effect.succeed(false),
+                  onSome: (activity) => runOnceRegistered(excludeRestartContinuations, activity.id),
+                }),
+              ),
+            );
+          return restore(
+            operation.pipe(
+              Effect.ensuring(
+                Effect.suspend(() =>
+                  registeredActivity === undefined
+                    ? Effect.void
+                    : finishWorker(registeredActivity.id),
+                ),
+              ),
+            ),
+          );
+        });
+
       return OrchestrationEffectWorkerV2.of({
         awaitWork: outbox.awaitAvailable,
         runOnce: runOnce(),
@@ -767,6 +881,7 @@ export const layerWithOptions = (
             }
             return completed;
           }),
+        observeActive,
       });
     }),
   );

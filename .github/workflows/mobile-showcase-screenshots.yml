@@ -45,7 +45,7 @@ jobs:
   ios:
     name: iPhone 6.9, iPhone 6.5, and iPad 13
     if: inputs.platform == 'all' || inputs.platform == 'ios'
-    runs-on: blacksmith-12vcpu-macos-26
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-12vcpu-macos-26' || 'macos-15' }}
     # Capturing every palette multiplies the device matrix by six, and only the
     # one native build is shared between them.
     timeout-minutes: ${{ inputs.theme == 'all' && 300 || 60 }}
@@ -57,6 +57,14 @@ jobs:
             /*
             !/.repos/
           sparse-checkout-cone-mode: false
+
+      # The showcase native UI requires the iOS 26 SDK.
+      - name: Select fork iOS toolchain
+        if: ${{ github.repository != 'pingdotgg/t3code' }}
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+          test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = "26.2"
+          xcrun simctl list runtimes --json | jq -e '.runtimes | any(.isAvailable and .identifier == "com.apple.CoreSimulator.SimRuntime.iOS-26-2")'
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
@@ -105,7 +113,7 @@ jobs:
   android:
     name: Android phone, 7-inch tablet, and 10-inch tablet
     if: inputs.platform == 'all' || inputs.platform == 'android'
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-16vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     # Capturing every palette multiplies the device matrix by six, and only the
     # one native build is shared between them.
     timeout-minutes: ${{ inputs.theme == 'all' && 300 || 60 }}

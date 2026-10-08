@@ -100,6 +100,32 @@
     "antigravity": ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"]
   },
   "providers": {
+    "codex": {
+      "profiles": {
+        "verbosity-supported-low": {
+          "adapter": {
+            "codex": {
+              "support_verbosity": true,
+              "default_verbosity": "low"
+            }
+          }
+        }
+      },
+      "models": [
+        {
+          "slug": "gpt-5.6-sol",
+          "name": "GPT-5.6-Sol",
+          "status": "current",
+          "profile": "verbosity-supported-low"
+        },
+        {
+          "slug": "gpt-5.6-terra",
+          "name": "GPT-5.6-Terra",
+          "status": "current",
+          "profile": "verbosity-supported-low"
+        }
+      ]
+    },
     "claudeAgent": {
       "defaults": {
         "chat": "claude-fable-5-1"

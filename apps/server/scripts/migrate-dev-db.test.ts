@@ -6,6 +6,9 @@ import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { runMigrations } from "../src/persistence/Migrations.ts";
+import Migration057ScheduledTaskWebhooks from "../src/persistence/Migrations/057_ScheduledTaskWebhooks.ts";
+import Migration058WebhookRelayDeliveries from "../src/persistence/Migrations/058_WebhookRelayDeliveries.ts";
+import Migration059McpAppModelContext from "../src/persistence/Migrations/059_McpAppModelContext.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrateDevDb } from "./migrate-dev-db.ts";
 
@@ -18,6 +21,7 @@ const withDatabase = <A, E>(
  * `stopped-thread` and its fork qualify for the clone. */
 const createFixtureSource = Effect.fn("createMigrateDevDbFixtureSource")(function* (
   baseDir: string,
+  migrationLimit?: number,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -28,7 +32,7 @@ const createFixtureSource = Effect.fn("createMigrateDevDbFixtureSource")(functio
     databasePath,
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations();
+      yield* runMigrations({ toMigrationInclusive: migrationLimit });
 
       yield* sql`INSERT INTO projection_projects
         (project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at)
@@ -93,6 +97,20 @@ const createFixtureSource = Effect.fn("createMigrateDevDbFixtureSource")(functio
   return databasePath;
 });
 
+const readDatabaseFiles = Effect.fn("readMigrateDevDbFixtureFiles")(function* (
+  databasePath: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  return yield* Effect.forEach(
+    [databasePath, `${databasePath}-wal`, `${databasePath}-shm`, `${databasePath}-journal`],
+    (filePath) =>
+      Effect.gen(function* () {
+        const exists = yield* fs.exists(filePath);
+        return [filePath, exists ? yield* fs.readFile(filePath) : null] as const;
+      }),
+  );
+});
+
 it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
   it.effect("keeps stopped thread families from live projects and clears pending work", () =>
     Effect.gen(function* () {
@@ -148,6 +166,8 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
       const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-slot-" });
       const destDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-slot-dest-" });
       const source = yield* createFixtureSource(sourceDir);
+      const path = yield* Path.Path;
+      const destination = path.join(destDir, "userdata", "statev2.sqlite");
       // Simulate another branch having claimed slot 1 first: the id is
       // recorded, so this checkout's migration 1 silently never runs.
       yield* withDatabase(
@@ -158,6 +178,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
             SET name = 'SomebodyElsesMigration' WHERE migration_id = 1`;
         }),
       );
+      const sourceBefore = yield* readDatabaseFiles(source);
 
       const error = yield* runMigrateDevDb(
         { baseDir: destDir, source, projects: 5, threadsPerProject: 10 },
@@ -168,6 +189,91 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
         assert.equal(error.slot, 1);
         assert.equal(error.appliedName, "SomebodyElsesMigration");
       }
+      assert.deepStrictEqual(yield* readDatabaseFiles(source), sourceBefore);
+      assert.isFalse(yield* fs.exists(destination));
+      assert.isFalse(yield* fs.exists(`${destination}.migrate-dev-db-tmp`));
+    }),
+  );
+
+  it.effect("preserves native webhook history and applies the skipped port migrations", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-native-" });
+      const destDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-native-dest-" });
+      const source = yield* createFixtureSource(sourceDir, 56);
+      yield* withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* Migration057ScheduledTaskWebhooks;
+          yield* sql`INSERT INTO effect_sql_migrations (migration_id, name, created_at)
+            VALUES (57, 'ScheduledTaskWebhooks', '2026-10-07T00:00:00.000Z')`;
+          yield* Migration058WebhookRelayDeliveries;
+          yield* sql`INSERT INTO effect_sql_migrations (migration_id, name, created_at)
+            VALUES (58, 'WebhookRelayDeliveries', '2026-10-07T00:00:00.000Z')`;
+          yield* Migration059McpAppModelContext;
+          yield* sql`INSERT INTO effect_sql_migrations (migration_id, name, created_at)
+            VALUES (59, 'McpAppModelContext', '2026-10-07T00:00:00.000Z')`;
+          yield* sql`UPDATE effect_sql_migrations
+            SET name = 'ThreadSummaryTimeline' WHERE migration_id = 41`;
+          yield* sql`INSERT INTO mcp_app_model_context
+            (thread_id, item_id, server, tool, text, updated_at)
+            VALUES (
+              'stopped-thread', 'native-app', 'fixture-server', 'fixture-tool',
+              'Preserved context', '2026-10-07T00:00:00.000Z'
+            )`;
+        }),
+      );
+      const sourceBefore = yield* readDatabaseFiles(source);
+
+      const result = yield* runMigrateDevDb(
+        { baseDir: destDir, source, projects: 5, threadsPerProject: 10 },
+        { sharedHome: sourceDir },
+      );
+      const migrated = yield* withDatabase(
+        result.databasePath,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const history = yield* sql<{ migration_id: number; name: string }>`
+            SELECT migration_id, name FROM effect_sql_migrations
+            WHERE migration_id IN (41, 57, 58, 59, 60, 61, 62, 63)
+            ORDER BY migration_id`;
+          const runColumns = yield* sql<{ name: string }>`
+            PRAGMA table_info(orchestration_v2_projection_runs)`;
+          const pendingTables = yield* sql<{ name: string }>`
+            SELECT name FROM sqlite_schema
+            WHERE type = 'table' AND name IN (
+              'pending_interactions', 'pending_interaction_responses'
+            ) ORDER BY name`;
+          const context = yield* sql<{ item_id: string; text: string }>`
+            SELECT item_id, text FROM mcp_app_model_context
+            WHERE thread_id = 'stopped-thread'`;
+          return { history, runColumns, pendingTables, context };
+        }),
+      );
+
+      assert.deepStrictEqual(migrated.history, [
+        { migration_id: 41, name: "ThreadSummaryTimeline" },
+        { migration_id: 57, name: "ScheduledTaskWebhooks" },
+        { migration_id: 58, name: "WebhookRelayDeliveries" },
+        { migration_id: 59, name: "McpAppModelContext" },
+        { migration_id: 60, name: "OrchestrationHttpCreateOperations" },
+        { migration_id: 61, name: "ScheduledTaskWebhooks" },
+        { migration_id: 62, name: "WebhookRelayDeliveries" },
+        { migration_id: 63, name: "McpAppModelContext" },
+      ]);
+      assert.isTrue(migrated.runColumns.some((column) => column.name === "accepted_sequence"));
+      assert.isTrue(
+        migrated.runColumns.some((column) => column.name === "service_update_resume_after_update"),
+      );
+      assert.deepStrictEqual(migrated.pendingTables, [
+        { name: "pending_interaction_responses" },
+        { name: "pending_interactions" },
+      ]);
+      assert.deepStrictEqual(migrated.context, [
+        { item_id: "native-app", text: "Preserved context" },
+      ]);
+      assert.deepStrictEqual(yield* readDatabaseFiles(source), sourceBefore);
     }),
   );
 

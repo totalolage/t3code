@@ -1,10 +1,10 @@
-// node:sqlite reads live conversation databases while Node fs discovers them.
+// Node fs discovers live conversation databases; SQLite uses the active runtime's native driver.
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import * as NodeSqlite from "node:sqlite";
 import * as NodeTimersPromises from "node:timers/promises";
 
+import { openRuntimeSqliteReadOnly } from "../persistence/RuntimeSqliteClient.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
 
 type FieldValue = number | bigint | Uint8Array;
@@ -152,6 +152,13 @@ function blob(value: unknown): Uint8Array {
   return value;
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+function record(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
 interface UsageCandidate {
   record: UsageRecord;
   keys: readonly string[];
@@ -159,21 +166,25 @@ interface UsageCandidate {
 }
 
 async function readDatabase(path: string, fallbackTimestamp: number): Promise<UsageCandidate[]> {
-  const db = new NodeSqlite.DatabaseSync(path, { readOnly: true });
+  const db = await openRuntimeSqliteReadOnly(path);
   try {
     db.exec("PRAGMA busy_timeout = 100; BEGIN");
     const tables = new Set(
       db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
         .all()
-        .map((row) => row.name),
+        .flatMap((value) => {
+          const name = record(value).name;
+          return typeof name === "string" && name.length > 0 ? [name] : [];
+        }),
     );
     if (!tables.has("gen_metadata") && !tables.has("steps")) {
       throw new Error("Missing Antigravity usage tables");
     }
     const readMetadata = async (query: string, column: string, step: boolean) => {
       const entries: Array<{ idx: number; entry: Metadata }> = [];
-      for (const row of db.prepare(query).iterate()) {
+      for (const value of db.prepare(query).iterate()) {
+        const row = record(value);
         if (typeof row.idx !== "number") throw new Error("Invalid Antigravity metadata index");
         entries.push({ idx: row.idx, entry: metadata(blob(row[column]), step) });
         if (entries.length % 256 === 0) await NodeTimersPromises.setImmediate();
@@ -185,7 +196,8 @@ async function readDatabase(path: string, fallbackTimestamp: number): Promise<Us
       : [];
     let trajectoryTimestamp: number | null = null;
     if (tables.has("trajectory_metadata_blob")) {
-      for (const row of db.prepare("SELECT data FROM trajectory_metadata_blob").iterate()) {
+      for (const value of db.prepare("SELECT data FROM trajectory_metadata_blob").iterate()) {
+        const row = record(value);
         trajectoryTimestamp ??= timestamp(nested(fields(blob(row.data)), 2));
       }
     }

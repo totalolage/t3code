@@ -176,7 +176,6 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
       };
       const onDisconnect = () =>
         settle(Effect.fail(new ServiceLauncherClientError({ operation: "disconnect" })));
-
       host.on("message", onMessage);
       host.on("disconnect", onDisconnect);
       try {
@@ -220,9 +219,21 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
 
   const pending = context?.update?.status === "pending" ? context.update : undefined;
   const outcome =
-    context?.update === undefined || context.update.status === "pending"
+    context?.update?.status === "committed" ||
+    context?.update?.status === "rolled-back" ||
+    context?.update?.status === "failed"
+      ? context.update
+      : undefined;
+  const publicOutcome =
+    outcome === undefined
       ? undefined
-      : context.update;
+      : {
+          id: outcome.id,
+          fromVersion: outcome.fromVersion,
+          targetVersion: outcome.targetVersion,
+          status: outcome.status,
+          ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+        };
   const prepareTrial =
     pending !== undefined
       ? exchange(
@@ -241,7 +252,7 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
             });
           }),
         )
-      : Effect.succeed(outcome);
+      : Effect.succeed(publicOutcome);
 
   return ServiceLauncherClient.of({
     managed,

@@ -516,6 +516,16 @@ const UsageModelTokenPrice = Schema.Number.check(
   Schema.isGreaterThanOrEqualTo(0),
 );
 
+const SERVICE_UPDATE_REPOSITORY_PATTERN =
+  /^(?:|(?!(?:\.|\.\.)\/)[A-Za-z0-9_.-]+\/(?!\.{1,2}(?![\s\S]))[A-Za-z0-9_.-]+)(?![\s\S])/u;
+
+/** Exact owner/repo configuration; an empty value disables scheduled updates. */
+export const ServiceUpdateRepository = Schema.String.check(
+  Schema.isMaxLength(201),
+  Schema.isPattern(SERVICE_UPDATE_REPOSITORY_PATTERN),
+);
+export type ServiceUpdateRepository = typeof ServiceUpdateRepository.Type;
+
 /** USD per million tokens. Omitted cache rates use the input rate. */
 export const UsageModelPriceOverride = Schema.Struct({
   inputCostPerMillionTokens: UsageModelTokenPrice,
@@ -1269,6 +1279,9 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("paragraph" as const)),
   ),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  serviceUpdateRepository: ServiceUpdateRepository.pipe(
+    Schema.withDecodingDefault(Effect.succeed("" as const)),
+  ),
   // Retain the update-era key; recovery now needs an environment-owned opt-in.
   continueThreadsAfterServerUpdate: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
@@ -1673,6 +1686,7 @@ export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
+  serviceUpdateRepository: Schema.optionalKey(ServiceUpdateRepository),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   projectAgentBrowserAccessOverrides: Schema.optionalKey(
