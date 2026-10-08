@@ -17,7 +17,7 @@ import {
   isEditableRemoteBearerConnection,
   resolveRemoteConnectionFields,
   type RemoteConnectionFieldsValue,
-} from "./remoteConnectionFields";
+} from "./remoteConnectionForm";
 
 const baseFields: RemoteConnectionFieldsValue = {
   host: "backend.example.com",

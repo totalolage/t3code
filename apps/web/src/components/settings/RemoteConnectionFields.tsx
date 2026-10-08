@@ -9,7 +9,7 @@ import {
   applyRemotePairingUrlToFields,
   getRemotePairingUrlFields,
   type RemoteConnectionFieldsValue,
-} from "./remoteConnectionFields";
+} from "./remoteConnectionForm";
 
 export function RemoteConnectionFields({
   value,

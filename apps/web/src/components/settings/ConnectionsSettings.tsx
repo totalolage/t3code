@@ -105,7 +105,7 @@ import {
   getEditableRemoteBearerProfile,
   resolveRemoteConnectionFields,
   type RemoteConnectionFieldsValue,
-} from "./remoteConnectionFields";
+} from "./remoteConnectionForm";
 import { Input } from "../ui/input";
 import { CommandShortcut } from "../ui/command";
 import {
