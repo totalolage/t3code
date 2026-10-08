@@ -813,7 +813,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         ...LINUX_CAPTURE_EXTRA_RESOURCES,
         { from: "apps/desktop/prod-resources/browser-secret", to: "browser-secret" },
       ]);
-      assert.deepStrictEqual((linux.linux as Record<string, unknown>).target, ["AppImage", "deb"]);
+      assert.deepStrictEqual((linux.linux as Record<string, unknown>).target, ["AppImage"]);
       assert.equal(mac.appId, "dev.f8y.t3code");
       assert.equal(mac.publish, null);
       assert.deepStrictEqual(mac.extraResources, DESKTOP_EXTRA_RESOURCES);

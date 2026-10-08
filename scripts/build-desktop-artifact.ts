@@ -2872,11 +2872,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
     buildConfig.linux = {
-      // The .deb is built from the same unpacked app after the AppImage.
-      // electron-builder lists both in latest-linux.yml and writes
-      // resources/package-type into the .deb only, so electron-updater updates
-      // each install in its own format.
-      target: target === "AppImage" ? [target, "deb"] : [target],
+      // F8Y publishes only the requested artifact. Other channels also build a
+      // .deb, which electron-builder includes in their update manifests.
+      target: isF8yBuild ? [target] : target === "AppImage" ? [target, "deb"] : [target],
       executableName: "t3code",
       icon: "icons",
       category: "Development",
