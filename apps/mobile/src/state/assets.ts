@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { resolveFilesystemReadAccess } from "@t3tools/client-runtime/state/filesystem";
+import type { PreparedConnection } from "@t3tools/client-runtime/connection";
 import {
   assetUrlStateFromResult,
   createAssetEnvironmentAtoms,
@@ -11,6 +12,7 @@ import { useCallback } from "react";
 
 import { connectionAtomRuntime } from "../connection/runtime";
 import { projectFaviconDatabaseCache } from "../lib/projectFaviconDatabaseCache";
+import { resolveNativeAssetUrl } from "../lib/nativeAssetUrl";
 import { type AssetUrlState, deriveAssetUrlState } from "./asset-url-state";
 import { environmentProjectCloneListAtom } from "./projectClones";
 import { environmentSession, usePreparedConnection } from "./session";
@@ -29,6 +31,15 @@ export const projectFaviconUrlAtom = createProjectFaviconUrlAtomFamily({
   projectClones: environmentProjectCloneListAtom,
 });
 
+function nativeAssetUrlStateFromResult(
+  result: Parameters<typeof assetUrlStateFromResult>[0],
+  connection: Pick<PreparedConnection, "httpBaseUrl" | "queryParameters"> | null,
+) {
+  const shared = assetUrlStateFromResult(result, connection?.httpBaseUrl ?? null);
+  if (connection === null || result._tag !== "Success" || shared._tag !== "Success") return shared;
+  const url = resolveNativeAssetUrl(connection, result.value.relativeUrl);
+  return url === null ? { _tag: "Failure" as const } : { ...shared, url };
+}
 export function useAssetUrlState(
   environmentId: EnvironmentId | null,
   resource: AssetResource | null,
@@ -59,9 +70,9 @@ export function useAssetUrlState(
     ? fileAccess.isPending
       ? { _tag: "Loading" as const }
       : { _tag: "Failure" as const }
-    : assetUrlStateFromResult(
+    : nativeAssetUrlStateFromResult(
         result,
-        preparedConnection._tag === "Some" ? preparedConnection.value.httpBaseUrl : null,
+        preparedConnection._tag === "Some" ? preparedConnection.value : null,
       );
   return deriveAssetUrlState({
     connectionPhase,
@@ -86,17 +97,17 @@ export function useRefreshAssetUrl(
   resource: AssetResource | null,
 ): () => Promise<string | null> {
   const connection = usePreparedConnection(environmentId);
-  const httpBaseUrl = connection._tag === "Some" ? connection.value.httpBaseUrl : null;
+  const prepared = connection._tag === "Some" ? connection.value : null;
   const createUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     refresh: true,
     reportFailure: false,
   });
   return useCallback(async () => {
-    if (environmentId === null || resource === null || httpBaseUrl === null) return null;
-    const state = assetUrlStateFromResult(
+    if (environmentId === null || resource === null || prepared === null) return null;
+    const state = nativeAssetUrlStateFromResult(
       await createUrl({ environmentId, input: { resource } }),
-      httpBaseUrl,
+      prepared,
     );
     return state._tag === "Success" ? state.url : null;
-  }, [createUrl, environmentId, httpBaseUrl, resource]);
+  }, [createUrl, environmentId, prepared, resource]);
 }

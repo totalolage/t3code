@@ -1,4 +1,5 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import { isThreadHidden } from "@t3tools/client-runtime/state/thread-hidden";
 import {
   CommonActions,
   StackActions,
@@ -8,7 +9,13 @@ import {
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { useCallback, useEffect, useRef } from "react";
 
-type ThreadSelection = Pick<EnvironmentThreadShell, "environmentId" | "id">;
+type ThreadSelection = Pick<EnvironmentThreadShell, "environmentId" | "id"> & {
+  readonly hiddenAt?: EnvironmentThreadShell["hiddenAt"];
+};
+
+export function shouldSelectHomeThread(thread: { readonly hiddenAt?: string | null }): boolean {
+  return !isThreadHidden(thread);
+}
 
 export function createHomeThreadNavigationAction(input: {
   readonly state: Pick<NavigationState, "index" | "routes">;
@@ -58,6 +65,7 @@ export function useHomeThreadSelection() {
 
   return useCallback(
     (thread: ThreadSelection) => {
+      if (!shouldSelectHomeThread(thread)) return;
       navigation.dispatch((state) =>
         createHomeThreadNavigationAction({
           state,

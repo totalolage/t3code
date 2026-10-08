@@ -7,7 +7,7 @@ import * as Option from "effect/Option";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 
 it.effect(
-  "publishes lifecycle events without subscribers and snapshots the latest welcome/ready",
+  "publishes lifecycle events without subscribers and snapshots the latest event per type",
   () =>
     Effect.gen(function* () {
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
@@ -48,6 +48,12 @@ it.effect(
 
       yield* lifecycleEvents.publish({
         version: 1,
+        type: "serviceUpdate",
+        payload: { status: "idle" },
+      });
+
+      yield* lifecycleEvents.publish({
+        version: 1,
         type: "legacyThreadMigration",
         payload: {
           status: "running",
@@ -64,13 +70,16 @@ it.effect(
       });
 
       const snapshot = yield* lifecycleEvents.snapshot;
-      assert.equal(snapshot.sequence, 4);
+      assert.equal(snapshot.sequence, 5);
       assert.deepEqual(snapshot.events.map((event) => event.type).toSorted(), [
         "legacyThreadMigration",
         "ready",
+        "serviceUpdate",
         "welcome",
       ]);
       const migration = snapshot.events.find((event) => event.type === "legacyThreadMigration");
       assert.equal(migration?.payload.status, "complete");
+      const serviceUpdate = snapshot.events.find((event) => event.type === "serviceUpdate");
+      assert.deepEqual(serviceUpdate?.payload, { status: "idle" });
     }).pipe(Effect.provide(ServerLifecycleEvents.layer)),
 );

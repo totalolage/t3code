@@ -9,6 +9,7 @@ import {
   ClaudeSettings,
   DEFAULT_SERVER_SETTINGS,
   resolveProviderInstanceEnabled,
+  ServiceUpdateRepository,
   ServerSettings,
   ServerSettingsPatch,
 } from "./settings.ts";
@@ -20,6 +21,7 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+const decodeServiceUpdateRepository = Schema.decodeUnknownSync(ServiceUpdateRepository);
 
 describe("ServerSettings response streaming", () => {
   it("defaults to paragraph buffering", () => {
@@ -132,6 +134,46 @@ describe("ServerSettings default permissions", () => {
         projectSettingsOverrides: { project: { defaultRuntimeMode: "unsupported" } },
       }),
     ).toThrow();
+  });
+});
+
+describe("ServerSettings scheduled service-update repository", () => {
+  it("defaults to disabled and accepts exact owner/repo values", () => {
+    expect(decodeServerSettings({}).serviceUpdateRepository).toBe("");
+    expect(
+      decodeServerSettings({ serviceUpdateRepository: "pingdotgg/t3code" }).serviceUpdateRepository,
+    ).toBe("pingdotgg/t3code");
+    expect(
+      decodeServerSettingsPatch({ serviceUpdateRepository: "pingdotgg/t3code" })
+        .serviceUpdateRepository,
+    ).toBe("pingdotgg/t3code");
+    expect(decodeServiceUpdateRepository("")).toBe("");
+  });
+
+  it("does not trim or reinterpret invalid repository input", () => {
+    for (const value of [
+      " pingdotgg/t3code",
+      "pingdotgg/t3code ",
+      "https://github.com/pingdotgg/t3code",
+      "pingdotgg/t3code?tab=releases",
+      "./t3code",
+      "pingdotgg/..",
+      "pingdotgg/t3code\n",
+      "pingdotgg/t3code/extra",
+    ]) {
+      expect(() => decodeServerSettings({ serviceUpdateRepository: value })).toThrow();
+      expect(() => decodeServerSettingsPatch({ serviceUpdateRepository: value })).toThrow();
+    }
+  });
+
+  it("enforces the 201-character bound", () => {
+    const owner = "o".repeat(100);
+    const repo = "r".repeat(100);
+    const value = `${owner}/${repo}`;
+    expect(decodeServerSettings({ serviceUpdateRepository: value }).serviceUpdateRepository).toBe(
+      value,
+    );
+    expect(() => decodeServerSettings({ serviceUpdateRepository: `${value}x` })).toThrow();
   });
 });
 

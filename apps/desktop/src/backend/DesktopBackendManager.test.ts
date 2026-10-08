@@ -1,6 +1,8 @@
 import {
+  DATABASE_INCOMPATIBLE_EXIT_CODE,
   DesktopBackendBootstrap,
   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
+  type DesktopBackendTerminalFailure,
   DesktopTelemetryControlMessage,
 } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
@@ -127,6 +129,7 @@ interface MakeInstanceInput {
   readonly onPreflightFailed?: (
     failure: DesktopBackendManager.PreflightFailure,
   ) => Effect.Effect<boolean>;
+  readonly onTerminalFailure?: (failure: DesktopBackendTerminalFailure) => Effect.Effect<void>;
   readonly config?: DesktopBackendManager.DesktopBackendStartConfig;
   readonly configResolve?: Effect.Effect<
     DesktopBackendManager.DesktopBackendStartConfig,
@@ -187,6 +190,7 @@ function makeTestInstance(input: MakeInstanceInput) {
     ...(input.onReady ? { onReady: () => input.onReady! } : {}),
     ...(input.onShutdown ? { onShutdown: () => input.onShutdown! } : {}),
     ...(input.onPreflightFailed ? { onPreflightFailed: input.onPreflightFailed } : {}),
+    ...(input.onTerminalFailure ? { onTerminalFailure: input.onTerminalFailure } : {}),
   });
 
   return instance.pipe(Effect.provide(layerServices));
@@ -807,6 +811,85 @@ describe("DesktopBackendManager", () => {
           assert.equal((yield* Fiber.join(runFiber)).code.pipe(Option.getOrUndefined), 0);
         }).pipe(Effect.provide(TestClock.layer())),
       ),
+  );
+
+  it.effect("stops on a database-incompatible exit before readiness and publishes it once", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const readinessRequested = yield* Deferred.make<void>();
+        const releaseReadiness = yield* Deferred.make<void>();
+        const terminalPublished = yield* Deferred.make<DesktopBackendTerminalFailure>();
+        const terminalCallbackComplete = yield* Deferred.make<void>();
+        const cleanup = yield* Queue.unbounded<string>();
+        let startCount = 0;
+        let readyCount = 0;
+
+        const spawnerLayer = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.sync(() => {
+              startCount += 1;
+              return makeProcess({
+                exitCode: Deferred.await(readinessRequested).pipe(
+                  Effect.as(ChildProcessSpawner.ExitCode(DATABASE_INCOMPATIBLE_EXIT_CODE)),
+                ),
+              });
+            }),
+          ),
+        );
+        const httpLayer = layerHttpClient((request) =>
+          Deferred.succeed(readinessRequested, void 0).pipe(
+            Effect.andThen(Deferred.await(releaseReadiness)),
+            Effect.map(() => responseForRequest(request, 200)),
+          ),
+        );
+
+        const instance = yield* makeTestInstance({
+          spawnerLayer,
+          httpClientLayer: httpLayer,
+          onReady: Effect.sync(() => {
+            readyCount += 1;
+          }),
+          onTerminalFailure: (failure) =>
+            Deferred.succeed(terminalPublished, failure).pipe(
+              Effect.andThen(Deferred.succeed(releaseReadiness, void 0)),
+              Effect.andThen(Deferred.succeed(terminalCallbackComplete, void 0)),
+              Effect.asVoid,
+            ),
+          backendOutputLog: {
+            persistFailure: ({ details }) =>
+              Queue.offer(cleanup, `persist:${details}`).pipe(Effect.asVoid),
+          },
+          desktopTelemetryPublisher: {
+            removeControlSource: () => Queue.offer(cleanup, "remove").pipe(Effect.asVoid),
+          },
+        });
+
+        yield* instance.start;
+        yield* Deferred.await(readinessRequested);
+        yield* Deferred.await(terminalCallbackComplete);
+
+        assert.deepEqual(yield* Deferred.await(terminalPublished), {
+          _tag: "DatabaseIncompatible",
+        });
+        assert.deepEqual(yield* Queue.takeAll(cleanup), [
+          "remove",
+          `persist:pid=123 code=${DATABASE_INCOMPATIBLE_EXIT_CODE}`,
+        ]);
+        const stopped = yield* instance.snapshot;
+        assert.equal(stopped.desiredRunning, false);
+        assert.equal(stopped.ready, false);
+        assert.isTrue(Option.isNone(stopped.activePid));
+        assert.equal(stopped.restartScheduled, false);
+        assert.equal(startCount, 1);
+
+        // The readiness response was released after the child exit. The
+        // stale readiness completion must not make the stopped run ready.
+        yield* TestClock.adjust(Duration.millis(500));
+        assert.equal(readyCount, 0);
+        assert.equal(startCount, 1);
+      }).pipe(Effect.provide(TestClock.layer())),
+    ),
   );
 
   it.effect("starts the configured backend and closes the scoped process on stop", () =>
@@ -1549,6 +1632,7 @@ describe("DesktopBackendManager", () => {
           list: Effect.succeed([instance1, instance2]),
           get: () => Effect.succeedNone,
           primary: Effect.die(new Error("primary not implemented")),
+          awaitPrimaryTerminalFailure: Effect.never,
           register: () => Effect.die(new Error("register not implemented")),
           unregister: () => Effect.die(new Error("unregister not implemented")),
         });

@@ -3,6 +3,7 @@ import type {
   OrchestrationV2ProjectedTurnItem,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ThreadProjection,
+  OrchestrationV2UserRun,
 } from "@t3tools/contracts";
 import { copySorted } from "@t3tools/shared/Array";
 
@@ -20,7 +21,7 @@ const MERGE_BACK_BLOCKING_RUN_STATUSES = new Set<Run["status"]>([
 ]);
 
 export interface QueuedThreadRun {
-  readonly run: Run;
+  readonly run: OrchestrationV2UserRun;
   readonly text: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
   /** Editing replaces this message's content, so its id and context travel with the row. */
@@ -110,7 +111,7 @@ export function threadSupportsProviderHandoff(projection: Projection | null | un
 /** Automatic completion/notification runs are not messages in the user's queue. */
 export function getUserQueuedThreadRuns(
   projection: Pick<Projection, "runs" | "messages">,
-): ReadonlyArray<Run> {
+): ReadonlyArray<OrchestrationV2UserRun> {
   const automaticCompletionMessageIds = new Set(
     projection.messages
       .filter(
@@ -120,7 +121,10 @@ export function getUserQueuedThreadRuns(
       .map((message) => message.id),
   );
   return projection.runs.filter(
-    (run) => run.status === "queued" && !automaticCompletionMessageIds.has(run.userMessageId),
+    (run): run is OrchestrationV2UserRun =>
+      run.status === "queued" &&
+      run.purpose !== "compaction" &&
+      !automaticCompletionMessageIds.has(run.userMessageId),
   );
 }
 
@@ -129,6 +133,7 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
   const session = resolveThreadProviderSession(projection);
   const capabilities = session?.capabilities.turns;
   const hasSteerableProviderTurn =
+    activeRun?.purpose !== "compaction" &&
     activeRun?.status === "running" &&
     activeRun.activeAttemptId !== null &&
     projection.providerTurns.some(
@@ -153,7 +158,9 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
   return {
     activeRun,
     queuedRuns,
-    isHeld: projection.runs.some((run) => run.status === "queued" && run.queueHeld === true),
+    isHeld: projection.runs.some(
+      (run) => run.status === "queued" && run.purpose !== "compaction" && run.queueHeld === true,
+    ),
     canReorder: capabilities?.supportsQueuedMessages === true,
     canPromoteToSteer:
       hasSteerableProviderTurn &&

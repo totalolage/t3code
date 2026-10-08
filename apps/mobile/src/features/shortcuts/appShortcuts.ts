@@ -113,8 +113,24 @@ export function withRecentThreadShortcut(
   ].slice(0, MAX_RECENT_THREAD_SHORTCUTS);
 }
 
-/** Full launcher shortcut list: static "New task" first, then recents. */
-export function buildShortcutActions(recents: ReadonlyArray<RecentThreadShortcut>): Action[] {
+/**
+ * Full launcher shortcut list: static "New task" first, then visible recents.
+ * Exclusions only affect this presentation; the persisted recents remain
+ * untouched so an unhidden thread can return to the launcher.
+ */
+export function buildShortcutActions(
+  recents: ReadonlyArray<RecentThreadShortcut>,
+  excludedScopedThreadRefs: ReadonlyArray<ScopedThreadRef> = [],
+): Action[] {
+  const visibleRecents = recents
+    .filter(
+      (thread) =>
+        !excludedScopedThreadRefs.some(
+          (ref) => ref.environmentId === thread.environmentId && ref.threadId === thread.threadId,
+        ),
+    )
+    .slice(0, MAX_RECENT_THREAD_SHORTCUTS);
+
   return [
     {
       id: NEW_TASK_SHORTCUT_ID,
@@ -122,7 +138,7 @@ export function buildShortcutActions(recents: ReadonlyArray<RecentThreadShortcut
       icon: SHORTCUT_ICON,
       params: { href: NEW_TASK_SHORTCUT_HREF },
     },
-    ...recents.slice(0, MAX_RECENT_THREAD_SHORTCUTS).map((thread): Action => ({
+    ...visibleRecents.map((thread): Action => ({
       // The encoded href doubles as the launcher id: URI-encoding makes the
       // env/thread join unambiguous (a plain `-` join lets different pairs
       // collide and overwrite each other's launcher slots).

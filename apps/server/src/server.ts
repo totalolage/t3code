@@ -31,8 +31,7 @@ import { guardHttpResponseWriteErrors } from "./httpResponseErrorGuard.ts";
 import { fixPath } from "./os-jank.ts";
 import * as Ws from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
-import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
-import * as PullRequestHttp from "./pullRequest/http.ts";
+import { layer as pullRequestHttpApiLayer } from "./pullRequest/http.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as SqlitePersistence from "./persistence/Sqlite.ts";
@@ -144,6 +143,11 @@ import * as CloudCliState from "./cloud/CliState.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
+import { ServiceUpdateSourceLive } from "./cloud/serviceUpdateSourceLive.ts";
+import { ServiceUpdateRuntimeLive } from "./cloud/serviceUpdateRuntimeLive.ts";
+import { UpdateAuthorityLive } from "./cloud/updateAuthorityLive.ts";
+import { ServiceUpdateDrainLive } from "./cloud/serviceUpdateDrain.ts";
+import { ServiceUpdateSchedulerLive } from "./cloud/serviceUpdateScheduler.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as HostResources from "./resourceTelemetry/HostResources.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
@@ -191,7 +195,17 @@ const layerApplicationObservability = EventLoopMonitor.layer.pipe(
   Layer.provideMerge(layerResourceAttribution),
 );
 
-const layerPtyAdapter = NodePtyAdapter.layer;
+const PtyAdapterLive = Layer.unwrap(
+  Effect.gen(function* () {
+    if (typeof Bun !== "undefined") {
+      const BunPtyAdapter = yield* Effect.promise(() => import("./terminal/BunPtyAdapter.ts"));
+      return BunPtyAdapter.layer;
+    } else {
+      const NodePtyAdapter = yield* Effect.promise(() => import("./terminal/NodePtyAdapter.ts"));
+      return NodePtyAdapter.layer;
+    }
+  }),
+);
 
 const layerServerSettings = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
@@ -384,7 +398,7 @@ const layerCheckpointStore = CheckpointStore.layer.pipe(Layer.provide(layerVcsDr
 const layerPortScanner = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
 
 const layerTerminal = TerminalManager.layer.pipe(
-  Layer.provide(layerPtyAdapter),
+  Layer.provide(PtyAdapterLive),
   Layer.provide(layerPortScanner),
   Layer.provide(layerNativeTelemetry),
 );
@@ -591,7 +605,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
 );
 
 const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
-  Layer.provideMerge(layerPtyAdapter),
+  Layer.provideMerge(PtyAdapterLive),
   // Search, prepare, status inspection, and turn launch share one registry
   // cache so every client and provider instance sees the same prepared agents.
   Layer.provideMerge(AcpRegistryCatalog.layer.pipe(Layer.provide(layerServerSettings))),
@@ -630,6 +644,15 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   ),
 );
 
+// The update chain consumes the same memoized V2 runtime, SQLite, and launcher
+// instances as startup; it does not construct another admission gate or DB.
+const ServiceUpdateChainLive = ServiceUpdateSchedulerLive.pipe(
+  Layer.provideMerge(ServiceUpdateSourceLive),
+  Layer.provideMerge(ServiceUpdateRuntimeLive.pipe(Layer.provide(ProcessRunner.layer))),
+  Layer.provideMerge(UpdateAuthorityLive),
+  Layer.provideMerge(ServiceUpdateDrainLive),
+);
+
 const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
   // Misc.
   Layer.provideMerge(layerBackground),
@@ -652,14 +675,14 @@ const layerCommandReadiness = HttpRouter.middleware(
   { global: true },
 );
 
-const layerMakeRoutes = Layer.mergeAll(
+export const makeRoutesLayer = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
       Layer.provide(AuthHttp.layer),
       Layer.provide(McpOAuthHttp.layer.pipe(Layer.provide(McpOAuth.layer))),
       Layer.provide(CloudHttp.layer),
       Layer.provide(OrchestrationHttp.layer),
-      Layer.provide(PullRequestHttp.layer),
+      Layer.provide(pullRequestHttpApiLayer),
       Layer.provide(ProjectHttp.layer),
       Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
       Layer.provide(WebhookRoute.layer.pipe(Layer.provide(RelayDeliveryProof.layer))),
@@ -692,6 +715,10 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(PreviewBrowser.layer),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
+  // Keep the scheduled release discovery and manual-update services available
+  // to the server runtime while routing installation through the current
+  // launcher-backed updater.
+  Layer.provideMerge(ServiceUpdateChainLive),
   Layer.provide(layerCommandReadiness),
   Layer.provide(ServerHttp.layerBrowserApiCors),
   Layer.provide(ServerHttp.layerHttpCompression),
@@ -1036,7 +1063,7 @@ const layerMakeServer = Layer.unwrap(
       ).pipe(Effect.asVoid),
     }).pipe(Layer.provideMerge(layerRuntimeDependencies), Layer.provide(layerLauncher));
 
-    const layerRoutes = HttpRouter.serve(layerMakeRoutes.pipe(Layer.provide(layerLauncher)), {
+    const layerRoutes = HttpRouter.serve(makeRoutesLayer.pipe(Layer.provide(layerLauncher)), {
       disableLogger: !config.logWebSocketEvents,
       routerConfig: HTTP_ROUTER_CONFIG,
     }).pipe(

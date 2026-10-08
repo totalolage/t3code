@@ -114,9 +114,9 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
 ): Effect.fn.Return<
   void,
   never,
-  | DesktopShutdown.DesktopShutdown
   | DesktopState.DesktopState
   | ElectronApp.ElectronApp
+  | DesktopShutdown.DesktopShutdown
   | ElectronDialog.ElectronDialog
 > {
   const shutdown = yield* DesktopShutdown.DesktopShutdown;
@@ -126,24 +126,59 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
   const message = error instanceof Error ? error.message : String(error);
   const detail =
     error instanceof Error && typeof error.stack === "string" ? `\n${error.stack}` : "";
+  const failureDetails = `Stage: ${stage}\n${message}${detail}`;
+  const wasQuitting = yield* Ref.get(state.quitting);
+  if (wasQuitting) {
+    yield* logStartupError("startup failure ignored while quitting", {
+      stage,
+      message,
+      ...(detail.length > 0 ? { detail } : {}),
+    });
+    yield* Effect.uninterruptible(shutdown.request);
+    return;
+  }
+
   yield* logStartupError("fatal startup error", {
     stage,
     message,
     ...(detail.length > 0 ? { detail } : {}),
   });
-  const wasQuitting = yield* Ref.getAndSet(state.quitting, true);
-  if (!wasQuitting) {
-    yield* electronDialog.showErrorBox(
-      "T3 Code failed to start",
-      `Stage: ${stage}\n${message}${detail}`,
-    );
-  }
-  yield* shutdown.request;
-  yield* electronApp.quit;
+
+  const quit = Effect.uninterruptible(
+    Effect.gen(function* () {
+      yield* Ref.set(state.quitting, true);
+      yield* electronApp.quit.pipe(
+        Effect.catchCause((cause) =>
+          logStartupError("failed to initiate desktop quit after startup failure", {
+            stage,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      );
+      // Electron's before-quit lifecycle normally requests shutdown. Keep a
+      // direct request as a fallback for failures before lifecycle listeners
+      // were registered, and issue it only after quit has been initiated so
+      // the race cannot interrupt the quit path before Electron sees it.
+      yield* shutdown.request;
+    }),
+  );
+
+  yield* Ref.set(state.quitting, true);
+  yield* electronDialog.showErrorBox("T3 Code failed to start", failureDetails).pipe(
+    Effect.catchCause((cause) =>
+      logStartupError("failed to show startup error box", {
+        stage,
+        cause: Cause.pretty(cause),
+      }),
+    ),
+  );
+  yield* quit;
 });
 
 const fatalStartupCause = <E>(stage: string, cause: Cause.Cause<E>) =>
-  handleFatalStartupError(stage, Cause.pretty(cause)).pipe(Effect.andThen(Effect.failCause(cause)));
+  Cause.hasInterrupts(cause)
+    ? Effect.failCause(cause)
+    : handleFatalStartupError(stage, Cause.pretty(cause));
 
 export const stopAllPoolInstances = Effect.fn("desktop.app.stopAllPoolInstances")(
   function* (): Effect.fn.Return<void, never, DesktopBackendPool.DesktopBackendPool> {
@@ -201,6 +236,21 @@ const bootstrap = Effect.gen(function* () {
   const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
   const wslBackend = yield* DesktopWslBackend.DesktopWslBackend;
 
+  yield* Effect.forkScoped(
+    pool.awaitPrimaryTerminalFailure.pipe(
+      Effect.flatMap((failure) =>
+        handleFatalStartupError(
+          "primary backend",
+          new Error(
+            failure._tag === "DatabaseIncompatible"
+              ? "The local server database is incompatible with this version of T3 Code."
+              : "The local server stopped because of a terminal startup failure.",
+          ),
+        ),
+      ),
+    ),
+  );
+
   if (environment.isDevelopment && Option.isNone(environment.configuredBackendPort)) {
     return yield* new DesktopDevelopmentBackendPortRequiredError();
   }
@@ -241,20 +291,14 @@ const bootstrap = Effect.gen(function* () {
   }
 
   if (!(yield* Ref.get(state.quitting))) {
-    // The main window waits for the primary backend. In wsl-only mode that is
-    // the WSL backend, which can be slow to cold-boot — show a "Connecting to
-    // WSL" splash immediately so the app feels responsive instead of presenting
-    // no window until WSL is ready. (Dual mode opens fast off the Windows
-    // primary, so no splash there.)
-    if (settings.wslOnly === true && settings.wslBackendEnabled === true) {
-      yield* desktopWindow.showConnectingSplash;
-    }
     yield* primaryBackend.start;
+    if (yield* Ref.get(state.quitting)) return;
     yield* logBootstrapInfo("bootstrap backend start requested");
     yield* appActivation.start.pipe(
       Effect.tap(() => logBootstrapInfo("desktop app control socket ready")),
       Effect.catch((error) => logStartupError("desktop app control socket unavailable", { error })),
     );
+    if (yield* Ref.get(state.quitting)) return;
     // Bring up the WSL backend if the user previously enabled it. The
     // primary is already starting; reconcile fires off the WSL register
     // in parallel rather than blocking primary readiness on a possibly
@@ -264,76 +308,100 @@ const bootstrap = Effect.gen(function* () {
 }).pipe(Effect.withSpan("desktop.bootstrap"));
 
 const startup = Effect.gen(function* () {
-  const appIdentity = yield* DesktopAppIdentity.DesktopAppIdentity;
-  const applicationMenu = yield* DesktopApplicationMenu.DesktopApplicationMenu;
-  const electronApp = yield* ElectronApp.ElectronApp;
-  const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
-  const linuxUrlHandler = yield* DesktopLinuxUrlHandler.DesktopLinuxUrlHandler;
-  const clerk = yield* DesktopClerk.DesktopClerk;
-  const shellEnvironment = yield* DesktopShellEnvironment.DesktopShellEnvironment;
-  const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
-  const preReadyElectronOptions = yield* DesktopPreReadyPlatform.DesktopPreReadyElectronOptions;
-  const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
-  const updates = yield* DesktopUpdates.DesktopUpdates;
-  const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  let stage = "pre-ready configuration";
 
-  yield* shellEnvironment.installIntoProcess;
-  const hasCommandLinePasswordStore =
-    preReadyElectronOptions.linuxPasswordStoreCommandLine !== null;
-  const linuxElectronOptions =
-    environment.platform === "linux" && !hasCommandLinePasswordStore
-      ? DesktopPreReadyPlatform.resolveEarlyLinuxElectronOptionsFromProcess()
-      : preReadyElectronOptions.linux;
-  if (linuxElectronOptions !== null && !hasCommandLinePasswordStore) {
-    if (
-      linuxElectronOptions.passwordStore !== null ||
-      preReadyElectronOptions.linux?.passwordStore !== null
-    ) {
-      yield* electronApp.removeCommandLineSwitch("password-store");
+  const startupWork = Effect.gen(function* () {
+    const appIdentity = yield* DesktopAppIdentity.DesktopAppIdentity;
+    const applicationMenu = yield* DesktopApplicationMenu.DesktopApplicationMenu;
+    const electronApp = yield* ElectronApp.ElectronApp;
+    const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+    const linuxUrlHandler = yield* DesktopLinuxUrlHandler.DesktopLinuxUrlHandler;
+    const clerk = yield* DesktopClerk.DesktopClerk;
+    const shellEnvironment = yield* DesktopShellEnvironment.DesktopShellEnvironment;
+    const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
+    const preReadyElectronOptions = yield* DesktopPreReadyPlatform.DesktopPreReadyElectronOptions;
+    const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
+    const updates = yield* DesktopUpdates.DesktopUpdates;
+    const environment = yield* DesktopEnvironment.DesktopEnvironment;
+    const state = yield* DesktopState.DesktopState;
+    const desktopWindow = yield* DesktopWindow.DesktopWindow;
+
+    stage = "shell environment";
+    yield* shellEnvironment.installIntoProcess;
+    const hasCommandLinePasswordStore =
+      preReadyElectronOptions.linuxPasswordStoreCommandLine !== null;
+    const linuxElectronOptions =
+      environment.platform === "linux" && !hasCommandLinePasswordStore
+        ? DesktopPreReadyPlatform.resolveEarlyLinuxElectronOptionsFromProcess()
+        : preReadyElectronOptions.linux;
+    stage = "Linux Electron options";
+    if (linuxElectronOptions !== null && !hasCommandLinePasswordStore) {
+      if (
+        linuxElectronOptions.passwordStore !== null ||
+        preReadyElectronOptions.linux?.passwordStore !== null
+      ) {
+        yield* electronApp.removeCommandLineSwitch("password-store");
+      }
+      if (linuxElectronOptions.passwordStore !== null) {
+        yield* electronApp.appendCommandLineSwitch(
+          "password-store",
+          linuxElectronOptions.passwordStore,
+        );
+      }
     }
-    if (linuxElectronOptions.passwordStore !== null) {
-      yield* electronApp.appendCommandLineSwitch(
-        "password-store",
-        linuxElectronOptions.passwordStore,
-      );
+    stage = "user data path";
+    const userDataPath = yield* appIdentity.resolveUserDataPath;
+    yield* electronApp.setPath("userData", userDataPath);
+    yield* logStartupInfo("runtime logging configured", { logDir: environment.logDir });
+    stage = "desktop settings";
+    yield* desktopSettings.load;
+
+    if (linuxElectronOptions !== null) {
+      yield* logStartupInfo("linux password store configured", {
+        passwordStore: hasCommandLinePasswordStore
+          ? "command-line"
+          : (linuxElectronOptions.passwordStore ?? "electron-default"),
+        xdgCurrentDesktop: process.env.XDG_CURRENT_DESKTOP ?? null,
+        xdgSessionDesktop: process.env.XDG_SESSION_DESKTOP ?? null,
+      });
     }
-  }
-  const userDataPath = yield* appIdentity.resolveUserDataPath;
-  yield* electronApp.setPath("userData", userDataPath);
-  yield* logStartupInfo("runtime logging configured", { logDir: environment.logDir });
-  yield* desktopSettings.load;
 
-  if (linuxElectronOptions !== null) {
-    yield* logStartupInfo("linux password store configured", {
-      passwordStore: hasCommandLinePasswordStore
-        ? "command-line"
-        : (linuxElectronOptions.passwordStore ?? "electron-default"),
-      xdgCurrentDesktop: process.env.XDG_CURRENT_DESKTOP ?? null,
-      xdgSessionDesktop: process.env.XDG_SESSION_DESKTOP ?? null,
-    });
-  }
+    stage = "application identity";
+    yield* appIdentity.configure;
+    stage = "desktop lifecycle";
+    yield* lifecycle.register;
+    stage = "Clerk";
+    yield* clerk.configure;
 
-  yield* appIdentity.configure;
-  yield* lifecycle.register;
-  yield* clerk.configure;
+    stage = "whenReady";
+    yield* electronApp.whenReady.pipe(Effect.withSpan("desktop.electron.whenReady"));
+    if (!(yield* Ref.get(state.quitting))) {
+      stage = "connecting splash";
+      yield* desktopWindow.showConnectingSplash;
+    }
+    yield* logStartupInfo("app ready");
+    if (environment.platform === "linux") {
+      stage = "safe storage";
+      const selectedBackend = yield* safeStorage.selectedStorageBackend;
+      yield* logStartupInfo("safe storage ready", {
+        backend: Option.getOrElse(selectedBackend, () => "unknown"),
+      });
+    }
+    stage = "application identity";
+    yield* appIdentity.configure;
+    stage = "application menu";
+    yield* applicationMenu.configure;
+    stage = "desktop updates";
+    yield* updates.configure;
+    stage = "remote updates";
+    yield* DesktopRemoteUpdates.listen;
+    stage = "Linux URL handler";
+    yield* linuxUrlHandler.register;
+    stage = "bootstrap";
+    yield* bootstrap;
+  });
 
-  yield* electronApp.whenReady.pipe(
-    Effect.withSpan("desktop.electron.whenReady"),
-    Effect.catchCause((cause) => fatalStartupCause("whenReady", cause)),
-  );
-  yield* logStartupInfo("app ready");
-  if (environment.platform === "linux") {
-    const selectedBackend = yield* safeStorage.selectedStorageBackend;
-    yield* logStartupInfo("safe storage ready", {
-      backend: Option.getOrElse(selectedBackend, () => "unknown"),
-    });
-  }
-  yield* appIdentity.configure;
-  yield* applicationMenu.configure;
-  yield* updates.configure;
-  yield* DesktopRemoteUpdates.listen;
-  yield* linuxUrlHandler.register;
-  yield* bootstrap.pipe(Effect.catchCause((cause) => fatalStartupCause("bootstrap", cause)));
+  yield* startupWork.pipe(Effect.catchCause((cause) => fatalStartupCause(stage, cause)));
 }).pipe(Effect.withSpan("desktop.startup"));
 
 const scopedProgram = Effect.scoped(
@@ -357,8 +425,13 @@ const scopedProgram = Effect.scoped(
       ),
     );
 
-    yield* startup;
-    yield* shutdown.awaitRequest;
+    yield* Effect.raceFirst(
+      Effect.gen(function* () {
+        yield* startup;
+        return yield* Effect.never;
+      }),
+      shutdown.awaitRequest,
+    );
   }),
 );
 

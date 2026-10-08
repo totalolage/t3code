@@ -593,6 +593,7 @@ type MessagesTimelineRowContent =
       id: string;
       createdAt: string;
       label: string;
+      detail?: string;
       active: boolean;
     }
   | {
@@ -1556,6 +1557,7 @@ export function deriveMessagesTimelineRows(input: {
         id: timelineEntry.id,
         createdAt: timelineEntry.createdAt,
         label: timelineEntry.entry.label,
+        ...(timelineEntry.entry.detail === undefined ? {} : { detail: timelineEntry.entry.detail }),
         active,
       });
       continue;
@@ -2145,7 +2147,12 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
 
     case "context-compaction": {
       const bc = b as typeof a;
-      return a.createdAt === bc.createdAt && a.label === bc.label && a.active === bc.active;
+      return (
+        a.createdAt === bc.createdAt &&
+        a.label === bc.label &&
+        a.detail === bc.detail &&
+        a.active === bc.active
+      );
     }
 
     case "proposed-plan":

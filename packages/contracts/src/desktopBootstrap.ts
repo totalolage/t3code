@@ -2,6 +2,11 @@ import * as Schema from "effect/Schema";
 
 import { PortSchema, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
+export const DATABASE_INCOMPATIBLE_EXIT_CODE = 78;
+
+export const DesktopBackendTerminalFailure = Schema.TaggedStruct("DatabaseIncompatible", {});
+export type DesktopBackendTerminalFailure = typeof DesktopBackendTerminalFailure.Type;
+
 export const DesktopBackendBootstrap = Schema.Struct({
   mode: Schema.Literal("desktop"),
   noBrowser: Schema.Boolean,

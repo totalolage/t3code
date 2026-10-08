@@ -246,6 +246,7 @@ it.layer(layerTest)("LegacyV1ThreadImporter", (it) => {
       assert.isTrue((yield* maintenance.verify).valid);
       const shellProjection = yield* projections.getThreadProjection(threadId);
       assert.equal(shellProjection.thread.historyOrigin, "v1_import");
+      assert.isNull(shellProjection.thread.hiddenAt);
       assert.equal(shellProjection.thread.branch, "main");
       assert.equal(shellProjection.thread.worktreePath, "/tmp/legacy-project");
       assert.deepEqual(
@@ -356,6 +357,20 @@ it.layer(layerTest)("LegacyV1ThreadImporter", (it) => {
           },
         ],
       });
+      const beforeMetadataRepair = yield* projections.getThreadProjection(threadId);
+      const hiddenAt = DateTime.makeUnsafe("2026-01-05T00:00:00.000Z");
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("event:legacy-import:hidden-before-metadata-repair"),
+            type: "thread.hidden",
+            threadId,
+            providerInstanceId: beforeMetadataRepair.thread.providerInstanceId,
+            occurredAt: hiddenAt,
+            payload: { ...beforeMetadataRepair.thread, hiddenAt },
+          },
+        ],
+      });
       yield* sql`
         UPDATE orchestration_v2_projection_threads
         SET payload_json = json_remove(
@@ -375,6 +390,14 @@ it.layer(layerTest)("LegacyV1ThreadImporter", (it) => {
       const repaired = yield* projections.getThreadProjection(threadId);
       assert.isNull(repaired.thread.pinnedAt);
       assert.isNull(repaired.thread.pinOrderKey);
+      assert.equal(
+        DateTime.toEpochMillis(repaired.thread.hiddenAt!),
+        DateTime.toEpochMillis(hiddenAt),
+      );
+      assert.equal(
+        DateTime.toEpochMillis(repaired.thread.updatedAt),
+        DateTime.toEpochMillis(beforeMetadataRepair.thread.updatedAt),
+      );
       assert.deepEqual(
         repaired.thread.snoozedUntil,
         DateTime.makeUnsafe("2026-02-01T00:00:00.000Z"),

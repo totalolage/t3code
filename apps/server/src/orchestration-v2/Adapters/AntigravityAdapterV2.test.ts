@@ -378,6 +378,7 @@ describe("AntigravityAdapterV2 workspace changes", () => {
             createdAt: now,
             updatedAt: now,
             archivedAt: null,
+            hiddenAt: null,
             settledOverride: null,
             settledAt: null,
             lastVisitedAt: null,

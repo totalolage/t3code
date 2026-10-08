@@ -72,6 +72,7 @@ describe("DesktopUpdates", () => {
           const state = yield* updates.getState;
           assert.equal(state.enabled, true);
           assert.equal(state.status, "idle");
+          assert.isFalse(harness.allowDowngrade());
           assert.deepEqual(harness.feedUrls(), [
             { provider: "generic", url: "http://localhost:4141" },
           ]);
@@ -148,6 +149,68 @@ describe("DesktopUpdates", () => {
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
+
+  it.effect("routes f8y builds to their feed and accepts matching offers", () => {
+    const harness = makeHarness({
+      appVersion: "1.2.3-f8y.20260825.53",
+      platform: "linux",
+      initialUpdateChannel: "nightly",
+      env: { APPIMAGE: "/tmp/T3-Code.AppImage" },
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+
+        const configuredState = yield* updates.getState;
+        assert.equal(configuredState.channel, "nightly");
+        assert.equal(configuredState.enabled, true);
+        assert.deepEqual(harness.updaterChannels(), ["f8y"]);
+        assert.isTrue(harness.allowPrerelease());
+        assert.isTrue(harness.allowDowngrade());
+        assert.isTrue(harness.fullChangelog());
+
+        harness.emit("update-available", { version: "1.2.4-nightly.20260825.54" });
+        yield* flushCallbacks;
+        assert.equal((yield* updates.getState).status, "up-to-date");
+
+        harness.emit("update-available", { version: "1.2.4" });
+        yield* flushCallbacks;
+        assert.equal((yield* updates.getState).status, "up-to-date");
+
+        harness.emit("update-available", { version: "1.2.4-f8y.20260825.54" });
+        yield* flushCallbacks;
+        const state = yield* updates.getState;
+        assert.equal(state.status, "available");
+        assert.equal(state.availableVersion, "1.2.4-f8y.20260825.54");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect.each(["latest", "nightly"] as const)(
+    "rejects f8y offers in non-f8y builds with saved %s channel",
+    (initialUpdateChannel) => {
+      const harness = makeHarness({
+        appVersion: "1.2.3",
+        initialUpdateChannel,
+      });
+
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
+
+          harness.emit("update-available", { version: "1.2.4-f8y.20260825.54" });
+          yield* flushCallbacks;
+
+          const state = yield* updates.getState;
+          assert.equal(state.status, "up-to-date");
+          assert.isNull(state.availableVersion);
+        }),
+      ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+    },
+  );
 
   it.effect("enables nightly full changelog release notes and broadcasts summaries", () => {
     const harness = makeHarness();

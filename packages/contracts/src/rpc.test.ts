@@ -3,7 +3,7 @@ import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
 import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
-import { WsRpcGroup, WsSubscribeServerConfigRpc } from "./rpc.ts";
+import { WS_METHODS, WsRpcGroup, WsSubscribeServerConfigRpc } from "./rpc.ts";
 
 /**
  * The client always sends `environmentThemes`, including to servers built
@@ -66,5 +66,15 @@ describe("WebSocket RPC contracts", () => {
         }),
       ),
     ).toBe(true);
+  });
+
+  it("keeps service-update cancellation as an empty-payload lifecycle command", () => {
+    expect(WS_METHODS.serverCancelServiceUpdate).toBe("server.cancelServiceUpdate");
+    const cancel = WsRpcGroup.requests.get(WS_METHODS.serverCancelServiceUpdate);
+    if (cancel === undefined) throw new Error("cancelServiceUpdate is not registered");
+    expect(Schema.decodeSync(cancel.payloadSchema)({})).toEqual({});
+    expect(Schema.decodeSync(cancel.successSchema)({ cancelled: true })).toEqual({
+      cancelled: true,
+    });
   });
 });

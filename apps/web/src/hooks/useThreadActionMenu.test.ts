@@ -21,6 +21,7 @@ const state = vi.hoisted(() => ({
   granted: new Set<string>(),
   effects: [] as string[],
   completed: deferred<void>(),
+  hiddenAt: null as string | null,
   show: vi.fn<
     (
       items: ReadonlyArray<ContextMenuItem<ThreadActionMenuId>>,
@@ -48,6 +49,7 @@ vi.mock("../state/session", () => ({
 }));
 vi.mock("../state/entities", () => ({
   readEnvironmentSupportsAutoSettleOptOut: () => true,
+  readEnvironmentSupportsHiding: () => true,
   readEnvironmentSupportsPinning: () => true,
   readEnvironmentSupportsSettlement: () => true,
   readEnvironmentSupportsSnooze: () => true,
@@ -58,6 +60,7 @@ vi.mock("../state/entities", () => ({
     projectId: "project",
     title: "Thread",
     branch: "main",
+    hiddenAt: state.hiddenAt,
     worktreePath: null,
     runtime: null,
     latestRun: null,
@@ -133,6 +136,8 @@ vi.mock("./useThreadActions", () => ({
         "pinThread",
         "confirmAndUnpinThread",
         "archiveThread",
+        "hideThread",
+        "unhideThread",
         "deleteThread",
       ].map((action) => [
         action,
@@ -161,6 +166,7 @@ const createMenu = () =>
 beforeEach(() => {
   state.granted = new Set(["primary"]);
   state.effects = [];
+  state.hiddenAt = null;
   state.completed = deferred<void>();
   state.show.mockReset().mockResolvedValue(null);
 });
@@ -171,13 +177,21 @@ describe("thread menu permissions", () => {
     const items = state.show.mock.calls[0]![0];
     expect(items.find((item) => item.id === "rename")?.disabled).toBe(true);
     expect(items.find((item) => item.id === "delete")?.disabled).toBe(true);
+    expect(items.find((item) => item.id === "hide")?.disabled).toBe(true);
     expect(items.find((item) => item.id === "copy")?.disabled).not.toBe(true);
+
+    state.hiddenAt = "2026-10-07T00:00:00.000Z";
+    createMenu().openMenu(position);
+    expect(state.show.mock.calls[1]![0].find((item) => item.id === "unhide")?.disabled).toBe(true);
   });
 
   it("allows the target grant even when the primary environment is denied", () => {
     state.granted = new Set(["secondary"]);
     createMenu().openMenu(position);
     expect(state.show.mock.calls[0]![0].find((item) => item.id === "rename")?.disabled).not.toBe(
+      true,
+    );
+    expect(state.show.mock.calls[0]![0].find((item) => item.id === "hide")?.disabled).not.toBe(
       true,
     );
   });
@@ -193,19 +207,26 @@ describe("thread menu permissions", () => {
     );
   });
 
-  it.each(["rename", "regenerate-title", "delete", "pin", "settle", "archive"] as const)(
-    "%s rechecks after the native menu closes",
-    async (action) => {
-      state.granted.add("secondary");
-      const choice = deferred<ThreadActionMenuId | null>();
-      state.show.mockReturnValue(choice.promise);
-      createMenu().openMenu(position);
-      state.granted.delete("secondary");
-      choice.resolve(action);
-      await state.completed.promise;
-      expect(state.effects).toEqual([]);
-    },
-  );
+  it.each([
+    ["rename", null],
+    ["regenerate-title", null],
+    ["delete", null],
+    ["pin", null],
+    ["settle", null],
+    ["archive", null],
+    ["hide", null],
+    ["unhide", "2026-10-07T00:00:00.000Z"],
+  ] as const)("%s rechecks after the native menu closes", async (action, hiddenAt) => {
+    state.granted.add("secondary");
+    state.hiddenAt = hiddenAt;
+    const choice = deferred<ThreadActionMenuId | null>();
+    state.show.mockReturnValue(choice.promise);
+    createMenu().openMenu(position);
+    state.granted.delete("secondary");
+    choice.resolve(action);
+    await state.completed.promise;
+    expect(state.effects).toEqual([]);
+  });
 
   it.each([
     ["new-thread-on-branch", "draft"],

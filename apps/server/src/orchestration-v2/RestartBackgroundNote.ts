@@ -136,6 +136,7 @@ export function restartContinuationNote(
   providerTurns: ReadonlyArray<Pick<ProviderTurnState, "runAttemptId" | "status">>,
   attempts: ReadonlyArray<Attempt>,
 ): { readonly work: ReadonlyArray<Work>; readonly settled: boolean } {
+  if (source.purpose === "compaction") return { work: [], settled: false };
   const completedAttempts = new Set(
     providerTurns.filter((turn) => turn.status === "completed").map((turn) => turn.runAttemptId),
   );
@@ -151,7 +152,8 @@ export function restartContinuationNote(
     !(current.activeAttemptId !== null && completedAttempts.has(current.activeAttemptId))
   ) {
     const previous = runs.find((candidate) => candidate.id === current.restartContinuationOfRunId);
-    if (previous === undefined || visited.has(previous.id)) break;
+    if (previous === undefined || previous.purpose === "compaction" || visited.has(previous.id))
+      break;
     visited.add(previous.id);
     current = previous;
     work = mergeRestartCancelledBackgroundWork(current.restartCancelledBackgroundWork ?? [], work);
@@ -165,11 +167,12 @@ export function restartContinuationNote(
  * is delivered with it; only a continuation without a note resumes natively.
  */
 export function isRestartNoteContinuation(
-  run: Pick<OrchestrationV2Run, "restartContinuationOfRunId">,
+  run: Pick<OrchestrationV2Run, "purpose" | "restartContinuationOfRunId">,
   runs: ReadonlyArray<OrchestrationV2Run>,
   providerTurns: ReadonlyArray<Pick<ProviderTurnState, "runAttemptId" | "status">>,
   attempts: ReadonlyArray<Attempt>,
 ): boolean {
+  if (run.purpose === "compaction") return false;
   const source =
     run.restartContinuationOfRunId === undefined
       ? undefined
@@ -198,6 +201,7 @@ export function pendingRestartCancelledBackgroundWork(input: {
     | "id"
     | "ordinal"
     | "completedAt"
+    | "purpose"
     | "userMessageId"
     | "providerThreadId"
     | "restartContinuationOfRunId"
@@ -206,7 +210,9 @@ export function pendingRestartCancelledBackgroundWork(input: {
   /** Include earlier attempts: a steer replaces the attempt but not the run. */
   readonly attempts: ReadonlyArray<Attempt>;
 }): ReadonlyArray<Work> {
-  const isCompaction = (run: typeof input.run) => input.compactionMessageIds.has(run.userMessageId);
+  const isCompaction = (run: typeof input.run) =>
+    run.purpose === "compaction" ||
+    (run.userMessageId !== undefined && input.compactionMessageIds.has(run.userMessageId));
   // The current run prepends the note unless it is a compaction or a
   // continuation (whose own prompt is the note, or which resumes natively).
   if (

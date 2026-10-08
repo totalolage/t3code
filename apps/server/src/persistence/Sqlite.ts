@@ -3,10 +3,11 @@ import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 import { runMigrations } from "./Migrations.ts";
+import { assertSqliteDatabaseCompatible } from "./SqliteCompatibility.ts";
 import { initializeV2Database } from "./initializeV2Database.ts";
+import * as RuntimeSqliteClient from "./RuntimeSqliteClient.ts";
 import * as ServerConfig from "../config.ts";
 
 // Size the -wal file is cut back to on the first commit after a WAL reset.
@@ -29,23 +30,27 @@ const layerSetup = Layer.effectDiscard(
 export const layerFromPath = Effect.fn("makeSqlitePersistenceLive")(function* (dbPath: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  yield* fs.makeDirectory(path.dirname(dbPath), { recursive: true });
+  if (dbPath !== ":memory:") {
+    // Classify an existing database before the writable SQLite layer can set
+    // WAL mode or the migration runner can create/update its journal.
+    yield* assertSqliteDatabaseCompatible(dbPath);
+    yield* fs.makeDirectory(path.dirname(dbPath), { recursive: true });
+  }
 
-  return Layer.provideMerge(
-    layerSetup,
-    NodeSqliteClient.layer({
-      filename: dbPath,
-      spanAttributes: {
-        "db.name": path.basename(dbPath),
-        "service.name": "t3code-server",
-      },
-    }),
-  );
+  const clientLayer = RuntimeSqliteClient.makeRuntimeSqliteLayer({
+    filename: dbPath,
+    spanAttributes: {
+      "db.name": path.basename(dbPath),
+      "service.name": "t3code-server",
+    },
+  });
+
+  return Layer.provideMerge(layerSetup, clientLayer);
 }, Layer.unwrap);
 
 export const layerMemory = Layer.provideMerge(
   layerSetup,
-  NodeSqliteClient.layer({ filename: ":memory:" }),
+  RuntimeSqliteClient.makeRuntimeSqliteLayer({ filename: ":memory:" }),
 );
 
 export const layerConfig = Layer.unwrap(

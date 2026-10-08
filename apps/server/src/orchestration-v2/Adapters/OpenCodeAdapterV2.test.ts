@@ -1,8 +1,10 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import type { OpencodeClient, ToolPart } from "@opencode-ai/sdk/v2";
+import { createOpencodeClient, type OpencodeClient, type ToolPart } from "@opencode-ai/sdk/v2";
 import {
   CheckpointId,
+  MessageId,
+  type ModelSelection,
   NodeId,
   OpenCodeSettings,
   ProjectId,
@@ -12,7 +14,6 @@ import {
   ProviderTurnId,
   RunAttemptId,
   RunId,
-  MessageId,
   ThreadId,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
@@ -48,10 +49,15 @@ import {
   makeOpenCodeAdapterV2,
   OPENCODE_PROVIDER,
   reconcileOpenCodePromptAdmissionStatus,
+  serializeOpenCodePromptWithVerbosity,
 } from "./OpenCodeAdapterV2.ts";
 import { ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
 
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const decodeJsonRecord = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
+const decodeJsonStringRecord = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
 const OPEN_CODE_TEST_SETTINGS = Schema.decodeSync(OpenCodeSettings)({
   serverUrl: "http://test.invalid",
 });
@@ -146,14 +152,15 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
   suffix: string,
   nativeSessionId: string,
   client: object,
+  selection?: Pick<ModelSelection, "model" | "options">,
 ) {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const instanceId = ProviderInstanceId.make(`opencode-${suffix}`);
   const threadId = ThreadId.make(`thread-opencode-${suffix}`);
-  const modelSelection = {
+  const modelSelection: ModelSelection = {
     instanceId,
-    model: "anthropic/claude-sonnet",
-    options: [],
+    model: selection?.model ?? "anthropic/claude-sonnet",
+    options: selection?.options ?? [],
   };
   const policy = runtimePolicy("full-access", { cwd: "/workspace" });
   const adapter = makeOpenCodeAdapterV2({
@@ -208,6 +215,7 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
         settledOverride: null,
         settledAt: null,
         lastVisitedAt: null,
+        hiddenAt: null,
         deletedAt: null,
       },
       threadId,
@@ -240,6 +248,91 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
 });
 
 describe("OpenCodeAdapterV2", () => {
+  it("keeps selected GPT-5 verbosity in the SDK's outgoing prompt JSON", async () => {
+    let sentBody: string | undefined;
+    const fakeFetch = Object.assign(
+      async (request: Request | string | URL) => {
+        sentBody = request instanceof Request ? await request.text() : undefined;
+        return new Response(null, { status: 204 });
+      },
+      { preconnect: () => undefined },
+    );
+    const client = createOpencodeClient({
+      baseUrl: "http://test.invalid",
+      fetch: fakeFetch,
+    });
+
+    await client.session.promptAsync(
+      {
+        sessionID: "session",
+        messageID: "message",
+        model: { providerID: "partner-ai", modelID: "gpt-5.4" },
+        variant: "high",
+        parts: [{ type: "text", text: "Hello" }],
+      },
+      { bodySerializer: (body) => serializeOpenCodePromptWithVerbosity(body, "low") },
+    );
+
+    assert.equal(
+      sentBody,
+      '{"messageID":"message","model":{"providerID":"partner-ai","modelID":"gpt-5.4"},"variant":"high","parts":[{"type":"text","text":"Hello"}],"verbosity":"low"}',
+    );
+  });
+
+  it.effect("passes selected GPT-5 verbosity separately from reasoning variant", () =>
+    Effect.gen(function* () {
+      const events = asyncEventStream();
+      let promptPayload: unknown;
+      let promptSerializer: ((body: unknown) => string) | undefined;
+      const harness = yield* makeOpenCodeRuntimeHarness(
+        "verbosity",
+        "verbosity-session",
+        {
+          event: { subscribe: async () => ({ stream: events.stream }) },
+          session: {
+            create: async () => ({
+              data: {
+                id: "verbosity-session",
+                time: { created: 1, updated: 1 },
+              },
+            }),
+            promptAsync: async (
+              input: unknown,
+              options?: { readonly bodySerializer?: (body: unknown) => string },
+            ) => {
+              promptPayload = input;
+              promptSerializer = options?.bodySerializer;
+              return { data: true };
+            },
+            abort: async () => ({ data: true }),
+            children: async () => ({ data: [] }),
+          },
+        },
+        {
+          model: "partner-ai/gpt-5.4",
+          options: [
+            { id: "variant", value: "high" },
+            { id: "verbosity", value: "low" },
+          ],
+        },
+      );
+
+      yield* harness.startTurn();
+
+      const payload = decodeJsonRecord(promptPayload);
+      assert.equal(payload.variant, "high");
+      assert.equal(payload.verbosity, "low");
+      assert.isFunction(promptSerializer);
+      const serialized = promptSerializer?.(payload);
+      assert.isString(serialized);
+      const outgoing = decodeJsonStringRecord(serialized);
+      assert.deepEqual(outgoing.model, { providerID: "partner-ai", modelID: "gpt-5.4" });
+      assert.equal(outgoing.variant, "high");
+      assert.equal(outgoing.verbosity, "low");
+      assert.deepEqual(outgoing.parts, [{ type: "text", text: "hello" }]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
   it.effect.each(["completed", "failed", "unresolved", "unavailable", "reconnect"] as const)(
     "normalizes OpenCode step usage for %s turns",
     (ending) =>
@@ -1547,6 +1640,7 @@ describe("OpenCodeAdapterV2", () => {
             settledOverride: null,
             settledAt: null,
             lastVisitedAt: null,
+            hiddenAt: null,
             deletedAt: null,
           },
           threadId,
@@ -1845,6 +1939,7 @@ describe("OpenCodeAdapterV2", () => {
             settledOverride: null,
             settledAt: null,
             lastVisitedAt: null,
+            hiddenAt: null,
             deletedAt: null,
           },
           threadId,

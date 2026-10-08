@@ -4,10 +4,13 @@ import type { EnvironmentThreadShell } from "./models.ts";
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
 
+import { isThreadHidden } from "./threadHidden.ts";
+
 export interface ThreadSortInput {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly latestUserMessageAt?: string | null;
+  readonly hiddenAt?: string | null | undefined;
   readonly messages?: ReadonlyArray<{
     readonly createdAt: string;
     readonly role: string;
@@ -161,7 +164,9 @@ export function getLatestThreadForProject<
   let latest: T | null = null;
   let latestTimestamp = Number.NEGATIVE_INFINITY;
   for (const thread of threads) {
-    if (thread.projectId !== projectId || thread.archivedAt !== null) continue;
+    if (thread.projectId !== projectId || thread.archivedAt !== null || isThreadHidden(thread)) {
+      continue;
+    }
     const timestamp = getThreadSortTimestamp(thread, sortOrder);
     if (
       latest === null ||

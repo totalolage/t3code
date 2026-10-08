@@ -50,10 +50,12 @@ import {
   resolveMergedStageDependencies,
   resolveFffNativeDependencies,
   resolveBuildOptions,
+  resolveDesktopAppId,
   resolveDesktopBuildIconAssets,
   resolveDesktopProductName,
   resolveDesktopUpdateChannel,
   resolveDesktopWebAssetBrand,
+  resolveF8yBuildRejection,
   resolveResourceMonitorRustTargets,
   resolveWindowsServerAsarIgnoreGlobs,
   resourceMonitorExecutableName,
@@ -76,6 +78,7 @@ import {
   WindowsPrimaryNativeProbeError,
   WindowsDesktopBuildPrerequisitesMissingError,
   WindowsPackagedPayloadValidationError,
+  UnsupportedF8yDesktopBuildError,
   WINDOWS_NATIVE_ASAR_UNPACK_GLOB,
   stageCursorSdkPlatformPackages,
   WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT,
@@ -261,6 +264,73 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it("resolves the dedicated nightly updater channel from nightly versions", () => {
     assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
+  });
+
+  it("opts into f8y only for strict release versions", () => {
+    assert.equal(resolveDesktopUpdateChannel("1.2.3-f8y.20260912.7"), "f8y");
+    for (const version of [
+      "1.2-f8y.20260912.7",
+      "1.2.3-f8y.2026091.7",
+      "prefix-1.2.3-f8y.20260912.7",
+      "1.2.3-f8y.20260912.7-suffix",
+      "1.2.3-f8y.20260912.7\n",
+    ]) {
+      assert.equal(resolveDesktopUpdateChannel(version), "latest");
+    }
+  });
+
+  it("keeps f8y on production branding and the stable DMG artwork", () => {
+    const version = "1.2.3-f8y.20260912.7";
+    assert.equal(resolveDesktopAppId(version), "dev.f8y.t3code");
+    assert.equal(resolveDesktopProductName(version), "T3 Code (Alpha)");
+    assert.equal(resolveDesktopWebAssetBrand(version), "production");
+    assert.deepStrictEqual(resolveDesktopBuildIconAssets(version), {
+      macIconPng: BRAND_ASSET_PATHS.productionMacIconPng,
+      linuxIconPng: BRAND_ASSET_PATHS.productionLinuxIconPng,
+      windowsIconIco: BRAND_ASSET_PATHS.productionWindowsIconIco,
+    });
+  });
+
+  it("rejects unsupported f8y platform, target, architecture, and paid signing", () => {
+    const version = "1.2.3-f8y.20260912.7";
+    const base = {
+      version,
+      platform: "linux" as const,
+      target: "AppImage",
+      arch: "x64" as const,
+      signed: false,
+    };
+    const cases = [
+      [{ ...base, platform: "win" as const }, "platform"],
+      [{ ...base, target: "deb" }, "target"],
+      [{ ...base, platform: "mac" as const, target: "zip", arch: "arm64" as const }, "target"],
+      [{ ...base, arch: "arm64" as const }, "arch"],
+      [{ ...base, platform: "mac" as const, target: "dmg", arch: "x64" as const }, "arch"],
+      [{ ...base, signed: true }, "signed"],
+      [
+        {
+          ...base,
+          platform: "mac" as const,
+          target: "dmg",
+          arch: "arm64" as const,
+          signed: true,
+        },
+        "signed",
+      ],
+    ] as const;
+
+    for (const [input, reason] of cases) {
+      assert.equal(resolveF8yBuildRejection(input), reason);
+    }
+    assert.isUndefined(
+      resolveF8yBuildRejection({
+        ...base,
+        platform: "mac",
+        target: "dmg",
+        arch: "arm64",
+      }),
+    );
+    assert.isUndefined(resolveF8yBuildRejection({ ...base, version: "1.2.3" }));
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
@@ -697,6 +767,79 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       }
       assert.deepStrictEqual(mac.electronLanguages, DESKTOP_ELECTRON_LANGUAGES);
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("configures f8y Linux and macOS artifacts without changing resources", () =>
+    Effect.gen(function* () {
+      const version = "1.2.3-f8y.20260912.7";
+      const linux = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        version,
+        false,
+        true,
+        4123,
+        undefined,
+        false,
+        "x64",
+      );
+      const mac = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        version,
+        false,
+        true,
+        4123,
+        {
+          entitlementsPath: "/tmp/entitlements.mac.plist",
+          provisioningProfilePath: "/tmp/t3code.provisionprofile",
+        },
+        false,
+        "arm64",
+      );
+
+      assert.equal(linux.appId, "dev.f8y.t3code");
+      assert.deepStrictEqual(linux.publish, [
+        {
+          provider: "github",
+          owner: "totalolage",
+          repo: "t3code",
+          releaseType: "prerelease",
+          channel: "f8y",
+        },
+      ]);
+      assert.deepStrictEqual(linux.extraResources, [
+        ...DESKTOP_EXTRA_RESOURCES,
+        ...LINUX_CAPTURE_EXTRA_RESOURCES,
+        { from: "apps/desktop/prod-resources/browser-secret", to: "browser-secret" },
+      ]);
+      assert.deepStrictEqual((linux.linux as Record<string, unknown>).target, ["AppImage"]);
+      assert.equal(mac.appId, "dev.f8y.t3code");
+      assert.equal(mac.publish, null);
+      assert.deepStrictEqual(mac.extraResources, DESKTOP_EXTRA_RESOURCES);
+      assert.deepStrictEqual((mac.mac as Record<string, unknown>).target, ["dmg"]);
+      assert.equal((mac.mac as Record<string, unknown>).identity, "-");
+      assert.equal((mac.mac as Record<string, unknown>).notarize, false);
+      assert.equal(mac.forceCodeSigning, true);
+      assert.notProperty(mac.mac as Record<string, unknown>, "sign");
+      assert.notProperty(mac.mac as Record<string, unknown>, "entitlements");
+      assert.notProperty(mac.mac as Record<string, unknown>, "provisioningProfile");
+      assert.equal(
+        (mac.dmg as Record<string, unknown>).background,
+        "dmg/dmg-background-latest.png",
+      );
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: {
+              GITHUB_REPOSITORY: "ambient.example/repo",
+              T3CODE_DESKTOP_UPDATE_REPOSITORY: "synthetic.example/updates",
+            },
+          }),
+        ),
+      ),
+    ),
   );
 
   it("excludes foreign node-pty prebuilds from macOS and Linux packages", () => {
@@ -1175,7 +1318,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
                 Effect.gen(function* () {
                   assert.equal(command._tag, "StandardCommand");
                   if (command._tag !== "StandardCommand") return mockProcess(1);
-                  assert.equal(command.command, "cargo");
+                  assert.match(command.command, /(?:^|[\\/])cargo(?:\.exe)?$/u);
                   assert.deepEqual(command.args, [
                     "build",
                     "--locked",
@@ -2287,6 +2430,38 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         assert.instanceOf(error, UnsupportedDesktopBuildArchitectureError);
         assert.deepStrictEqual(error.supportedArchitectures, ["x64", "arm64"]);
       }
+    }),
+  );
+
+  it.effect("rejects an invalid f8y target during option resolution", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        resolveBuildOptions({
+          platform: Option.some("linux"),
+          target: Option.some("deb"),
+          arch: Option.some("x64"),
+          buildVersion: Option.some("1.2.3-f8y.20260912.7"),
+          outputDir: Option.none(),
+          skipBuild: Option.none(),
+          keepStage: Option.none(),
+          signed: Option.none(),
+          verbose: Option.none(),
+          mockUpdates: Option.none(),
+          mockUpdateServerPort: Option.none(),
+          wslRuntime: Option.none(),
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              Layer.succeed(HostProcessPlatform, "linux"),
+              Layer.succeed(HostProcessArchitecture, "x64"),
+              ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+            ),
+          ),
+        ),
+      );
+
+      assert.instanceOf(error, UnsupportedF8yDesktopBuildError);
+      assert.equal(error.reason, "target");
     }),
   );
 

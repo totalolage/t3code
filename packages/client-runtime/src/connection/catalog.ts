@@ -1,4 +1,6 @@
 import { DesktopSshEnvironmentTargetSchema, EnvironmentId } from "@t3tools/contracts";
+import { RemoteQueryParameter } from "@t3tools/shared/remote";
+import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -33,6 +35,10 @@ export class BearerConnectionProfile extends Schema.TaggedClass<BearerConnection
      * Connect credential instead of a stored bearer token.
      */
     authorization: Schema.optionalKey(Schema.Literal("t3-connect")),
+    queryParameters: Schema.Array(RemoteQueryParameter).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.withConstructorDefault(Effect.succeed([])),
+    ),
   },
 ) {}
 

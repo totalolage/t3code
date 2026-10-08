@@ -80,6 +80,7 @@ const emptyProjection = {
     createdAt: now,
     updatedAt: now,
     archivedAt: null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     lastVisitedAt: null,
@@ -146,6 +147,7 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
 
   it("applies thread lifecycle payloads instead of leaving stale metadata", () => {
     const archivedAt = DateTime.makeUnsafe("2026-06-20T01:00:00.000Z");
+    const hiddenAt = DateTime.makeUnsafe("2026-06-20T02:00:00.000Z");
     const event = {
       id: "event-archive",
       type: "thread.archived",
@@ -157,6 +159,27 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
     const next = applyOrchestrationV2ProjectionEvent(emptyProjection, event);
     expect(next?.thread.archivedAt).toEqual(archivedAt);
     expect(next?.updatedAt).toEqual(archivedAt);
+
+    const hidden = applyOrchestrationV2ProjectionEvent(next, {
+      id: "event-hidden",
+      type: "thread.hidden",
+      threadId,
+      occurredAt: hiddenAt,
+      payload: { ...emptyProjection.thread, hiddenAt, updatedAt: hiddenAt },
+    } as OrchestrationV2DomainEvent);
+    expect(hidden?.thread.hiddenAt).toEqual(hiddenAt);
+    expect(hidden?.updatedAt).toEqual(hiddenAt);
+
+    const unhiddenAt = DateTime.makeUnsafe("2026-06-20T03:00:00.000Z");
+    const unhidden = applyOrchestrationV2ProjectionEvent(hidden, {
+      id: "event-unhidden",
+      type: "thread.unhidden",
+      threadId,
+      occurredAt: unhiddenAt,
+      payload: { ...emptyProjection.thread, hiddenAt: null, updatedAt: unhiddenAt },
+    } as OrchestrationV2DomainEvent);
+    expect(unhidden?.thread.hiddenAt).toBeNull();
+    expect(unhidden?.updatedAt).toEqual(unhiddenAt);
   });
 
   it("ignores events for another thread", () => {

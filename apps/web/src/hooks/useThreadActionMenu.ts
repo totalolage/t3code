@@ -7,6 +7,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
+import { isThreadHidden } from "@t3tools/client-runtime/state/thread-hidden";
 import {
   AuthOrchestrationOperateScope,
   type ScopedThreadRef,
@@ -30,6 +31,7 @@ import {
   readEnvironmentSupportsPinning,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
+  readEnvironmentSupportsHiding,
   readEnvironmentSupportsTitleRegeneration,
   readThreadShell,
   useProjects,
@@ -97,6 +99,8 @@ export function useThreadActionMenu(input: {
     confirmAndUnpinThread,
     setThreadAutoSettle,
     archiveThread,
+    hideThread,
+    unhideThread,
     deleteThread,
     markThreadUnread,
   } = useThreadActions();
@@ -143,6 +147,7 @@ export function useThreadActionMenu(input: {
           autoSettleOptOut: readEnvironmentSupportsAutoSettleOptOut(threadRef.environmentId),
           snooze: readEnvironmentSupportsSnooze(threadRef.environmentId),
           pinning: readEnvironmentSupportsPinning(threadRef.environmentId),
+          hiding: readEnvironmentSupportsHiding(threadRef.environmentId),
           titleRegeneration: readEnvironmentSupportsTitleRegeneration(threadRef.environmentId),
         };
         const isRegeneratingTitle = thread.titleRegeneration != null;
@@ -157,6 +162,7 @@ export function useThreadActionMenu(input: {
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
+          isHidden: isThreadHidden(thread),
           isRunning: !threadRuntimeCanArchive(thread.runtime),
           supports,
           snoozePresets,
@@ -309,6 +315,12 @@ export function useThreadActionMenu(input: {
             }
             return;
           }
+          case "hide":
+            await reportFailure("Failed to hide thread", () => hideThread(threadRef));
+            return;
+          case "unhide":
+            await reportFailure("Failed to unhide thread", () => unhideThread(threadRef));
+            return;
           case "delete": {
             if (confirmThreadDelete) {
               const confirmed = await settlePromise(() =>
@@ -350,6 +362,7 @@ export function useThreadActionMenu(input: {
       copyThreadIdToClipboard,
       deleteThread,
       handleNewThread,
+      hideThread,
       logicalProjectKeyByPhysicalKey,
       markThreadUnread,
       onStartRename,
@@ -363,6 +376,7 @@ export function useThreadActionMenu(input: {
       snoozeThread,
       threadRef,
       timestampFormat,
+      unhideThread,
       unsettleThread,
       unsnoozeThread,
       updateThreadMetadata,

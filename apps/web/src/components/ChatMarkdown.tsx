@@ -2594,6 +2594,7 @@ function useChatMarkdownState({
         threadRef,
         httpBaseUrl:
           preparedConnection._tag === "Some" ? preparedConnection.value.httpBaseUrl : undefined,
+        connection: preparedConnection._tag === "Some" ? preparedConnection.value : undefined,
         createAssetUrl,
         onOpenFile: threadRef
           ? (path) => useRightPanelStore.getState().openFile(threadRef, path)
@@ -2810,7 +2811,7 @@ function useChatMarkdownState({
         threadRef,
         filePath: path,
         workspaceRoot: cwd,
-        httpBaseUrl: preparedConnection.value.httpBaseUrl,
+        connection: preparedConnection.value,
         createAssetUrl,
         openPreview,
       });

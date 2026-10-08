@@ -31,6 +31,109 @@ afterEach(() => {
 });
 
 describe("ConnectionStorage.makeCatalogStore", () => {
+  it.effect("preserves bearer query parameters and credentials through a store round trip", () =>
+    Effect.gen(function* () {
+      const connectionId = "bearer:query-parameters";
+      const environmentId = "query-parameters-environment";
+      const target = {
+        _tag: "BearerConnectionTarget",
+        environmentId,
+        label: "Remote with parameters",
+        connectionId,
+      };
+      const queryParameters = [
+        { key: "proxy", value: "first value" },
+        { key: "proxy", value: "second value with spaces" },
+      ];
+      const profile = {
+        _tag: "BearerConnectionProfile",
+        connectionId,
+        environmentId,
+        label: "Remote with parameters",
+        httpBaseUrl: "https://remote.example.test/api",
+        wsBaseUrl: "wss://remote.example.test/socket",
+        queryParameters,
+      };
+      const credential = {
+        connectionId,
+        credential: {
+          _tag: "BearerConnectionCredential",
+          token: "bearer credential",
+        },
+      };
+      const raw =
+        '{"schemaVersion":1,"targets":[{"_tag":"BearerConnectionTarget","environmentId":"query-parameters-environment","label":"Remote with parameters","connectionId":"bearer:query-parameters"}],"profiles":[{"_tag":"BearerConnectionProfile","connectionId":"bearer:query-parameters","environmentId":"query-parameters-environment","label":"Remote with parameters","httpBaseUrl":"https://remote.example.test/api","wsBaseUrl":"wss://remote.example.test/socket","queryParameters":[{"key":"proxy","value":"first value"},{"key":"proxy","value":"second value with spaces"}]}],"credentials":[{"connectionId":"bearer:query-parameters","credential":{"_tag":"BearerConnectionCredential","token":"bearer credential"}}],"remoteDpopTokens":[]}';
+      const writes: string[] = [];
+      const store = yield* ConnectionStorage.makeCatalogStore({
+        read: Effect.succeed(raw),
+        write: (value) => Effect.sync(() => writes.push(value)),
+      });
+
+      const catalog = yield* store.read;
+      expect(catalog.targets).toEqual([target]);
+      expect(catalog.profiles).toEqual([profile]);
+      expect(catalog.credentials).toEqual([credential]);
+
+      yield* store.update((document) => document);
+
+      expect(writes).toHaveLength(1);
+      expect(decodeCatalog(writes[0]!)).toEqual({
+        ...emptyCatalog,
+        targets: [target],
+        profiles: [profile],
+        credentials: [credential],
+      });
+
+      const roundTrippedStore = yield* ConnectionStorage.makeCatalogStore({
+        read: Effect.succeed(writes[0]!),
+        write: () => Effect.void,
+      });
+      const roundTripped = yield* roundTrippedStore.read;
+
+      expect(roundTripped.targets).toEqual([target]);
+      expect(roundTripped.profiles).toEqual([profile]);
+      expect(roundTripped.credentials).toEqual([credential]);
+    }),
+  );
+
+  it.effect(
+    "defaults missing legacy bearer query parameters without quarantining the catalog",
+    () =>
+      Effect.gen(function* () {
+        const connectionId = "bearer:legacy-profile";
+        const environmentId = "legacy-profile-environment";
+        const credential = {
+          connectionId,
+          credential: {
+            _tag: "BearerConnectionCredential",
+            token: "legacy bearer credential",
+          },
+        };
+        const raw =
+          '{"schemaVersion":1,"targets":[{"_tag":"BearerConnectionTarget","environmentId":"legacy-profile-environment","label":"Legacy remote","connectionId":"bearer:legacy-profile"}],"profiles":[{"_tag":"BearerConnectionProfile","connectionId":"bearer:legacy-profile","environmentId":"legacy-profile-environment","label":"Legacy remote","httpBaseUrl":"https://legacy.example.test/api","wsBaseUrl":"wss://legacy.example.test/socket"}],"credentials":[{"connectionId":"bearer:legacy-profile","credential":{"_tag":"BearerConnectionCredential","token":"legacy bearer credential"}}],"remoteDpopTokens":[]}';
+        const writes: string[] = [];
+        const quarantined: string[] = [];
+        const store = yield* ConnectionStorage.makeCatalogStore({
+          read: Effect.succeed(raw),
+          write: (value) => Effect.sync(() => writes.push(value)),
+          quarantine: (value) => Effect.sync(() => quarantined.push(value)),
+        });
+
+        const catalog = yield* store.read;
+
+        expect(catalog.profiles[0]).toMatchObject({
+          connectionId,
+          environmentId,
+          httpBaseUrl: "https://legacy.example.test/api",
+          wsBaseUrl: "wss://legacy.example.test/socket",
+          queryParameters: [],
+        });
+        expect(catalog.credentials).toEqual([credential]);
+        expect(quarantined).toEqual([]);
+        expect(writes).toEqual([]);
+      }),
+  );
+
   it.effect("quarantines malformed catalogs and starts from an empty document", () =>
     Effect.gen(function* () {
       const writes: string[] = [];

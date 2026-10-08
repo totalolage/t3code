@@ -165,6 +165,7 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
       wsBaseUrl: profile.wsBaseUrl,
       bearerToken: credential.token,
       connectionMethod: "direct",
+      queryParameters: profile.queryParameters,
     });
     return {
       environmentId: authorized.environmentId,
@@ -172,6 +173,7 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
       httpBaseUrl: authorized.httpBaseUrl,
       socketUrl: authorized.socketUrl,
       httpAuthorization: authorized.httpAuthorization,
+      queryParameters: profile.queryParameters,
       target,
     } satisfies PreparedConnection;
   });
@@ -288,8 +290,10 @@ export const make = Effect.gen(function* () {
           return ssh({ ...entry, target });
       }
     })();
+    const queryParameters = "queryParameters" in prepared ? prepared.queryParameters : undefined;
     const descriptor = yield* fetchRemoteEnvironmentDescriptor({
       httpBaseUrl: prepared.httpBaseUrl,
+      ...(queryParameters === undefined ? {} : { queryParameters }),
     }).pipe(
       Effect.mapError(mapRemoteEnvironmentError),
       Effect.provideService(HttpClient.HttpClient, httpClient),

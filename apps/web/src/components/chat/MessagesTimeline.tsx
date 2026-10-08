@@ -1932,31 +1932,54 @@ function ContextCompactionTimelineRow({
 }: {
   row: Extract<TimelineRow, { kind: "context-compaction" }>;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetail = row.detail !== undefined && row.detail.length > 0;
+  const label = (
+    <span className="flex items-center gap-1.5">
+      <Minimize2Icon aria-hidden="true" className="size-3" />
+      {row.label}
+      {hasDetail ? (
+        <ChevronDownIcon
+          aria-hidden="true"
+          className={cn("size-3 transition-transform", expanded && "rotate-180")}
+        />
+      ) : null}
+    </span>
+  );
+
   return (
     <div
-      role="separator"
+      role={hasDetail ? "group" : "separator"}
       aria-label={row.label}
-      className="mx-auto flex w-full max-w-(--chat-content-max-width) items-center gap-3 py-1 text-muted-foreground text-xs"
+      className="mx-auto w-full max-w-(--chat-content-max-width) py-1 text-muted-foreground text-xs"
     >
-      <span className="h-px flex-1 bg-border/70" />
-      <span
-        ref={row.active ? observeVisibleAnimation : undefined}
-        className="relative shrink-0 overflow-hidden"
-      >
-        <span className="flex items-center gap-1.5">
-          <Minimize2Icon aria-hidden="true" className="size-3" />
-          {row.label}
+      <div className="flex items-center gap-3">
+        <span className="h-px flex-1 bg-border/70" />
+        <span
+          ref={row.active ? observeVisibleAnimation : undefined}
+          className="relative shrink-0 overflow-hidden"
+        >
+          {hasDetail ? (
+            <button
+              type="button"
+              aria-expanded={expanded}
+              className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={() => setExpanded((current) => !current)}
+            >
+              {label}
+            </button>
+          ) : (
+            label
+          )}
+          {row.active ? <ActivityShimmerOverlay>{label}</ActivityShimmerOverlay> : null}
         </span>
-        {row.active ? (
-          <ActivityShimmerOverlay>
-            <span className="flex items-center gap-1.5">
-              <Minimize2Icon aria-hidden="true" className="size-3" />
-              {row.label}
-            </span>
-          </ActivityShimmerOverlay>
-        ) : null}
-      </span>
-      <span className="h-px flex-1 bg-border/70" />
+        <span className="h-px flex-1 bg-border/70" />
+      </div>
+      {expanded && hasDetail ? (
+        <pre className="mx-auto mt-2 max-h-80 max-w-full overflow-auto whitespace-pre-wrap rounded-md border bg-muted/30 p-3 font-mono text-xs text-foreground">
+          {row.detail}
+        </pre>
+      ) : null}
     </div>
   );
 }
@@ -5031,6 +5054,11 @@ function buildToolCallExpandedBody(
   visibleLabel: string,
   viewedImagePath: string | null,
 ): string | null {
+  if (workEntry.sourceActivityKind === "context-compaction") {
+    return typeof workEntry.detail === "string" && workEntry.detail.length > 0
+      ? workEntry.detail
+      : null;
+  }
   const blocks: string[] = [];
   const seen = new Set<string>([visibleLabel.trim()]);
   const addBlock = (value: string | null | undefined) => {

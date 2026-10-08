@@ -42,8 +42,10 @@ import { HttpClient } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
+  DATABASE_INCOMPATIBLE_EXIT_CODE,
   DesktopBackendBootstrap,
   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
+  type DesktopBackendTerminalFailure as DesktopBackendTerminalFailureValue,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
   DesktopTelemetryControlMessage,
   type DesktopTelemetryControlMessage as DesktopTelemetryControlMessageValue,
@@ -304,6 +306,9 @@ export interface BackendInstanceSpec {
   // retries. Returns true when the callback changed configuration and the
   // manager should resolve once more; false stops the failed instance.
   readonly onPreflightFailed?: (failure: PreflightFailure) => Effect.Effect<boolean>;
+  // Fired when this instance exits with a terminal backend failure instead of
+  // an exit that can be recovered by restarting the child process.
+  readonly onTerminalFailure?: (failure: DesktopBackendTerminalFailureValue) => Effect.Effect<void>;
 }
 
 interface ActiveBackendRun {
@@ -338,6 +343,10 @@ const initialState: BackendManagerState = {
   restartFiber: Option.none(),
   nextRunId: 1,
 };
+
+const databaseIncompatibleTerminalFailure = {
+  _tag: "DatabaseIncompatible",
+} satisfies DesktopBackendTerminalFailureValue;
 
 const activePid = (active: Option.Option<ActiveBackendRun>): Option.Option<number> =>
   Option.flatMap(active, (run) => run.pid);
@@ -867,58 +876,88 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
 
         const finalizeRun = Effect.fn("desktop.backendInstance.finalizeRun")(function* (
           reason: string,
+          exitCode: Option.Option<number> = Option.none(),
         ) {
-          yield* mutex.withPermits(1)(
+          const { restartFiber, terminalFailure } = yield* mutex.withPermits(1)(
             Effect.gen(function* () {
-              const { isCurrentRun, nextState, pid, exitObserved, stopRequested, wasReady } =
-                yield* Ref.modify(
-                  state,
-                  (
-                    latest,
-                  ): readonly [
-                    {
-                      readonly isCurrentRun: boolean;
-                      readonly nextState: BackendManagerState;
-                      readonly pid: Option.Option<number>;
-                      readonly exitObserved: boolean;
-                      readonly stopRequested: boolean;
-                      readonly wasReady: boolean;
-                    },
-                    BackendManagerState,
-                  ] => {
-                    const currentRun = Option.getOrUndefined(latest.active);
-                    if (currentRun?.id !== runId) {
-                      return [
-                        {
-                          isCurrentRun: false,
-                          nextState: latest,
-                          pid: Option.none<number>(),
-                          exitObserved: false,
-                          stopRequested: false,
-                          wasReady: false,
-                        },
-                        latest,
-                      ] as const;
-                    }
-
-                    const next = {
-                      ...latest,
-                      active: Option.none<ActiveBackendRun>(),
-                      ready: false,
-                    };
+              const {
+                isCurrentRun,
+                nextState,
+                pid,
+                exitObserved,
+                stopRequested,
+                wasReady,
+                restartFiber: runRestartFiber,
+                terminalFailure: runTerminalFailure,
+              } = yield* Ref.modify(
+                state,
+                (
+                  latest,
+                ): readonly [
+                  {
+                    readonly isCurrentRun: boolean;
+                    readonly nextState: BackendManagerState;
+                    readonly pid: Option.Option<number>;
+                    readonly exitObserved: boolean;
+                    readonly stopRequested: boolean;
+                    readonly wasReady: boolean;
+                    readonly restartFiber: Option.Option<Fiber.Fiber<void, never>>;
+                    readonly terminalFailure: Option.Option<DesktopBackendTerminalFailureValue>;
+                  },
+                  BackendManagerState,
+                ] => {
+                  const currentRun = Option.getOrUndefined(latest.active);
+                  if (currentRun?.id !== runId) {
                     return [
                       {
-                        isCurrentRun: true,
-                        nextState: next,
-                        pid: currentRun.pid,
-                        exitObserved: currentRun.exitObserved,
-                        stopRequested: currentRun.stopRequested,
-                        wasReady: latest.ready,
+                        isCurrentRun: false,
+                        nextState: latest,
+                        pid: Option.none<number>(),
+                        exitObserved: false,
+                        stopRequested: false,
+                        wasReady: false,
+                        restartFiber: Option.none(),
+                        terminalFailure: Option.none(),
                       },
-                      next,
+                      latest,
                     ] as const;
-                  },
-                );
+                  }
+
+                  const isTerminalFailure =
+                    latest.desiredRunning &&
+                    currentRun.exitObserved &&
+                    !currentRun.stopRequested &&
+                    Option.exists(exitCode, (code) => code === DATABASE_INCOMPATIBLE_EXIT_CODE);
+                  const next = {
+                    ...latest,
+                    active: Option.none<ActiveBackendRun>(),
+                    ready: false,
+                    ...(isTerminalFailure
+                      ? {
+                          desiredRunning: false,
+                          restartFiber: Option.none<Fiber.Fiber<void, never>>(),
+                        }
+                      : {}),
+                  };
+                  return [
+                    {
+                      isCurrentRun: true,
+                      nextState: next,
+                      pid: currentRun.pid,
+                      exitObserved: currentRun.exitObserved,
+                      stopRequested: currentRun.stopRequested,
+                      wasReady: latest.ready,
+                      restartFiber: isTerminalFailure
+                        ? latest.restartFiber
+                        : Option.none<Fiber.Fiber<void, never>>(),
+                      terminalFailure: isTerminalFailure
+                        ? Option.some(databaseIncompatibleTerminalFailure)
+                        : Option.none<DesktopBackendTerminalFailureValue>(),
+                    },
+                    next,
+                  ] as const;
+                },
+              );
 
               if (isCurrentRun) {
                 yield* desktopTelemetryPublisher.removeControlSource(spec.id);
@@ -936,11 +975,32 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
                 }
               }
 
+              if (isCurrentRun && Option.isSome(runTerminalFailure)) {
+                yield* logInstanceError("backend exited with a terminal failure; not restarting", {
+                  reason,
+                  exitCode: DATABASE_INCOMPATIBLE_EXIT_CODE,
+                });
+              }
+
               if (isCurrentRun && nextState.desiredRunning) {
                 yield* scheduleRestart(reason);
               }
+
+              return {
+                restartFiber: runRestartFiber,
+                terminalFailure: runTerminalFailure,
+              };
             }),
           );
+
+          yield* Option.match(restartFiber, {
+            onNone: () => Effect.void,
+            onSome: (fiber) => Fiber.interrupt(fiber).pipe(Effect.asVoid),
+          });
+          yield* Option.match(terminalFailure, {
+            onNone: () => Effect.void,
+            onSome: (failure) => spec.onTerminalFailure?.(failure) ?? Effect.void,
+          });
         });
 
         const program = runBackendProcess({
@@ -968,7 +1028,13 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
           onReady: Effect.fn("desktop.backendInstance.onReady")(function* () {
             const isCurrentRun = yield* Ref.modify(state, (latest) => {
               const activeRun = Option.getOrUndefined(latest.active);
-              if (activeRun?.id !== runId) {
+              if (
+                activeRun === undefined ||
+                activeRun.id !== runId ||
+                activeRun.exitObserved ||
+                activeRun.stopRequested ||
+                !latest.desiredRunning
+              ) {
                 return [false, latest] as const;
               }
 
@@ -1013,7 +1079,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
           Scope.provide(runScope),
           Effect.matchEffect({
             onFailure: (error) => finalizeRun(error.message),
-            onSuccess: (exit) => finalizeRun(exit.reason),
+            onSuccess: (exit) => finalizeRun(exit.reason, exit.code),
           }),
           Effect.ensuring(Scope.close(runScope, Exit.void).pipe(Effect.ignore)),
         );
@@ -1094,7 +1160,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
       Effect.gen(function* () {
         const result = yield* Ref.modify(state, (latest) => {
           const active = Option.map(latest.active, (run) =>
-            run.exitObserved ? run : { ...run, stopRequested: true },
+            run.stopRequested ? run : { ...run, stopRequested: true },
           );
           return [
             {

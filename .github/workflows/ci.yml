@@ -19,7 +19,7 @@ jobs:
   # passes only when every other job does.
   lint:
     name: Lint
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -55,9 +55,63 @@ jobs:
       - name: Check
         run: vp check
 
+  standalone-smoke:
+    name: Standalone Smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Resolve standalone smoke version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./apps/server/package.json").version')"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build web client for embedding
+        run: APP_VERSION="$VERSION" vp run --filter @t3tools/web build
+
+      - name: Build standalone binary
+        run: bun apps/server/scripts/buildStandaloneBinary.ts --target bun-linux-x64-baseline --outfile "$RUNNER_TEMP/t3-${VERSION}-linux-x64" --version "$VERSION"
+
+      - name: Smoke standalone binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_home="$RUNNER_TEMP/standalone-smoke-home"
+          export T3CODE_HOME="$smoke_home/t3"
+          mkdir -m 700 -p "$smoke_home" "$T3CODE_HOME"
+
+          artifact="$RUNNER_TEMP/t3-${VERSION}-linux-x64"
+          actual="$(NO_COLOR=1 "$artifact" --version)"
+          test "$actual" = "t3 v$VERSION"
+
+          protocol="$(bun -e 'import { SERVICE_LAUNCHER_PROTOCOL } from "./apps/server/src/cloud/serviceProtocol.ts"; console.log(SERVICE_LAUNCHER_PROTOCOL)')"
+          preflight="$(NO_COLOR=1 "$artifact" __service-preflight --database-path "$RUNNER_TEMP/standalone-smoke.sqlite" --launcher-protocol "$protocol")"
+          printf '%s\n' "$preflight" | jq -e --arg version "$VERSION" --argjson protocol "$protocol" '.status == "ready" and .version == $version and .launcherProtocol == $protocol'
+
   typecheck:
     name: Typecheck
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -83,7 +137,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -95,11 +149,14 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/setup-apt-mirrors
+        if: ${{ github.repository == 'pingdotgg/t3code' }}
 
       # Runs in the background while Vite+ installs; the step before the build waits for it.
       - name: Start installing browser secret helper build libraries
         run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
+          if [[ "$GITHUB_REPOSITORY" == "pingdotgg/t3code" ]]; then
+            sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
+          fi
           (
             set +e
             sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
@@ -137,7 +194,7 @@ jobs:
   # per runner is unchanged.
   test:
     name: Test
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -159,12 +216,15 @@ jobs:
           command -v cc
 
       - uses: ./.github/actions/setup-apt-mirrors
+        if: ${{ github.repository == 'pingdotgg/t3code' }}
 
       # The desktop tests compile the browser secret helper. The install runs in
       # the background while Vite+ installs; the step before the tests waits for it.
       - name: Start installing browser secret helper build libraries
         run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
+          if [[ "$GITHUB_REPOSITORY" == "pingdotgg/t3code" ]]; then
+            sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
+          fi
           (
             set +e
             sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
@@ -201,7 +261,7 @@ jobs:
   # started last and ran alone for about 40s after everything else finished.
   test_web:
     name: Test Web
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -230,7 +290,7 @@ jobs:
   # split files by recorded duration (apps/server/src/testUtils/weightedShardSequencer.ts).
   test_server:
     name: Test Server ${{ matrix.shard }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -302,7 +362,7 @@ jobs:
     # On Blacksmith like every other job here: the GitHub-hosted queue is shared
     # with the PR bots and can leave this job waiting until it is abandoned,
     # which fails `Check` on an otherwise green run.
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - name: Require transfer measurements
@@ -315,7 +375,7 @@ jobs:
   # for checks that take under 3s, on the critical path of every PR.
   rust:
     name: Rust
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -349,7 +409,7 @@ jobs:
   # the diff cannot be resolved, the lint runs.
   mobile_native_changes:
     name: Mobile Native Changes
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -427,7 +487,7 @@ jobs:
     # Skip only on an explicit "no": a gate job that failed or errored leaves the
     # output empty, and that must run the lint rather than silently skip it.
     if: ${{ !cancelled() && needs.mobile_native_changes.outputs.changed != 'false' }}
-    runs-on: blacksmith-6vcpu-macos-26
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-6vcpu-macos-26' || 'macos-15' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -455,7 +515,7 @@ jobs:
 
   release_smoke:
     name: Release Smoke
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -499,8 +559,9 @@ jobs:
         mobile_native_changes,
         mobile_native_static_analysis,
         release_smoke,
+        standalone-smoke,
       ]
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - name: Require every job to pass

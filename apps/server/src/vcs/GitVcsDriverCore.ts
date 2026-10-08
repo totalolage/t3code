@@ -43,6 +43,7 @@ import {
   parseRemoteRefWithRemoteNames,
 } from "../git/remoteRefs.ts";
 import * as ServerConfig from "../config.ts";
+import { classifyGitWorktreeCreateError } from "./worktreeCreateError.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const gitProcesses = Semaphore.makeUnsafe(8);
@@ -3421,18 +3422,19 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const onCheckoutProgress = progress?.onCheckoutProgress;
 
     const checkoutWorkers = (yield* readConfigValue(input.cwd, "checkout.workers")) ?? "0";
-    yield* executeGit(
+    const commandArgs = ["-c", `checkout.workers=${checkoutWorkers}`, ...args];
+    const result = yield* executeGitWithStableDiagnostics(
       "GitVcsDriver.createWorktree",
       input.cwd,
-      ["-c", `checkout.workers=${checkoutWorkers}`, ...args],
+      commandArgs,
       {
-        fallbackErrorDetail: "git worktree add failed",
+        allowNonZeroExit: true,
         timeoutMs: WORKTREE_ADD_TIMEOUT_MS,
         ...(onCheckoutProgress
           ? {
               // Git only prints checkout progress when stderr is a tty or the
               // delay elapsed. GIT_PROGRESS_DELAY=0 forces it through the pipe.
-              env: { GIT_PROGRESS_DELAY: "0", LC_ALL: "C" },
+              env: { GIT_PROGRESS_DELAY: "0" },
               progress: {
                 onStderrLine: (line) => {
                   const parsed = parseGitCheckoutProgressLine(line);
@@ -3443,6 +3445,22 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           : {}),
       },
     );
+
+    if (result.exitCode !== 0) {
+      const classification = classifyGitWorktreeCreateError(result.stderr);
+      return yield* new GitCommandError({
+        ...gitCommandContext({
+          operation: "GitVcsDriver.createWorktree",
+          cwd: input.cwd,
+          args: commandArgs,
+        }),
+        detail: classification.detail,
+        worktreeReason: classification.reason,
+        ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
+        stdoutLength: result.stdout.length,
+        stderrLength: result.stderr.length,
+      });
+    }
 
     if (progress?.onWorktreeClaimed) {
       yield* progress.onWorktreeClaimed(worktreePath);

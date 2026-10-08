@@ -137,6 +137,15 @@ export function mapRemoteEnvironmentError(
         detail: "The environment rejected the authentication request.",
         traceId: error.traceId,
       });
+    case "EnvironmentConflictError":
+      // Not expected during connection authorization, but the shared request
+      // error type now includes it (used by orchestration create/dispatch).
+      // Treat it as a configuration issue with the endpoint.
+      return new ConnectionBlockedError({
+        reason: "configuration",
+        detail: error.message,
+        traceId: error.traceId,
+      });
     case "EnvironmentResourceNotFoundError":
       // Not expected during connection authorization, but the shared request
       // error type now includes it (used by resource fetches like the thread
@@ -144,6 +153,14 @@ export function mapRemoteEnvironmentError(
       return new ConnectionBlockedError({
         reason: "configuration",
         detail: "The environment endpoint could not be found.",
+        traceId: error.traceId,
+      });
+    case "EnvironmentThreadCompactionError":
+      // The contract's reason-derived message is deliberately safe: it names
+      // the actionable outcome without exposing provider diagnostics.
+      return new ConnectionTransientError({
+        reason: "remote-unavailable",
+        detail: error.message,
         traceId: error.traceId,
       });
     case "RemoteEnvironmentAuthTimeoutError":

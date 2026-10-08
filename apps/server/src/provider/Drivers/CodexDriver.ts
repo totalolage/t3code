@@ -49,8 +49,10 @@ import {
   withCodexAppServerClient,
 } from "../CodexProvider.ts";
 import { resolveCodexLaunchArgs } from "../codexLaunchArgs.ts";
+import { applyCodexVerbosityCapabilities } from "../CodexModelManifest.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import * as ModelManifest from "../ModelManifest.ts";
+import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import { withInstanceIdentity } from "./instanceIdentity.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
@@ -78,6 +80,17 @@ import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
+
+function applyCodexManifest(
+  draft: ServerProviderDraft,
+  manifest: ModelManifest.ModelManifestData,
+): ServerProviderDraft {
+  const applied = ModelManifest.applyModelManifest(draft, manifest, DRIVER_KIND);
+  return {
+    ...applied,
+    models: applyCodexVerbosityCapabilities(applied.models, manifest),
+  };
+}
 // The standalone installer lays out `<CODEX_HOME>/packages/standalone/…`;
 // CODEX_HOME is not always `~/.codex`.
 function isCodexStandaloneCommandPath(commandPath: string): boolean {
@@ -225,8 +238,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
           Effect.zipWith(
             checkCodexProviderStatus(effectiveConfig, undefined, processEnv),
             modelManifest.current,
-            (draft, manifest) =>
-              stampIdentity(ModelManifest.applyModelManifest(draft, manifest, DRIVER_KIND)),
+            (draft, manifest) => stampIdentity(applyCodexManifest(draft, manifest)),
             { concurrent: true },
           ),
         ),
@@ -242,8 +254,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
           Effect.zipWith(
             makePendingCodexProvider(settings.provider),
             modelManifest.current,
-            (draft, manifest) =>
-              stampIdentity(ModelManifest.applyModelManifest(draft, manifest, DRIVER_KIND)),
+            (draft, manifest) => stampIdentity(applyCodexManifest(draft, manifest)),
           ),
         checkProvider,
         enrichSnapshot: ({ settings, snapshot, publishSnapshot }) =>

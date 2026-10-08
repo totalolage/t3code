@@ -2,13 +2,14 @@ import type { ExpoConfig } from "expo/config";
 
 import { BRAND_ASSET_PATHS } from "../../scripts/lib/brand-assets.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
-
-type AppVariant = "development" | "preview" | "production";
+import { F8Y_APP_IDENTITY, resolveAppVariant, resolveF8yBuildConfig } from "./f8yBuildConfig.ts";
 
 const repoEnv = loadRepoEnv();
 Object.assign(process.env, repoEnv);
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
+const isF8yBuild = APP_VARIANT === "f8y";
+const f8yBuildConfig = isF8yBuild ? resolveF8yBuildConfig(process.env) : undefined;
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
 const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
@@ -96,18 +97,11 @@ const VARIANT_CONFIG = {
     relyingParty: "clerk.t3.codes",
     assets: RELEASE_ASSETS,
   },
+  f8y: {
+    ...F8Y_APP_IDENTITY,
+    assets: RELEASE_ASSETS,
+  },
 } as const;
-
-function resolveAppVariant(value: string | undefined): AppVariant {
-  switch (value) {
-    case "development":
-    case "preview":
-    case "production":
-      return value;
-    default:
-      return "production";
-  }
-}
 
 const variant = VARIANT_CONFIG[APP_VARIANT];
 const iosBundleIdentifier = isIosPersonalTeamBuild
@@ -229,7 +223,7 @@ const config: ExpoConfig = {
   slug: "t3-code",
   platforms: ["ios", "android"],
   scheme: variant.scheme,
-  version: "2.0.0",
+  version: f8yBuildConfig?.version ?? "2.0.0",
   runtimeVersion: {
     // Development manifests resolve on every launch, so avoid fingerprint's
     // expensive native-project calculation there. Preview and production stay
@@ -239,12 +233,14 @@ const config: ExpoConfig = {
   orientation: "portrait",
   icon: variant.assets.appIcon,
   userInterfaceStyle: "automatic",
-  updates: {
-    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
-    url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
-    checkAutomatically: "ON_LOAD",
-    fallbackToCacheTimeout: 0,
-  },
+  updates: isF8yBuild
+    ? { enabled: false }
+    : {
+        enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
+        url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
+        checkAutomatically: "ON_LOAD",
+        fallbackToCacheTimeout: 0,
+      },
   ios: {
     icon: variant.assets.iosIcon,
     supportsTablet: true,
@@ -294,6 +290,7 @@ const config: ExpoConfig = {
   android: {
     icon: variant.assets.appIcon,
     package: variant.androidPackage,
+    ...(f8yBuildConfig ? { versionCode: f8yBuildConfig.versionCode } : {}),
     ...(repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE
       ? { googleServicesFile: repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE }
       : {}),
@@ -460,6 +457,7 @@ const config: ExpoConfig = {
     "./plugins/withAndroidModernPopupMenu.cjs",
     "./plugins/withAndroidModernAlertDialog.cjs",
     "./plugins/withAndroidPredictiveBackCompat.cjs",
+    ...(isF8yBuild ? ["./plugins/withF8yAndroidSigning.cjs"] : []),
     "./plugins/withAndroidTabletOrientation.cjs",
     ...(isIosPersonalTeamBuild ? ["./plugins/withoutIosPersonalTeamCapabilities.cjs"] : []),
   ],
@@ -487,11 +485,15 @@ const config: ExpoConfig = {
       tracesDataset: repoEnv.EXPO_PUBLIC_OTLP_TRACES_DATASET ?? null,
       tracesToken: repoEnv.EXPO_PUBLIC_OTLP_TRACES_TOKEN ?? null,
     },
-    eas: {
-      projectId: "d763fcb8-d37c-41ea-a773-b54a0ab4a454",
-    },
+    ...(isF8yBuild
+      ? {}
+      : {
+          eas: {
+            projectId: "d763fcb8-d37c-41ea-a773-b54a0ab4a454",
+          },
+        }),
   },
-  owner: "pingdotgg",
+  ...(isF8yBuild ? {} : { owner: "pingdotgg" }),
 };
 
 export default config;

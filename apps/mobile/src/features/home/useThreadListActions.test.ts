@@ -31,6 +31,7 @@ const state = vi.hoisted(() => ({
 
 vi.mock("react", () => ({
   useCallback: (callback: unknown) => callback,
+  useMemo: <A>(factory: () => A) => factory(),
   useRef: (current: unknown) => ({ current }),
 }));
 vi.mock("react-native", () => ({
@@ -55,6 +56,9 @@ vi.mock("../../state/session", () => ({
 }));
 vi.mock("../../state/server", () => ({
   environmentServerConfigsAtom: "server-configs",
+}));
+vi.mock("../../state/thread-hiding", () => ({
+  getThreadHidingUnavailableReason: () => null,
 }));
 vi.mock("../../state/atom-registry", () => ({
   appAtomRegistry: {

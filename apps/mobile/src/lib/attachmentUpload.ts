@@ -1,4 +1,3 @@
-import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import {
   clampFileAttachmentUploadBytes,
   fileAttachmentTooLargeMessage,
@@ -25,6 +24,7 @@ import { attachmentEnvironment } from "../state/attachments";
 import { environmentSession, readEnvironmentScope } from "../state/session";
 import { resolveOwnedComposerAttachmentFileUri } from "./composerAttachmentFiles";
 import { retainComposerAttachmentFileForPreview } from "./composerAttachmentPreviewRetention";
+import { resolveNativeAssetUrl } from "./nativeAssetUrl";
 import {
   isComposerImageAttachment,
   isFileBackedComposerAttachment,
@@ -427,7 +427,7 @@ export async function prepareTurnAttachments(input: {
           );
           return Option.isNone(currentConnection)
             ? null
-            : resolveAssetUrl(currentConnection.value.httpBaseUrl, relativeUrl);
+            : resolveNativeAssetUrl(currentConnection.value, relativeUrl);
         },
         transport: (url) => ({
           done: uploadFileBytes(

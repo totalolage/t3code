@@ -464,6 +464,12 @@ export const AuthSessionState = Schema.Struct({
   scopes: Schema.optionalKey(AuthEnvironmentScopes),
   permissions: authScopeResponseFields.permissions,
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
+  principal: Schema.optionalKey(
+    Schema.Struct({
+      sessionId: AuthSessionId,
+      subject: TrimmedNonEmptyString,
+    }),
+  ),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;

@@ -44,18 +44,37 @@ import {
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
 } from "./environment.ts";
 import {
+  CommandId,
   DpopFailureReason,
   AuthSessionId,
+  IsoDateTime,
+  NonNegativeInt,
+  RunId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "./chatAttachment.ts";
+import { GitWorktreeCreateErrorReason } from "./git.ts";
 import {
   OrchestrationV2ShellSnapshot,
   OrchestrationV2ThreadBoundedSnapshot,
   OrchestrationV2ThreadDetailSnapshot,
   OrchestrationV2ThreadHistoryPage,
+  OrchestrationV2AppThread,
+  OrchestrationV2PlanArtifact,
+  OrchestrationV2ProviderSession,
+  OrchestrationCliDispatchCommand,
+  OrchestrationV2DispatchCommandResult,
 } from "./orchestrationV2.ts";
 import { Project, ProjectMutation, ProjectSnapshot } from "./project.ts";
+import {
+  RemoteInteractionAnswerRequest,
+  RemoteInteractionApproveRequest,
+  RemoteInteractionRejectRequest,
+  RemoteInteractionResponseResult,
+  RemotePendingInteractionsQuery,
+  RemotePendingInteractionsResult,
+} from "./pendingInteractions.ts";
 import {
   PullRequestDiffInput,
   PullRequestDiffResult,
@@ -71,6 +90,7 @@ import {
   RelayEnvironmentMintResponse,
   RelayLinkProofRequest,
 } from "./relay.ts";
+import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 
 const OptionalBearerHeaders = Schema.Struct({
   authorization: Schema.optionalKey(Schema.String),
@@ -92,6 +112,7 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "scope_not_granted",
   "invalid_command",
   "invalid_history_cursor",
+  "invalid_interaction",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -105,6 +126,15 @@ export const EnvironmentOperationForbiddenReason = Schema.Literals([
   "current_session_revoke_not_allowed",
 ]);
 export type EnvironmentOperationForbiddenReason = typeof EnvironmentOperationForbiddenReason.Type;
+
+export const EnvironmentConflictReason = Schema.Literals([
+  "worktree_branch_exists",
+  "worktree_ref_in_use",
+  "worktree_path_exists",
+  "worktree_registration_conflict",
+  "idempotency_payload_mismatch",
+]);
+export type EnvironmentConflictReason = typeof EnvironmentConflictReason.Type;
 
 export const EnvironmentInternalErrorReason = Schema.Literals([
   "bootstrap_validation_failed",
@@ -123,9 +153,84 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "orchestration_thread_snapshot_failed",
   "orchestration_thread_bounded_snapshot_failed",
   "orchestration_thread_history_failed",
+  "orchestration_dispatch_failed",
+  "orchestration_send_outcome_unknown",
+  "pending_interactions_read_failed",
+  "pending_interaction_response_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
+
+export const OrchestrationCliCreateIdempotencyKey = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(256),
+);
+export type OrchestrationCliCreateIdempotencyKey = typeof OrchestrationCliCreateIdempotencyKey.Type;
+
+export const OrchestrationCliCreateRequest = Schema.Struct({
+  project: TrimmedNonEmptyString,
+  message: TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
+  idempotencyKey: OrchestrationCliCreateIdempotencyKey,
+  title: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+  branch: Schema.optionalKey(TrimmedNonEmptyString),
+  baseBranch: Schema.optionalKey(TrimmedNonEmptyString),
+  startFromOrigin: Schema.optionalKey(Schema.Boolean),
+  runtimeMode: Schema.optionalKey(RuntimeMode),
+  interactionMode: Schema.optionalKey(ProviderInteractionMode),
+});
+export type OrchestrationCliCreateRequest = typeof OrchestrationCliCreateRequest.Type;
+
+export const OrchestrationCliCreateResult = Schema.Struct({
+  threadId: ThreadId,
+  commandId: CommandId,
+  turnId: RunId,
+  sequence: NonNegativeInt,
+  replayed: Schema.Boolean,
+});
+export type OrchestrationCliCreateResult = typeof OrchestrationCliCreateResult.Type;
+
+/** Body-light native metadata for the retained CLI orchestration snapshot. */
+export const OrchestrationCliThreadMetadata = Schema.Struct({
+  ...OrchestrationV2AppThread.fields,
+  latestRunId: Schema.NullOr(RunId),
+  activeRunId: Schema.NullOr(RunId),
+  plans: Schema.Array(OrchestrationV2PlanArtifact),
+  providerSessions: Schema.Array(OrchestrationV2ProviderSession),
+  messages: Schema.Array(Schema.Never),
+  activities: Schema.Array(Schema.Never),
+  checkpoints: Schema.Array(Schema.Never),
+});
+export type OrchestrationCliThreadMetadata = typeof OrchestrationCliThreadMetadata.Type;
+
+export const OrchestrationCliSnapshot = Schema.Struct({
+  snapshotSequence: NonNegativeInt,
+  projects: Schema.Array(Project),
+  threads: Schema.Array(OrchestrationCliThreadMetadata),
+  updatedAt: Schema.NullOr(IsoDateTime),
+});
+export type OrchestrationCliSnapshot = typeof OrchestrationCliSnapshot.Type;
+
+export const OrchestrationCompactRequest = Schema.Struct({
+  threadId: ThreadId,
+  idempotencyKey: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+});
+export type OrchestrationCompactRequest = typeof OrchestrationCompactRequest.Type;
+
+export const OrchestrationCompactResult = Schema.Struct({
+  threadId: ThreadId,
+  commandId: CommandId,
+  sequence: NonNegativeInt,
+  replayed: Schema.Boolean,
+});
+export type OrchestrationCompactResult = typeof OrchestrationCompactResult.Type;
+
+export const ThreadCompactCompletionReason = Schema.Literals([
+  "active-thread",
+  "unsupported-provider",
+  "provider-rejected",
+  "request-interrupted",
+  "recovery-required",
+]);
+export type ThreadCompactCompletionReason = typeof ThreadCompactCompletionReason.Type;
 
 export class EnvironmentRequestInvalidError extends Schema.TaggedError<EnvironmentRequestInvalidError>()(
   "EnvironmentRequestInvalidError",
@@ -220,7 +325,26 @@ export class EnvironmentInternalError extends Schema.TaggedError<EnvironmentInte
   }
 }
 
-export const EnvironmentResourceNotFoundReason = Schema.Literals(["thread_not_found"]);
+export class EnvironmentConflictError extends Schema.TaggedError<EnvironmentConflictError>()(
+  "EnvironmentConflictError",
+  {
+    code: Schema.Literal("conflict"),
+    reason: EnvironmentConflictReason,
+    message: TrimmedNonEmptyString,
+    traceId: TrimmedNonEmptyString,
+  },
+  { httpApiStatus: 409 },
+) {
+  [HttpServerRespondable.symbol]() {
+    return HttpServerResponse.schemaJson(EnvironmentConflictError)(this, { status: 409 });
+  }
+}
+
+export const EnvironmentResourceNotFoundReason = Schema.Literals([
+  "thread_not_found",
+  "project_not_found",
+  "pending_interaction_not_found",
+]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
 export class EnvironmentResourceNotFoundError extends Schema.TaggedError<EnvironmentResourceNotFoundError>()(
@@ -241,12 +365,43 @@ export class EnvironmentResourceNotFoundError extends Schema.TaggedError<Environ
   }
 }
 
+export class EnvironmentThreadCompactionError extends Schema.TaggedError<EnvironmentThreadCompactionError>()(
+  "EnvironmentThreadCompactionError",
+  {
+    code: Schema.Literal("thread_compaction_failed"),
+    reason: ThreadCompactCompletionReason,
+    traceId: TrimmedNonEmptyString,
+  },
+  { httpApiStatus: 409 },
+) {
+  [HttpServerRespondable.symbol]() {
+    return HttpServerResponse.schemaJson(EnvironmentThreadCompactionError)(this, { status: 409 });
+  }
+
+  override get message(): string {
+    switch (this.reason) {
+      case "active-thread":
+        return "The thread is active and cannot be compacted.";
+      case "unsupported-provider":
+        return "The selected provider does not support thread compaction.";
+      case "provider-rejected":
+        return "The provider rejected thread compaction.";
+      case "request-interrupted":
+        return "Thread compaction was interrupted.";
+      case "recovery-required":
+        return "Thread compaction requires recovery before it can continue.";
+    }
+  }
+}
+
 export const EnvironmentHttpCommonError = Schema.Union([
   EnvironmentRequestInvalidError,
   EnvironmentAuthInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentOperationForbiddenError,
+  EnvironmentConflictError,
   EnvironmentResourceNotFoundError,
+  EnvironmentThreadCompactionError,
   EnvironmentInternalError,
 ]);
 export type EnvironmentHttpCommonError = typeof EnvironmentHttpCommonError.Type;
@@ -308,6 +463,7 @@ export class EnvironmentHttpConflictError extends Schema.TaggedError<Environment
   "EnvironmentHttpConflictError",
   {
     message: Schema.String,
+    worktreeReason: Schema.optional(GitWorktreeCreateErrorReason),
   },
   { httpApiStatus: 409 },
 ) {
@@ -365,9 +521,33 @@ const EnvironmentOrchestrationThreadSnapshotErrors = [
   EnvironmentResourceNotFoundError,
   EnvironmentInternalError,
 ] as const;
+const EnvironmentOrchestrationCompactErrors = [
+  EnvironmentRequestInvalidError,
+  EnvironmentScopeRequiredError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentThreadCompactionError,
+  EnvironmentInternalError,
+] as const;
 const EnvironmentProjectMutationErrors = [
   EnvironmentRequestInvalidError,
   EnvironmentScopeRequiredError,
+  EnvironmentHttpConflictError,
+  EnvironmentConflictError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentOrchestrationDispatchErrors = [
+  ...EnvironmentProjectMutationErrors,
+  EnvironmentResourceNotFoundError,
+] as const;
+const EnvironmentPendingInteractionsReadErrors = [
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentPendingInteractionResponseErrors = [
+  EnvironmentRequestInvalidError,
+  EnvironmentScopeRequiredError,
+  EnvironmentConflictError,
+  EnvironmentResourceNotFoundError,
   EnvironmentInternalError,
 ] as const;
 
@@ -597,6 +777,21 @@ const EnvironmentOrchestrationThreadHistoryErrors = [
 
 class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
   .add(
+    HttpApiEndpoint.get("snapshot", "/api/orchestration/snapshot", {
+      headers: OptionalBearerHeaders,
+      success: OrchestrationCliSnapshot,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("dispatch", "/api/orchestration/dispatch", {
+      headers: OptionalBearerHeaders,
+      payload: OrchestrationCliDispatchCommand,
+      success: OrchestrationV2DispatchCommandResult,
+      error: EnvironmentOrchestrationDispatchErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
     HttpApiEndpoint.get("shellSnapshot", "/api/orchestration/shell", {
       headers: OrchestrationProtocolHeaders,
       success: OrchestrationV2ShellSnapshot,
@@ -627,6 +822,66 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
       success: OrchestrationV2ThreadHistoryPage,
       error: EnvironmentOrchestrationThreadHistoryErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("create", "/api/orchestration/create", {
+      headers: OptionalBearerHeaders,
+      payload: OrchestrationCliCreateRequest,
+      success: OrchestrationCliCreateResult,
+      error: EnvironmentOrchestrationDispatchErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("compact", "/api/orchestration/compact", {
+      headers: OptionalBearerHeaders,
+      payload: OrchestrationCompactRequest,
+      success: OrchestrationCompactResult,
+      error: EnvironmentOrchestrationCompactErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("pendingInteractions", "/api/orchestration/pending-interactions", {
+      headers: OptionalBearerHeaders,
+      query: RemotePendingInteractionsQuery,
+      success: RemotePendingInteractionsResult,
+      error: EnvironmentPendingInteractionsReadErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post(
+      "answerPendingInteraction",
+      "/api/orchestration/pending-interactions/answer",
+      {
+        headers: OptionalBearerHeaders,
+        payload: RemoteInteractionAnswerRequest,
+        success: RemoteInteractionResponseResult,
+        error: EnvironmentPendingInteractionResponseErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post(
+      "approvePendingInteraction",
+      "/api/orchestration/pending-interactions/approve",
+      {
+        headers: OptionalBearerHeaders,
+        payload: RemoteInteractionApproveRequest,
+        success: RemoteInteractionResponseResult,
+        error: EnvironmentPendingInteractionResponseErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post(
+      "rejectPendingInteraction",
+      "/api/orchestration/pending-interactions/reject",
+      {
+        headers: OptionalBearerHeaders,
+        payload: RemoteInteractionRejectRequest,
+        success: RemoteInteractionResponseResult,
+        error: EnvironmentPendingInteractionResponseErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
 class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")

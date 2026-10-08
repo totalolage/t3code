@@ -15,6 +15,9 @@ import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import * as ServerConfig from "../../config.ts";
 import * as SqlitePersistence from "../../persistence/Sqlite.ts";
 import * as ServerSettings from "../../serverSettings.ts";
+import type { SqliteCompatibilityError } from "../../persistence/SqliteCompatibility.ts";
+import type { SqliteInspectionError } from "../../persistence/SqliteInspection.ts";
+import type { SqliteMigrationLineageError } from "../../persistence/ForkSqliteMigration.ts";
 import * as ThreadManagementService from "../ThreadManagementService.ts";
 import * as McpSessionRegistryTestkit from "../../mcp/McpSessionRegistry.testkit.ts";
 import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
@@ -47,6 +50,7 @@ import * as ProviderTurnStartServiceTestkit from "../ProviderTurnStartService.te
 import * as McpAppModelContext from "../../mcpApps/McpAppModelContext.ts";
 import * as RunExecutionService from "../RunExecutionService.ts";
 import * as RunFinalizationService from "../RunFinalizationService.ts";
+import * as ServiceUpdateAdmission from "../ServiceUpdateAdmission.ts";
 import * as ThreadTitleRegenerationService from "../ThreadTitleRegenerationService.ts";
 import * as RuntimePolicy from "../RuntimePolicy.ts";
 import * as TurnItemPositionStore from "../TurnItemPositionStore.ts";
@@ -60,6 +64,14 @@ import {
   type OrchestratorV2ScenarioResult,
 } from "./OrchestratorScenario.ts";
 import { makeProviderReplayGate, type ProviderReplayGate } from "./ProviderReplayGate.testkit.ts";
+
+type ReplayDatabaseError =
+  | MigrationError
+  | PlatformError.PlatformError
+  | SqlError
+  | SqliteCompatibilityError
+  | SqliteMigrationLineageError
+  | SqliteInspectionError;
 
 export function makeReplayServerConfig(
   scenario: string,
@@ -177,10 +189,7 @@ export function runOrchestratorV2ProviderReplayScenario<
   scenario: OrchestratorV2ProviderReplayScenario<Transcript>,
   harness: OrchestratorV2ProviderReplayHarness<Transcript, Error>,
   options: {
-    readonly databaseLayer?: Layer.Layer<
-      SqlClient.SqlClient,
-      MigrationError | PlatformError.PlatformError | SqlError
-    >;
+    readonly databaseLayer?: Layer.Layer<SqlClient.SqlClient, ReplayDatabaseError>;
     readonly runEffectWorker?: boolean;
     // Start continuation runs for provider wake turns, as the live runtime does.
     // Off by default: most fixtures record no wake turn.
@@ -192,12 +201,7 @@ export function runOrchestratorV2ProviderReplayScenario<
   } = {},
 ): Effect.Effect<
   OrchestratorV2ScenarioResult,
-  | Orchestrator.OrchestratorV2Error
-  | OrchestratorV2ScenarioStepError
-  | Error
-  | MigrationError
-  | PlatformError.PlatformError
-  | SqlError,
+  Orchestrator.OrchestratorV2Error | OrchestratorV2ScenarioStepError | Error | ReplayDatabaseError,
   never
 > {
   const replayGate = makeProviderReplayGate(
@@ -219,10 +223,7 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
   scenario: OrchestratorV2ProviderReplayScenario<Transcript>,
   harness: OrchestratorV2ProviderReplayHarness<Transcript, Error>,
   options: {
-    readonly databaseLayer?: Layer.Layer<
-      SqlClient.SqlClient,
-      MigrationError | PlatformError.PlatformError | SqlError
-    >;
+    readonly databaseLayer?: Layer.Layer<SqlClient.SqlClient, ReplayDatabaseError>;
     readonly runEffectWorker?: boolean;
     // Start continuation runs for provider wake turns, as the live runtime does.
     // Off by default: most fixtures record no wake turn.
@@ -234,8 +235,18 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
     readonly replayGate?: ProviderReplayGate;
   } = {},
 ): Layer.Layer<
-  Orchestrator.OrchestratorV2 | EffectWorker.OrchestrationEffectWorkerV2 | EventSink.EventSinkV2,
-  Error | MigrationError | PlatformError.PlatformError | SqlError
+  | Orchestrator.OrchestratorV2
+  | EventStore.EventStoreV2
+  | CommandReceiptStore.CommandReceiptStoreV2
+  | EffectWorker.OrchestrationEffectWorkerV2
+  | EventSink.EventSinkV2
+  | EffectOutbox.EffectOutboxV2
+  | ProjectStore.ProjectStoreV2
+  | ProviderSessionManager.ProviderSessionManagerV2
+  | RunExecutionService.RunExecutionServiceV2
+  | SqlClient.SqlClient
+  | ServiceUpdateAdmission.ServiceUpdateAdmission,
+  Error | ReplayDatabaseError
 > {
   const layerRegistry = harness.makeProviderAdapterRegistryLayer(
     scenario.transcript,
@@ -248,10 +259,7 @@ export function layerWithRegistry<Error>(
   scenario: Pick<OrchestratorV2ProviderReplayScenario, "name" | "runtimePolicyOverride">,
   registryLayer: Layer.Layer<ProviderAdapterRegistry.ProviderAdapterRegistryV2, Error>,
   options: {
-    readonly databaseLayer?: Layer.Layer<
-      SqlClient.SqlClient,
-      MigrationError | PlatformError.PlatformError | SqlError
-    >;
+    readonly databaseLayer?: Layer.Layer<SqlClient.SqlClient, ReplayDatabaseError>;
     readonly runEffectWorker?: boolean;
     // Start continuation runs for provider wake turns, as the live runtime does.
     // Off by default: most fixtures record no wake turn.
@@ -263,10 +271,17 @@ export function layerWithRegistry<Error>(
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
+  | EventStore.EventStoreV2
+  | CommandReceiptStore.CommandReceiptStoreV2
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
-  | ProviderSessionManager.ProviderSessionManagerV2,
-  Error | MigrationError | PlatformError.PlatformError | SqlError
+  | EffectOutbox.EffectOutboxV2
+  | ProjectStore.ProjectStoreV2
+  | ProviderSessionManager.ProviderSessionManagerV2
+  | RunExecutionService.RunExecutionServiceV2
+  | SqlClient.SqlClient
+  | ServiceUpdateAdmission.ServiceUpdateAdmission,
+  Error | ReplayDatabaseError
 > {
   const layerServerConfig = Layer.effect(
     ServerConfig.ServerConfig,
@@ -301,6 +316,7 @@ export function layerWithRegistry<Error>(
   const layerEventSinkProvided = EventSink.layerFromStores.pipe(
     Layer.provide(Layer.mergeAll(layerStores, layerDatabase)),
   );
+  const serviceUpdateAdmissionProvided = ServiceUpdateAdmission.layer;
   const layerCommandReceiptStoreProvided = CommandReceiptStore.layer.pipe(
     Layer.provide(layerDatabase),
   );
@@ -346,6 +362,7 @@ export function layerWithRegistry<Error>(
         IdAllocator.layer,
         McpSessionRegistryTestkit.layer,
         layerProviderEventIngestorProvided,
+        serviceUpdateAdmissionProvided,
         layerStores,
       ),
     ),
@@ -361,6 +378,7 @@ export function layerWithRegistry<Error>(
         layerEventSinkProvided,
         IdAllocator.layer,
         layerProviderEventIngestorProvided,
+        serviceUpdateAdmissionProvided,
         layerServerSettings,
       ),
     ),
@@ -425,6 +443,7 @@ export function layerWithRegistry<Error>(
         CommandPolicy.layer,
         layerContextHandoffServiceProvided,
         layerPersistence,
+        serviceUpdateAdmissionProvided,
         layerProvidedRegistry,
         layerContinuationRequests,
         layerRuntime,
@@ -475,14 +494,20 @@ export function layerWithRegistry<Error>(
     ),
   );
   const layerEffectWorkerProvided = EffectWorker.layer.pipe(
-    Layer.provide(Layer.merge(layerStores, layerEffectExecutorProvided)),
+    Layer.provide(
+      Layer.mergeAll(layerStores, layerEffectExecutorProvided, serviceUpdateAdmissionProvided),
+    ),
   );
   const layerReplayRuntime = Layer.mergeAll(
     layerOrchestratorProvided,
     layerProviderSessionManagerProvided,
+    layerRunExecutionServiceProvided,
     layerEffectWorkerProvided,
     layerEventSinkProvided,
     layerContinuationWorkerProvided,
+    layerPersistence,
+    layerDatabase,
+    serviceUpdateAdmissionProvided,
   ).pipe(Layer.provide(ProviderTurnStartServiceTestkit.layer), Layer.provide(NodeServices.layer));
 
   // Build the daemon from the exact worker instance exposed alongside the
@@ -493,10 +518,7 @@ export function layerWithRegistry<Error>(
   }
   // Built before the runtime it shares stores with, so recovery commits before
   // the effect worker claims anything, as in serverRuntimeStartup.
-  const layerStartupRecovery: Layer.Layer<
-    never,
-    MigrationError | PlatformError.PlatformError | SqlError
-  > =
+  const layerStartupRecovery: Layer.Layer<never, ReplayDatabaseError> =
     options.recoverOnStartup === true
       ? Layer.effectDiscard(
           ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService.use(
@@ -507,6 +529,7 @@ export function layerWithRegistry<Error>(
           Layer.provide(
             Layer.mergeAll(
               layerStores,
+              layerDatabase,
               layerEventSinkProvided,
               IdAllocator.layer,
               layerServerSettings,

@@ -26,8 +26,10 @@ import { useCallback, useMemo, useRef } from "react";
 import { getFallbackThreadIdAfterDelete, pinOrderKeyBetween } from "../components/Sidebar.logic";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { environmentSession, readEnvironmentScope } from "../state/session";
-import { terminalEnvironment } from "../state/terminal";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { EnvironmentRpcUnavailableError } from "@t3tools/client-runtime/rpc";
+import { environmentPresentations } from "../state/presentation";
+import { terminalEnvironment } from "../state/terminal";
 import { environmentServerConfigsAtom } from "../state/server";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { threadEnvironment } from "../state/threads";
@@ -41,6 +43,7 @@ import {
   readEnvironmentSupportsPinning,
   readEnvironmentSupportsPinReorder,
   readEnvironmentSupportsActiveReorder,
+  readEnvironmentSupportsHiding,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
   readEnvironmentSupportsVisitedTracking,
@@ -94,6 +97,18 @@ export class ThreadSnoozeUnsupportedError extends Schema.TaggedError<ThreadSnooz
 ) {
   override get message(): string {
     return "This environment's server does not support snoozing yet. Update the server to use Snooze.";
+  }
+}
+
+export class ThreadHidingUnsupportedError extends Schema.TaggedError<ThreadHidingUnsupportedError>()(
+  "ThreadHidingUnsupportedError",
+  {
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+  },
+) {
+  override get message(): string {
+    return "This environment's server does not support hiding threads yet. Update the server to use Hide.";
   }
 }
 
@@ -167,6 +182,53 @@ export class ThreadActiveReorderUnsupportedError extends Schema.TaggedError<Thre
   override get message(): string {
     return "Update this environment's server to reorder active threads.";
   }
+}
+
+type ThreadHidingMutationInput = Parameters<typeof threadEnvironment.hide.run>[1];
+type ThreadHidingMutationResult = Awaited<ReturnType<typeof threadEnvironment.hide.run>>;
+type ThreadHidingMutation = (
+  input: ThreadHidingMutationInput,
+) => Promise<ThreadHidingMutationResult>;
+
+export async function requestThreadHidingAction(
+  target: ScopedThreadRef,
+  mutate: ThreadHidingMutation,
+) {
+  const presentation = appAtomRegistry.get(
+    environmentPresentations.presentationAtom(target.environmentId),
+  );
+  if (presentation?.connection.phase !== "connected") {
+    const phase = presentation?.connection.phase;
+    return AsyncResult.failure(
+      Cause.fail(
+        new EnvironmentRpcUnavailableError({
+          environmentId: target.environmentId,
+          message: `Environment ${target.environmentId} is ${
+            phase === undefined || phase === "available" ? "not connected" : phase
+          }.`,
+        }),
+      ),
+    );
+  }
+  if (!readEnvironmentSupportsHiding(target.environmentId)) {
+    return AsyncResult.failure(
+      Cause.fail(
+        new ThreadHidingUnsupportedError({
+          environmentId: target.environmentId,
+          threadId: target.threadId,
+        }),
+      ),
+    );
+  }
+
+  const result = await mutate({
+    environmentId: target.environmentId,
+    input: { threadId: target.threadId },
+  });
+  if (result._tag === "Success") {
+    refreshArchivedThreadsForEnvironment(target.environmentId);
+  }
+  return result;
 }
 
 export async function requestThreadUnpinConfirmation(input: {
@@ -275,6 +337,12 @@ export function useThreadActions() {
     reportFailure: false,
   });
   const deleteThreadMutation = useOrchestrationCommand(threadEnvironment.delete, {
+    reportFailure: false,
+  });
+  const hideThreadMutation = useAtomCommand(threadEnvironment.hide, {
+    reportFailure: false,
+  });
+  const unhideThreadMutation = useAtomCommand(threadEnvironment.unhide, {
     reportFailure: false,
   });
   const settleThreadMutation = useOrchestrationCommand(threadEnvironment.settle, {
@@ -434,6 +502,36 @@ export function useThreadActions() {
       resolveThreadTarget,
       unarchiveThread,
     ],
+  );
+
+  const hideThread = useCallback(
+    async (target: ScopedThreadRef, opts: { navigateAway?: boolean } = {}) => {
+      const resolved = opts.navigateAway ? resolveThreadTarget(target) : null;
+      const result = await requestThreadHidingAction(target, hideThreadMutation);
+      const currentRouteThreadRef = opts.navigateAway ? getCurrentRouteThreadRef() : null;
+      const shouldNavigateAway =
+        resolved !== null &&
+        currentRouteThreadRef?.threadId === target.threadId &&
+        currentRouteThreadRef.environmentId === target.environmentId;
+      if (result._tag === "Failure" || !shouldNavigateAway || !resolved) {
+        return result;
+      }
+
+      const navigationResult = await settlePromise(() =>
+        handleNewThreadRef.current(
+          scopeProjectRef(resolved.thread.environmentId, resolved.thread.projectId),
+        ),
+      );
+      return navigationResult._tag === "Failure" ? navigationResult : result;
+    },
+    [getCurrentRouteThreadRef, hideThreadMutation, resolveThreadTarget],
+  );
+
+  const unhideThread = useCallback(
+    async (target: ScopedThreadRef) => {
+      return requestThreadHidingAction(target, unhideThreadMutation);
+    },
+    [unhideThreadMutation],
   );
 
   const deleteThread = useCallback(
@@ -1008,6 +1106,8 @@ export function useThreadActions() {
     () => ({
       archiveThread,
       unarchiveThread,
+      hideThread,
+      unhideThread,
       deleteThread,
       confirmAndDeleteThread,
       settleThread,
@@ -1028,6 +1128,7 @@ export function useThreadActions() {
       confirmAndUnpinThread,
       deleteThread,
       markThreadUnread,
+      hideThread,
       pinThread,
       reorderPinnedThread,
       reorderActiveThread,
@@ -1035,6 +1136,7 @@ export function useThreadActions() {
       settleThread,
       snoozeThread,
       unarchiveThread,
+      unhideThread,
       unpinThread,
       unsettleThread,
       unsnoozeThread,

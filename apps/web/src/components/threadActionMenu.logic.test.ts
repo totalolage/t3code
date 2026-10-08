@@ -16,6 +16,7 @@ const baseState: ThreadActionMenuState = {
   isSnoozed: false,
   canSnoozeNow: true,
   isRegeneratingTitle: false,
+  isHidden: false,
   isRunning: false,
   supports: {
     settlement: true,
@@ -23,6 +24,7 @@ const baseState: ThreadActionMenuState = {
     snooze: true,
     pinning: true,
     titleRegeneration: true,
+    hiding: true,
   },
   snoozePresets: [
     { id: "hour", label: "In 1 hour", whenLabel: "3:00 PM", snoozedUntil: "2026-08-07T15:00:00Z" },
@@ -58,6 +60,7 @@ describe("buildThreadActionMenuItems", () => {
             "rename",
             "regenerate-title",
             "auto-settle",
+            "hide",
             "archive",
             "delete",
           ]
@@ -68,6 +71,7 @@ describe("buildThreadActionMenuItems", () => {
             "rename",
             "regenerate-title",
             "auto-settle",
+            "hide",
             "archive",
             "delete",
           ];
@@ -92,18 +96,28 @@ describe("buildThreadActionMenuItems", () => {
   });
 
   it("hides lifecycle items when the environment lacks the capabilities", () => {
-    expect(
-      ids({
-        ...baseState,
-        supports: {
-          settlement: false,
-          autoSettleOptOut: false,
-          snooze: false,
-          pinning: false,
-          titleRegeneration: false,
-        },
-      }),
-    ).toEqual(["rename", "mark-unread", "copy", "project-settings", "archive", "delete"]);
+    const state = {
+      ...baseState,
+      supports: {
+        settlement: false,
+        autoSettleOptOut: false,
+        snooze: false,
+        pinning: false,
+        titleRegeneration: false,
+        hiding: false,
+      },
+    };
+    expect(ids(state)).toEqual([
+      "rename",
+      "mark-unread",
+      "copy",
+      "project-settings",
+      "archive",
+      "delete",
+    ]);
+    expect(buildThreadActionMenuItems(state).find((item) => item.id === "archive")).toMatchObject({
+      separatorBefore: true,
+    });
   });
 
   it("groups project settings with utility actions before archive", () => {
@@ -114,7 +128,19 @@ describe("buildThreadActionMenuItems", () => {
       label: "Project settings",
       icon: "settings",
     });
-    expect(items[copyIndex + 2]?.id).toBe("archive");
+    expect(items[copyIndex + 2]?.id).toBe("hide");
+    expect(items[copyIndex + 3]?.id).toBe("archive");
+  });
+
+  it("offers unhide for hidden threads and gates it on server capability", () => {
+    expect(ids({ ...baseState, isHidden: true })).toContain("unhide");
+    expect(
+      ids({
+        ...baseState,
+        isHidden: true,
+        supports: { ...baseState.supports, hiding: false },
+      }),
+    ).not.toContain("unhide");
   });
 
   it("offers project filtering only for surfaces with a scoped thread list", () => {
@@ -196,7 +222,7 @@ describe("buildThreadActionMenuItems", () => {
     const archiveItem = items.at(-2);
     expect(archiveItem?.id).toBe("archive");
     expect(archiveItem?.icon).toBe("archive");
-    expect(archiveItem?.separatorBefore).toBe(true);
+    expect(archiveItem?.separatorBefore).toBe(false);
     expect(archiveItem?.destructive).toBeFalsy();
     expect(items.at(-1)?.id).toBe("delete");
   });
@@ -221,6 +247,45 @@ describe("buildThreadActionMenuItems", () => {
       (item) => item.id === "archive",
     );
     expect(archiveItem?.disabled).toBe(true);
+  });
+
+  it("offers hide while running and flips to unhide for hidden threads", () => {
+    const runningHide = buildThreadActionMenuItems({ ...baseState, isRunning: true }).find(
+      (item) => item.id === "hide",
+    );
+    expect(runningHide).toMatchObject({ label: "Hide thread", icon: "eye-off" });
+    expect(runningHide?.disabled).not.toBe(true);
+
+    const hiddenUnhide = buildThreadActionMenuItems({ ...baseState, isHidden: true }).find(
+      (item) => item.id === "unhide",
+    );
+    expect(hiddenUnhide).toMatchObject({ label: "Unhide thread", icon: "eye" });
+    expect(hiddenUnhide?.disabled).not.toBe(true);
+  });
+
+  it("omits hide actions when thread hiding is absent or unsupported", () => {
+    const supportsWithoutHiding = {
+      settlement: baseState.supports.settlement,
+      autoSettleOptOut: baseState.supports.autoSettleOptOut,
+      snooze: baseState.supports.snooze,
+      pinning: baseState.supports.pinning,
+      titleRegeneration: baseState.supports.titleRegeneration,
+    };
+    for (const isHidden of [false, true]) {
+      expect(ids({ ...baseState, isHidden, supports: supportsWithoutHiding })).not.toEqual(
+        expect.arrayContaining(["hide", "unhide"]),
+      );
+      expect(
+        ids({ ...baseState, isHidden, supports: { ...baseState.supports, hiding: false } }),
+      ).not.toEqual(expect.arrayContaining(["hide", "unhide"]));
+    }
+  });
+
+  it("only changes the hide action when thread hiding capability changes", () => {
+    const withHiding = ids({ ...baseState, supports: { ...baseState.supports, hiding: true } });
+    const withoutHiding = ids({ ...baseState, supports: { ...baseState.supports, hiding: false } });
+
+    expect(withHiding.filter((id) => id !== "hide" && id !== "unhide")).toEqual(withoutHiding);
   });
 });
 

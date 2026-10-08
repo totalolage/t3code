@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import { filterFilesystemBrowseEntries } from "@t3tools/client-runtime/state/filesystem";
 import type { SidebarThreadSortOrder } from "@t3tools/contracts/settings";
+import { isThreadHidden } from "@t3tools/client-runtime/state/thread-hidden";
 import * as Arr from "effect/Array";
 import * as Result from "effect/Result";
 import { type ReactNode } from "react";
@@ -306,6 +307,7 @@ export type BuildThreadActionItemsThread = Pick<
   | "projectId"
   | "runtime"
   | "title"
+  | "hiddenAt"
   | "worktreePath"
 > & {
   pullRequests?: SidebarThreadSummary["pullRequests"];
@@ -330,7 +332,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
   limit?: number;
 }): CommandPaletteActionItem[] {
   const sortedThreads = sortThreads(
-    input.threads.filter((thread) => thread.archivedAt === null),
+    input.threads.filter((thread) => thread.archivedAt === null && !isThreadHidden(thread)),
     input.sortOrder,
   );
   const visibleThreads =

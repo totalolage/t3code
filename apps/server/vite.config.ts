@@ -111,6 +111,12 @@ export default mergeConfig(
         js: "#!/usr/bin/env node\n",
       },
       define: {
+        ...(packExecutable
+          ? {
+              __T3CODE_BUILD_SQLITE_RUNTIME__: JSON.stringify("node"),
+              __T3_BUN_STANDALONE__: JSON.stringify(false),
+            }
+          : {}),
         __T3CODE_BUILD_CHANNEL__: JSON.stringify(cliBuildChannel),
         __T3CODE_BUILD_RELAY_URL__: JSON.stringify(repoEnv.T3CODE_RELAY_URL?.trim() ?? ""),
         __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(

@@ -56,6 +56,7 @@ const createThread = Effect.fn(function* (
     createdAt: old,
     updatedAt: old,
     archivedAt: null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     lastVisitedAt: null,

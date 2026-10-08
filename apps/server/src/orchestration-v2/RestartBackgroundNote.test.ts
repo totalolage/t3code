@@ -1,10 +1,12 @@
 import { assert, it } from "@effect/vitest";
 import {
+  CommandId,
   MessageId,
   ProviderThreadId,
   RunAttemptId,
   RunId,
   type OrchestrationV2Run,
+  type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
@@ -17,6 +19,7 @@ import {
   restartContinuationNote,
   mergeRestartCancelledBackgroundWork,
 } from "./RestartBackgroundNote.ts";
+import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
 
 const claudeThread = ProviderThreadId.make("provider-thread:claude");
 const codexThread = ProviderThreadId.make("provider-thread:codex");
@@ -63,6 +66,48 @@ it("keeps the note for the provider thread that lost the work across a provider 
   // Once Claude was told, later Claude turns are not.
   const later = run(4, claudeThread);
   assert.deepEqual(pending(later, [root, onCodex, backOnClaude, later]), []);
+});
+
+it("does not attach cancelled background work to a message-free maintenance run", () => {
+  const source = run(1, claudeThread, { restartCancelledBackgroundWork: lost });
+  const maintenance = {
+    ...run(2, claudeThread),
+    purpose: "compaction",
+    requestCommandId: CommandId.make("command:compact"),
+    userMessageId: undefined,
+  } as unknown as OrchestrationV2Run;
+  assert.deepEqual(
+    pendingRestartCancelledBackgroundWork({
+      runs: [source, maintenance],
+      providerTurns: [turnFor(source)],
+      compactionMessageIds: new Set(),
+      run: maintenance,
+      attempts: [{ id: maintenance.activeAttemptId!, runId: maintenance.id }],
+    }),
+    [],
+  );
+});
+
+it("does not treat a message-free maintenance run as an undelivered mailbox steer", () => {
+  const maintenance = {
+    ...run(2, claudeThread, { status: "cancelled" }),
+    purpose: "compaction",
+    requestCommandId: CommandId.make("command:cancelled-compaction"),
+    userMessageId: undefined,
+  } as unknown as OrchestrationV2Run;
+  const deliveryMessageId = MessageId.make("message:delegated-delivery");
+  const projection = {
+    runs: [maintenance],
+    messages: [
+      {
+        id: deliveryMessageId,
+        runId: maintenance.id,
+        delegatedCompletion: {},
+      },
+    ],
+    providerTurns: [],
+  } as unknown as Pick<OrchestrationV2ThreadProjection, "messages" | "runs" | "providerTurns">;
+  assert.isFalse(isUndeliveredMailboxSteer(projection, deliveryMessageId));
 });
 
 it("delivers a resumed queued run's note even after a higher-ordinal run", () => {

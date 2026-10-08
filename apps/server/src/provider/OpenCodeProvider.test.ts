@@ -20,6 +20,7 @@ import {
   checkOpenCodeProviderStatus,
   loadOpenCode2Workspace,
   makeOpenCode2ModelLoader,
+  makePendingOpenCodeProvider,
   type OpenCode2Model,
   type OpenCode2Workspace,
   openCode2CommandsToServerProviderSlashCommands,
@@ -402,7 +403,130 @@ it.layer(layerTest)("checkOpenCodeProviderStatus", (it) => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
-  it.effect("emits OpenCode variant defaults so trait picker can resolve a visible selection", () =>
+  it.effect(
+    "restores OpenCode reasoning defaults and advertises GPT-5 verbosity by model family",
+    () =>
+      Effect.gen(function* () {
+        runtimeMock.state.inventory = {
+          providerList: {
+            connected: ["openai", "partner-ai"],
+            all: [
+              {
+                id: "openai",
+                name: "OpenAI",
+                models: {
+                  "gpt-5.4": {
+                    id: "gpt-5.4",
+                    name: "GPT-5.4",
+                    api: {
+                      id: "openai.responses",
+                      url: "https://api.openai.com/v1",
+                      npm: "@ai-sdk/openai",
+                    },
+                    variants: {
+                      none: {},
+                      low: {},
+                      medium: {},
+                      high: {},
+                      xhigh: {},
+                    },
+                  },
+                  "gpt-5.3": {
+                    id: "gpt-5.3",
+                    name: "GPT-5.3",
+                    api: {
+                      id: "openai.responses",
+                      url: "https://api.openai.com/v1",
+                      npm: "@ai-sdk/openai",
+                    },
+                    variants: {},
+                  },
+                },
+              },
+              {
+                id: "partner-ai",
+                name: "Partner AI",
+                models: {
+                  "gpt-5.4": {
+                    id: "gpt-5.4",
+                    name: "GPT-5.4",
+                    api: {
+                      id: "openai-compatible.responses",
+                      url: "https://partner.example/v1",
+                      npm: "@ai-sdk/openai-compatible",
+                    },
+                    variants: { medium: {}, high: {} },
+                  },
+                },
+              },
+            ],
+            default: {},
+          },
+          agents: [
+            { name: "build", hidden: false, mode: "primary" },
+            { name: "plan", hidden: false, mode: "primary" },
+          ],
+        };
+
+        const snapshot = yield* checkProvider(makeOpenCodeSettings());
+        const model = snapshot.models.find((entry) => entry.slug === "openai/gpt-5.4");
+
+        NodeAssert.ok(model);
+        const variantDescriptor = model.capabilities?.optionDescriptors?.find(
+          (descriptor) => descriptor.id === "variant" && descriptor.type === "select",
+        );
+        NodeAssert.ok(variantDescriptor && variantDescriptor.type === "select");
+        NodeAssert.equal(variantDescriptor.label, "Reasoning");
+        NodeAssert.equal(variantDescriptor.description, "Select an OpenCode reasoning variant.");
+        NodeAssert.deepEqual(variantDescriptor.options, [
+          { id: "none", label: "None" },
+          { id: "low", label: "Low" },
+          { id: "medium", label: "Medium", isDefault: true },
+          { id: "high", label: "High" },
+          { id: "xhigh", label: "Xhigh" },
+        ]);
+        NodeAssert.equal(variantDescriptor.currentValue, "medium");
+        const verbosityDescriptor = model.capabilities?.optionDescriptors?.find(
+          (descriptor) => descriptor.id === "verbosity" && descriptor.type === "select",
+        );
+        NodeAssert.ok(verbosityDescriptor && verbosityDescriptor.type === "select");
+        NodeAssert.deepEqual(verbosityDescriptor.options, [
+          { id: "low", label: "Low" },
+          { id: "medium", label: "Medium", isDefault: true },
+          { id: "high", label: "High" },
+        ]);
+        NodeAssert.equal(verbosityDescriptor.currentValue, "medium");
+        const partnerModel = snapshot.models.find((entry) => entry.slug === "partner-ai/gpt-5.4");
+        NodeAssert.ok(partnerModel);
+        const partnerVerbosity = partnerModel.capabilities?.optionDescriptors?.find(
+          (descriptor) => descriptor.id === "verbosity" && descriptor.type === "select",
+        );
+        NodeAssert.ok(partnerVerbosity && partnerVerbosity.type === "select");
+        NodeAssert.equal(partnerVerbosity.currentValue, "medium");
+        const synthetic = snapshot.models.find((entry) => entry.slug === "openai/gpt-5.3");
+        NodeAssert.ok(synthetic);
+        const syntheticVariant = synthetic.capabilities?.optionDescriptors?.find(
+          (descriptor) => descriptor.id === "variant" && descriptor.type === "select",
+        );
+        NodeAssert.ok(syntheticVariant && syntheticVariant.type === "select");
+        NodeAssert.deepEqual(
+          syntheticVariant.options.map((option) => option.id),
+          ["low", "medium", "high", "xhigh"],
+        );
+        NodeAssert.equal(syntheticVariant.currentValue, "medium");
+        const agentDescriptor = model.capabilities?.optionDescriptors?.find(
+          (descriptor) => descriptor.id === "agent" && descriptor.type === "select",
+        );
+        NodeAssert.ok(agentDescriptor && agentDescriptor.type === "select");
+        NodeAssert.equal(
+          agentDescriptor.options.find((option) => option.isDefault === true)?.id,
+          "build",
+        );
+        NodeAssert.equal(agentDescriptor.currentValue, "build");
+      }),
+  );
+
+  it.effect("annotates only valid discovered text verbosity variants", () =>
     Effect.gen(function* () {
       runtimeMock.state.inventory = {
         providerList: {
@@ -412,15 +536,20 @@ it.layer(layerTest)("checkOpenCodeProviderStatus", (it) => {
               id: "openai",
               name: "OpenAI",
               models: {
-                "gpt-5.4": {
-                  id: "gpt-5.4",
-                  name: "GPT-5.4",
+                "arbitrary-openai-model": {
+                  id: "arbitrary-openai-model",
+                  name: "Arbitrary OpenAI model",
+                  api: {
+                    id: "openai.responses",
+                    url: "https://api.openai.com/v1",
+                    npm: "@ai-sdk/openai",
+                  },
                   variants: {
-                    none: {},
-                    low: {},
-                    medium: {},
-                    high: {},
-                    xhigh: {},
+                    quiet: { textVerbosity: "low", reasoningEffort: "high" },
+                    balanced: { textVerbosity: "medium", reasoningEffort: "high" },
+                    detailed: { textVerbosity: "high", reasoningEffort: "high" },
+                    ordinary: { reasoningEffort: "low" },
+                    invalid: { textVerbosity: "invalid" },
                   },
                 },
               },
@@ -428,31 +557,193 @@ it.layer(layerTest)("checkOpenCodeProviderStatus", (it) => {
           ],
           default: {},
         },
-        agents: [
-          { name: "build", hidden: false, mode: "primary" },
-          { name: "plan", hidden: false, mode: "primary" },
-        ],
+        agents: [],
+        skills: [],
       };
 
       const snapshot = yield* checkProvider(makeOpenCodeSettings());
-      const model = snapshot.models.find((entry) => entry.slug === "openai/gpt-5.4");
+      const model = snapshot.models.find((entry) => entry.slug === "openai/arbitrary-openai-model");
 
       NodeAssert.ok(model);
       const variantDescriptor = model.capabilities?.optionDescriptors?.find(
         (descriptor) => descriptor.id === "variant" && descriptor.type === "select",
       );
       NodeAssert.ok(variantDescriptor && variantDescriptor.type === "select");
+      NodeAssert.equal(variantDescriptor.label, "Reasoning");
+      NodeAssert.equal(variantDescriptor.description, "Select an OpenCode reasoning variant.");
+      NodeAssert.deepEqual(variantDescriptor.options, [
+        {
+          id: "quiet",
+          label: "Quiet (Low verbosity)",
+          description: "Response verbosity: Low. Applied by this configured variant.",
+        },
+        {
+          id: "balanced",
+          label: "Balanced (Medium verbosity)",
+          description: "Response verbosity: Medium. Applied by this configured variant.",
+        },
+        {
+          id: "detailed",
+          label: "Detailed (High verbosity)",
+          description: "Response verbosity: High. Applied by this configured variant.",
+        },
+        { id: "ordinary", label: "Ordinary" },
+        { id: "invalid", label: "Invalid" },
+      ]);
       NodeAssert.equal(
-        variantDescriptor.options.find((option) => option.isDefault === true)?.id,
-        "medium",
+        model.capabilities?.optionDescriptors?.some((descriptor) => descriptor.id === "verbosity"),
+        false,
       );
+    }),
+  );
+
+  it.effect("keeps text verbosity annotations SDK-specific and defaults a single variant", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.inventory = {
+        providerList: {
+          connected: ["compatible", "anthropic"],
+          all: [
+            {
+              id: "compatible",
+              name: "Compatible",
+              models: {
+                "arbitrary-compatible-model": {
+                  id: "arbitrary-compatible-model",
+                  name: "Compatible model",
+                  api: {
+                    id: "openai-compatible.responses",
+                    url: "https://example.com/v1",
+                    npm: "@ai-sdk/openai-compatible",
+                  },
+                  variants: {
+                    quiet: { textVerbosity: "low" },
+                  },
+                },
+              },
+            },
+            {
+              id: "anthropic",
+              name: "Anthropic",
+              models: {
+                "arbitrary-anthropic-model": {
+                  id: "arbitrary-anthropic-model",
+                  name: "Anthropic model",
+                  api: {
+                    id: "anthropic.messages",
+                    url: "https://api.anthropic.com/v1",
+                    npm: "@ai-sdk/anthropic",
+                  },
+                  variants: {
+                    detailed: { textVerbosity: "high" },
+                  },
+                },
+              },
+            },
+          ],
+          default: {},
+        },
+        agents: [],
+        skills: [],
+      };
+
+      const snapshot = yield* checkProvider(makeOpenCodeSettings());
+      const compatibleModel = snapshot.models.find(
+        (entry) => entry.slug === "compatible/arbitrary-compatible-model",
+      );
+      const anthropicModel = snapshot.models.find(
+        (entry) => entry.slug === "anthropic/arbitrary-anthropic-model",
+      );
+
+      NodeAssert.ok(compatibleModel);
+      NodeAssert.ok(anthropicModel);
+      const compatibleDescriptor = compatibleModel.capabilities?.optionDescriptors?.find(
+        (descriptor) => descriptor.id === "variant" && descriptor.type === "select",
+      );
+      const anthropicDescriptor = anthropicModel.capabilities?.optionDescriptors?.find(
+        (descriptor) => descriptor.id === "variant" && descriptor.type === "select",
+      );
+      NodeAssert.ok(compatibleDescriptor && compatibleDescriptor.type === "select");
+      NodeAssert.ok(anthropicDescriptor && anthropicDescriptor.type === "select");
+      NodeAssert.deepEqual(compatibleDescriptor.options, [
+        { id: "quiet", label: "Quiet", isDefault: true },
+      ]);
+      NodeAssert.deepEqual(anthropicDescriptor.options, [
+        { id: "detailed", label: "Detailed", isDefault: true },
+      ]);
+    }),
+  );
+
+  it.effect("uses native reasoning defaults when no variants are advertised", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.inventory = {
+        providerList: {
+          connected: ["openai"],
+          all: [
+            {
+              id: "openai",
+              name: "OpenAI",
+              models: {
+                "arbitrary-model": {
+                  id: "arbitrary-model",
+                  name: "Arbitrary model",
+                  api: {
+                    id: "openai.responses",
+                    url: "https://api.openai.com/v1",
+                    npm: "@ai-sdk/openai",
+                  },
+                  variants: {},
+                },
+              },
+            },
+          ],
+          default: {},
+        },
+        agents: [{ name: "build", hidden: false, mode: "primary" }],
+        skills: [],
+      };
+
+      const snapshot = yield* checkProvider(makeOpenCodeSettings());
+      const model = snapshot.models.find((entry) => entry.slug === "openai/arbitrary-model");
+
+      NodeAssert.ok(model);
+      const variantDescriptor = model.capabilities?.optionDescriptors?.find(
+        (descriptor) => descriptor.id === "variant" && descriptor.type === "select",
+      );
+      NodeAssert.ok(variantDescriptor && variantDescriptor.type === "select");
+      NodeAssert.deepEqual(
+        variantDescriptor.options.map((option) => ({
+          id: option.id,
+          ...(option.isDefault ? { isDefault: true } : {}),
+        })),
+        [{ id: "low" }, { id: "medium", isDefault: true }, { id: "high" }, { id: "xhigh" }],
+      );
+      NodeAssert.equal(variantDescriptor.currentValue, "medium");
       const agentDescriptor = model.capabilities?.optionDescriptors?.find(
         (descriptor) => descriptor.id === "agent" && descriptor.type === "select",
       );
       NodeAssert.ok(agentDescriptor && agentDescriptor.type === "select");
+      NodeAssert.equal(agentDescriptor.currentValue, "build");
+    }),
+  );
+
+  it.effect("uses native default capabilities for pending custom models", () =>
+    Effect.gen(function* () {
+      const snapshot = yield* makePendingOpenCodeProvider(
+        makeOpenCodeSettings({
+          customModels: [{ slug: "custom/arbitrary-model", name: "Arbitrary model" }],
+        }),
+      );
+      const model = snapshot.models.find((entry) => entry.slug === "custom/arbitrary-model");
+
+      NodeAssert.ok(model);
+      NodeAssert.deepEqual(
+        model.capabilities?.optionDescriptors?.map((descriptor) => descriptor.id),
+        ["variant", "agent"],
+      );
       NodeAssert.equal(
-        agentDescriptor.options.find((option) => option.isDefault === true)?.id,
-        "build",
+        model.capabilities?.optionDescriptors?.find((descriptor) => descriptor.id === "variant")
+          ?.currentValue,
+        "medium",
       );
     }),
   );
@@ -470,6 +761,11 @@ it.layer(layerTest)("checkOpenCodeProviderStatus", (it) => {
                 "gpt-5.4": {
                   id: "gpt-5.4",
                   name: "GPT-5.4",
+                  api: {
+                    id: "openai.responses",
+                    url: "https://api.openai.com/v1",
+                    npm: "@ai-sdk/openai",
+                  },
                   variants: {},
                 },
               },
@@ -551,6 +847,12 @@ it.layer(layerTest)("checkOpenCodeProviderStatus", (it) => {
         Effect.succeed([
           { providerID: "opencode", id: "big-pickle", name: "Big Pickle", variants: [] },
           {
+            providerID: "openai",
+            id: "gpt-5.4",
+            name: "GPT-5.4",
+            variants: [{ id: "low" }, { id: "medium" }, { id: "high" }],
+          },
+          {
             providerID: "opencode",
             id: "space-bunny-free",
             name: "Space Bunny Free",
@@ -575,7 +877,7 @@ it.layer(layerTest)("checkOpenCodeProviderStatus", (it) => {
       );
       NodeAssert.deepEqual(
         snapshot.models.map((model) => model.slug),
-        ["opencode/big-pickle", "opencode/space-bunny-free"],
+        ["opencode/big-pickle", "openai/gpt-5.4", "opencode/space-bunny-free"],
       );
       const variant = snapshot.models.find((model) => model.slug === "opencode/space-bunny-free")
         ?.capabilities?.optionDescriptors?.[0];
@@ -583,6 +885,24 @@ it.layer(layerTest)("checkOpenCodeProviderStatus", (it) => {
         variant?.type === "select" ? variant.options.map((option) => option.id) : [],
         ["low", "medium", "high"],
       );
+      NodeAssert.equal(variant?.type === "select" ? variant.currentValue : undefined, "medium");
+      NodeAssert.equal(
+        variant?.type === "select"
+          ? variant.options.find((option) => option.isDefault === true)?.id
+          : undefined,
+        "medium",
+      );
+      const gpt5 = snapshot.models.find((model) => model.slug === "openai/gpt-5.4");
+      NodeAssert.ok(gpt5);
+      NodeAssert.equal(
+        gpt5.capabilities?.optionDescriptors?.some((descriptor) => descriptor.id === "verbosity"),
+        false,
+      );
+      const reasoning = gpt5.capabilities?.optionDescriptors?.find(
+        (descriptor) => descriptor.id === "variant" && descriptor.type === "select",
+      );
+      NodeAssert.ok(reasoning && reasoning.type === "select");
+      NodeAssert.equal(reasoning.currentValue, "medium");
       NodeAssert.equal(runtimeMock.state.sdkClientInputs.length, 0);
     }),
   );

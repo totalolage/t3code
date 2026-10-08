@@ -167,6 +167,17 @@ rules to connected environments that support shared settings. Offline environmen
 and older servers keep their previous values. Changing a rule does not reopen
 already settled threads.
 
+## Hide a thread
+
+Choose **Hide thread** from a thread's menu to remove it from normal thread lists
+on your connected devices. Hiding keeps the conversation and does not stop the
+agent, archive the thread, or change its saved position. New messages do not
+make a hidden thread visible again.
+
+Open **Settings → Hidden threads** to find hidden work and choose **Unhide thread**
+to restore its visibility. You can still open a hidden thread directly. Unhiding
+does not change its archive, snooze, or settlement state.
+
 ## Link a pull request
 
 The server finds the PR for each unsettled thread's saved branch, even when your

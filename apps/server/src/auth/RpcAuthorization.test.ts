@@ -254,6 +254,52 @@ describe("RPC scope middleware", () => {
   );
 });
 
+describe("service update cancellation authorization", () => {
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (
+        tag,
+      ): tag is Exclude<
+        keyof typeof RPC_REQUIRED_SCOPES,
+        typeof WS_METHODS.serverCancelServiceUpdate
+      > => tag !== WS_METHODS.serverCancelServiceUpdate,
+    ),
+  );
+
+  it.effect.each([
+    { scopes: [AuthOrchestrationReadScope], allowed: false },
+    { scopes: [AuthEnvironmentMaintainScope], allowed: true },
+  ])("requires environment maintenance permission, allowed=$allowed", ({ scopes, allowed }) =>
+    Effect.gen(function* () {
+      let handled = 0;
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(
+            group.toLayerHandler(WS_METHODS.serverCancelServiceUpdate, () =>
+              Effect.sync(() => {
+                handled += 1;
+                return { cancelled: true };
+              }),
+            ),
+            RpcAuthorization.layer(scopes),
+          ),
+        ),
+      );
+      const cancel = client[WS_METHODS.serverCancelServiceUpdate]({});
+      if (allowed) {
+        expect(yield* cancel).toEqual({ cancelled: true });
+        expect(handled).toBe(1);
+      } else {
+        expect(yield* cancel.pipe(Effect.flip)).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthEnvironmentMaintainScope,
+        });
+        expect(handled).toBe(0);
+      }
+    }).pipe(Effect.scoped),
+  );
+});
+
 describe("settings mutation authorization", () => {
   const group = WsRpcGroup.omit(
     ...[...WsRpcGroup.requests.keys()].filter(

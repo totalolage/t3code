@@ -2,6 +2,7 @@ import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
 import {
   ChatAttachment,
   CheckpointId,
+  CommandId,
   MessageId,
   ModelSelection,
   NodeId,
@@ -393,7 +394,7 @@ export interface ProviderAdapterV2EnsureThreadInput {
   readonly existingProviderThread?: OrchestrationV2ProviderThread;
 }
 
-export interface ProviderAdapterV2TurnInput {
+interface ProviderAdapterV2RootTurnInput {
   readonly appThread: OrchestrationV2AppThread;
   readonly threadId: ThreadId;
   readonly runId: RunId;
@@ -401,11 +402,9 @@ export interface ProviderAdapterV2TurnInput {
   /** Whether the current native session has an accepted turn; omitted when unknown. */
   readonly nativeThreadHasTurns?: boolean;
   readonly providerTurnOrdinal: number;
-  readonly restartContinuationOfRunId?: RunId;
   readonly attemptId: RunAttemptId;
   readonly rootNodeId: NodeId;
   readonly providerThread: OrchestrationV2ProviderThread;
-  readonly message: ProviderAdapterV2TurnMessage;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
   /**
@@ -414,6 +413,16 @@ export interface ProviderAdapterV2TurnInput {
    * application context; others never receive any.
    */
   readonly appContext?: ReadonlyArray<{ readonly key: string; readonly text: string }>;
+}
+
+export interface ProviderAdapterV2TurnInput extends ProviderAdapterV2RootTurnInput {
+  readonly restartContinuationOfRunId?: RunId;
+  readonly message: ProviderAdapterV2TurnMessage;
+}
+
+export interface ProviderAdapterV2MaintenanceInput extends ProviderAdapterV2RootTurnInput {
+  readonly purpose: "compaction";
+  readonly requestCommandId: CommandId;
 }
 
 export interface ProviderAdapterV2SteerInput {
@@ -582,6 +591,10 @@ export interface ProviderAdapterV2SessionRuntime {
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly compactThread?: (
     input: ProviderAdapterV2TurnInput,
+  ) => Effect.Effect<void, ProviderAdapterV2Error>;
+  /** Starts provider-native context compaction without a conversation message. */
+  readonly compactContext?: (
+    input: ProviderAdapterV2MaintenanceInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly steerTurn: (
     input: ProviderAdapterV2SteerInput,

@@ -28,11 +28,13 @@ import {
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import * as DateTime from "effect/DateTime";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
-import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
+import type { PreparedConnection } from "@t3tools/client-runtime/connection";
 import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
+
+import { resolvePreparedAssetUrl } from "~/assets/preparedAssetUrl";
 import { videoMimeType } from "@t3tools/shared/video";
 import {
   appendCodexArtifactTemplateUsePrompt,
@@ -541,6 +543,7 @@ export function buildLocalDraftThread(
     createdAt: timestamp,
     updatedAt: timestamp,
     archivedAt: null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     deletedAt: null,
@@ -716,7 +719,7 @@ export function revokeBlobPreviewUrl(previewUrl: string | undefined): void {
 export async function resolveFileAttachmentUrl(input: {
   attachment: ChatFileAttachment;
   environmentId: EnvironmentId;
-  httpBaseUrl: string;
+  connection: Pick<PreparedConnection, "httpBaseUrl" | "queryParameters">;
   createAssetUrl: (input: {
     environmentId: EnvironmentId;
     input: AssetCreateUrlInput;
@@ -735,7 +738,7 @@ export async function resolveFileAttachmentUrl(input: {
     },
   });
   if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-  const url = resolveAssetUrl(input.httpBaseUrl, result.value.relativeUrl);
+  const url = resolvePreparedAssetUrl(input.connection, result.value.relativeUrl);
   if (url === null) throw new Error("The environment returned an invalid attachment URL.");
   return url;
 }
@@ -743,7 +746,7 @@ export async function resolveFileAttachmentUrl(input: {
 export async function prepareRevertedMessageAttachments(input: {
   message: ChatMessage;
   environmentId: EnvironmentId;
-  httpBaseUrl: string;
+  connection: Pick<PreparedConnection, "httpBaseUrl" | "queryParameters">;
   createAssetUrl: Parameters<typeof resolveFileAttachmentUrl>[0]["createAssetUrl"];
 }): Promise<File[]> {
   return Promise.all(
@@ -763,7 +766,7 @@ export async function prepareRevertedMessageAttachments(input: {
         },
       });
       if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-      const url = resolveAssetUrl(input.httpBaseUrl, result.value.relativeUrl);
+      const url = resolvePreparedAssetUrl(input.connection, result.value.relativeUrl);
       if (url === null) throw new Error("The environment returned an invalid attachment URL.");
       const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
       if (!response.ok) throw new Error(`Could not restore attachment: ${attachment.name}`);

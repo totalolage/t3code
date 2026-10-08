@@ -128,6 +128,7 @@ describe("DesktopWslBackend", () => {
         ),
       list: Effect.succeed([primary]),
       primary: Effect.succeed(primary),
+      awaitPrimaryTerminalFailure: Effect.never,
       register: (spec) =>
         Effect.sync(() => {
           registeredSpec = spec;

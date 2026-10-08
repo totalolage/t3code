@@ -31,8 +31,11 @@ import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2Pend
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 
-import { getInitialServerConfig, request } from "../rpc/client.ts";
+import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import { EnvironmentRpcUnavailableError, getInitialServerConfig, request } from "../rpc/client.ts";
 
 interface CommandMetadata {
   readonly commandId?: CommandId;
@@ -84,6 +87,8 @@ export interface ThreadCommandInput extends CommandMetadata {
 export type DeleteThreadInput = ThreadCommandInput;
 export type ArchiveThreadInput = ThreadCommandInput;
 export type UnarchiveThreadInput = ThreadCommandInput;
+export type HideThreadInput = ThreadCommandInput;
+export type UnhideThreadInput = ThreadCommandInput;
 export type SettleThreadInput = ThreadCommandInput;
 
 export interface UnsettleThreadInput extends ThreadCommandInput {
@@ -269,6 +274,41 @@ const allocateCommandId = Effect.fn("EnvironmentCommands.allocateCommandId")(fun
 const dispatch = (command: OrchestrationV2Command) =>
   request(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, command);
 
+const ensureThreadHidingSupported = Effect.fn("EnvironmentCommands.ensureThreadHidingSupported")(
+  function* () {
+    const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+    const session = yield* SubscriptionRef.get(supervisor.session).pipe(
+      Effect.flatMap(
+        Option.match({
+          onNone: () =>
+            Effect.fail(
+              new EnvironmentRpcUnavailableError({
+                environmentId: supervisor.target.environmentId,
+                message: `${supervisor.target.label} is not connected.`,
+              }),
+            ),
+          onSome: Effect.succeed,
+        }),
+      ),
+    );
+    const config = yield* session.initialConfig.pipe(
+      Effect.mapError(
+        () =>
+          new EnvironmentRpcUnavailableError({
+            environmentId: supervisor.target.environmentId,
+            message: `${supervisor.target.label} could not load its capabilities. Connect to an updated server and try again.`,
+          }),
+      ),
+    );
+    if (config.environment.capabilities.threadHiding !== true) {
+      return yield* new EnvironmentRpcUnavailableError({
+        environmentId: supervisor.target.environmentId,
+        message: `${supervisor.target.label} does not support hiding threads. Update the server and reconnect.`,
+      });
+    }
+  },
+);
+
 const getProjection = (threadId: ThreadId) =>
   request(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, { threadId });
 
@@ -414,6 +454,8 @@ function simpleThreadCommand(
     | "thread.delete"
     | "thread.archive"
     | "thread.unarchive"
+    | "thread.hide"
+    | "thread.unhide"
     | "thread.settle"
     | "thread.pin"
     | "thread.unpin",
@@ -440,6 +482,20 @@ export const unarchiveThread = Effect.fn("EnvironmentCommands.unarchiveThread")(
   input: UnarchiveThreadInput,
 ) {
   return yield* simpleThreadCommand("thread.unarchive", input);
+});
+
+export const hideThread = Effect.fn("EnvironmentCommands.hideThread")(function* (
+  input: HideThreadInput,
+) {
+  yield* ensureThreadHidingSupported();
+  return yield* simpleThreadCommand("thread.hide", input);
+});
+
+export const unhideThread = Effect.fn("EnvironmentCommands.unhideThread")(function* (
+  input: UnhideThreadInput,
+) {
+  yield* ensureThreadHidingSupported();
+  return yield* simpleThreadCommand("thread.unhide", input);
 });
 
 export const settleThread = Effect.fn("EnvironmentCommands.settleThread")(function* (

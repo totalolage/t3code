@@ -1,16 +1,22 @@
 import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/connectAuth";
+import {
+  parseRemotePairingUrlFields,
+  readHostedPairingRequest as readSharedHostedPairingRequest,
+  type RemoteQueryParameter,
+} from "@t3tools/shared/remote";
 
-import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "./pairingUrl";
+import { setPairingTokenOnUrl } from "./pairingUrl";
 
 export interface HostedPairingRequest {
   readonly host: string;
   readonly token: string;
   readonly label: string;
+  readonly queryParameters: ReadonlyArray<RemoteQueryParameter>;
 }
 
 export type HostedAppChannel = "latest" | "nightly";
 
-function configuredHostedAppUrl(): string {
+export function configuredHostedAppUrl(): string {
   return import.meta.env.VITE_HOSTED_APP_URL?.trim() || DEFAULT_HOSTED_APP_URL;
 }
 
@@ -51,18 +57,25 @@ export function isHostedStaticApp(url?: URL): boolean {
 }
 
 export function readHostedPairingRequest(url: URL = new URL(window.location.href)) {
-  const host = url.searchParams.get("host")?.trim() ?? "";
-  const token = getPairingTokenFromUrl(url)?.trim() ?? "";
-  const label = url.searchParams.get("label")?.trim() ?? "";
+  const hostedPairingRequest = readSharedHostedPairingRequest(url, {
+    hostedAppUrl: configuredHostedAppUrl(),
+  });
+  if (!hostedPairingRequest) {
+    return null;
+  }
 
-  if (!host || !token) {
+  const parsed = parseRemotePairingUrlFields(url.toString(), {
+    hostedAppUrl: configuredHostedAppUrl(),
+  });
+  if (!parsed || !parsed.pairingCode) {
     return null;
   }
 
   return {
-    host,
-    token,
-    label,
+    host: parsed.host,
+    token: parsed.pairingCode,
+    label: hostedPairingRequest.label,
+    queryParameters: parsed.queryParameters,
   } satisfies HostedPairingRequest;
 }
 

@@ -78,6 +78,11 @@ const layerDesktopClerk = (
   );
 };
 
+const emptyElectronWindow: ElectronWindow.ElectronWindow["Service"] = {
+  currentMainOrFirst: Effect.succeed(Option.none()),
+  reveal: () => Effect.void,
+} as unknown as ElectronWindow.ElectronWindow["Service"];
+
 describe("DesktopClerk", () => {
   beforeEach(() => {
     createClerkBridgeMock.mockReset();
@@ -212,8 +217,6 @@ describe("DesktopClerk", () => {
           registeredEvents.push(eventName);
         }),
     } as unknown as ElectronApp.ElectronApp["Service"];
-    const electronWindow = {} as ElectronWindow.ElectronWindow["Service"];
-
     return Effect.gen(function* () {
       const clerk = yield* DesktopClerk.DesktopClerk;
       const exit = yield* Effect.exit(Effect.scoped(clerk.configure));
@@ -224,7 +227,8 @@ describe("DesktopClerk", () => {
     }).pipe(
       Effect.provide(layerDesktopClerk()),
       Effect.provideService(ElectronApp.ElectronApp, electronApp),
-      Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
+      Effect.provideService(ElectronWindow.ElectronWindow, emptyElectronWindow),
+      Effect.provideService(HostProcessArguments, []),
     );
   });
 
@@ -240,8 +244,6 @@ describe("DesktopClerk", () => {
           registeredEvents.push(eventName);
         }),
     } as unknown as ElectronApp.ElectronApp["Service"];
-    const electronWindow = {} as ElectronWindow.ElectronWindow["Service"];
-
     return Effect.gen(function* () {
       const clerk = yield* DesktopClerk.DesktopClerk;
       const exit = yield* Effect.exit(Effect.scoped(clerk.configure));
@@ -252,7 +254,8 @@ describe("DesktopClerk", () => {
     }).pipe(
       Effect.provide(layerDesktopClerk()),
       Effect.provideService(ElectronApp.ElectronApp, electronApp),
-      Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
+      Effect.provideService(ElectronWindow.ElectronWindow, emptyElectronWindow),
+      Effect.provideService(HostProcessArguments, []),
     );
   });
 });
@@ -299,6 +302,7 @@ it.effect(
       Effect.provide(layerDesktopClerk()),
       Effect.provideService(ElectronApp.ElectronApp, electronApp),
       Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
+      Effect.provideService(HostProcessArguments, []),
     );
   },
 );

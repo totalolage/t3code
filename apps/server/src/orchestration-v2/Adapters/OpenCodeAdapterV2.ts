@@ -87,6 +87,28 @@ export const OPENCODE_PROVIDER = ProviderDriverKind.make("opencode");
 export const OPENCODE_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(OPENCODE_PROVIDER);
 export const OPENCODE_SDK_PROTOCOL = "opencode-sdk.sse" as const;
 const DEFAULT_OPENCODE_SETTINGS = Schema.decodeSync(OpenCodeSettingsSchema)({});
+const OpenCodeVerbosity = Schema.Literals(["low", "medium", "high"]);
+type OpenCodeVerbosity = typeof OpenCodeVerbosity.Type;
+const decodeOpenCodePromptBody = Schema.decodeUnknownSync(
+  Schema.Record(Schema.String, Schema.Unknown),
+);
+
+export function serializeOpenCodePromptWithVerbosity(
+  body: unknown,
+  verbosity: OpenCodeVerbosity,
+): string {
+  const encoded = JSON.stringify({ ...decodeOpenCodePromptBody(body), verbosity });
+  if (encoded === undefined) throw new TypeError("OpenCode prompt body could not be serialized.");
+  return encoded;
+}
+
+function openCodePromptBodySerializer(verbosity: OpenCodeVerbosity) {
+  return (body: unknown) => serializeOpenCodePromptWithVerbosity(body, verbosity);
+}
+
+function supportsOpenCodeVerbosity(modelID: string): boolean {
+  return modelID.startsWith("gpt-5");
+}
 
 let openCodeMessageIdEpochMillis = -1;
 let openCodeMessageIdCounter = 0;
@@ -2947,6 +2969,7 @@ export function makeOpenCodeAdapterV2(
           payload: Parameters<typeof client.session.promptAsync>[0] & {
             messageID: string;
             sessionID: string;
+            verbosity?: OpenCodeVerbosity;
           },
           abortController: AbortController,
         ) {
@@ -2963,9 +2986,13 @@ export function makeOpenCodeAdapterV2(
               )).find((entry) => entry.name === match[1])
             : undefined;
           if (!command) {
+            const verbosity = payload.verbosity;
             return yield* sdkCall("session.promptAsync", payload, (signal) =>
               client.session.promptAsync(payload, {
                 signal: AbortSignal.any([signal, abortController.signal]),
+                ...(verbosity === undefined
+                  ? {}
+                  : { bodySerializer: openCodePromptBodySerializer(verbosity) }),
               }),
             ).pipe(Effect.asVoid);
           }
@@ -3278,6 +3305,17 @@ export function makeOpenCodeAdapterV2(
                 turnInput.modelSelection,
                 "variant",
               );
+              const selectedVerbosity = getModelSelectionStringOptionValue(
+                turnInput.modelSelection,
+                "verbosity",
+              );
+              const verbosity = supportsOpenCodeVerbosity(parsedModel.modelID)
+                ? selectedVerbosity === undefined
+                  ? "medium"
+                  : Option.getOrUndefined(
+                      Schema.decodeUnknownOption(OpenCodeVerbosity)(selectedVerbosity),
+                    )
+                : undefined;
               yield* submitPrompt(
                 state,
                 turn,
@@ -3287,6 +3325,7 @@ export function makeOpenCodeAdapterV2(
                   model: parsedModel,
                   ...(agent === undefined ? {} : { agent }),
                   ...(variant === undefined ? {} : { variant }),
+                  ...(verbosity === undefined ? {} : { verbosity }),
                   system: systemPrompt,
                   parts,
                 },

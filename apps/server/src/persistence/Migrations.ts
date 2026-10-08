@@ -70,9 +70,27 @@ import Migration0053 from "./Migrations/053_PullRequestFilesViewed.ts";
 import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts";
 import Migration0055 from "./Migrations/055_OrchestrationV2.ts";
 import Migration0056 from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
-import Migration0057 from "./Migrations/057_ScheduledTaskWebhooks.ts";
-import Migration0058 from "./Migrations/058_WebhookRelayDeliveries.ts";
-import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
+import Migration0057 from "./Migrations/057_PendingInteractionResponses.ts";
+import Migration0058 from "./Migrations/058_RunAcceptanceSequence.ts";
+import Migration0059 from "./Migrations/059_ServiceUpdateQueuedRuns.ts";
+import Migration0060 from "./Migrations/060_OrchestrationHttpCreateOperations.ts";
+import Migration0061 from "./Migrations/057_ScheduledTaskWebhooks.ts";
+import Migration0062 from "./Migrations/058_WebhookRelayDeliveries.ts";
+import Migration0063 from "./Migrations/059_McpAppModelContext.ts";
+import {
+  applyNativeMcpAppModelContext,
+  applyNativeWebhookRelayDeliveries,
+  applyDeployedForkNativeSchemaBridge,
+  assertKnownCollidingMigrationJournal,
+  getNativeWebhookMigrationState,
+  hasSupportedDeployedForkJournal,
+  reconcileNativeScheduledTaskWebhooks,
+  reconcileNativeMcpAppModelContext,
+  reconcileNativeWebhookRelayDeliveries,
+  reconcileDeployedForkPendingInteractionSchema,
+  SqliteMigrationLineageError,
+  type NativeWebhookMigrationState,
+} from "./ForkSqliteMigration.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -143,19 +161,42 @@ export const migrationEntries = [
   // Preserve this migration's schema. Future V2 schema changes need new migrations.
   [55, "OrchestrationV2", Migration0055],
   [56, "RemoveRedundantProjectionIndexes", Migration0056],
-  [57, "ScheduledTaskWebhooks", Migration0057],
-  [58, "WebhookRelayDeliveries", Migration0058],
-  [59, "McpAppModelContext", Migration0059],
+  [57, "PendingInteractionResponses", Migration0057],
+  [58, "RunAcceptanceSequence", Migration0058],
+  [59, "ServiceUpdateQueuedRuns", Migration0059],
+  [60, "OrchestrationHttpCreateOperations", Migration0060],
+  [61, "ScheduledTaskWebhooks", Migration0061],
+  [62, "WebhookRelayDeliveries", Migration0062],
+  [63, "McpAppModelContext", Migration0063],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
 
-const makeMigrationLoader = (throughId?: number) =>
+const makeMigrationLoader = (
+  throughId: number | undefined,
+  isDeployedFork: boolean,
+  nativeWebhookState: NativeWebhookMigrationState | undefined,
+) =>
   Migrator.fromRecord(
     Object.fromEntries(
       migrationEntries
         .filter(([id]) => throughId === undefined || id <= throughId)
-        .map(([id, name, migration]) => [`${id}_${name}`, migration]),
+        .map(([id, name, migration]) => [
+          `${id}_${name}`,
+          isDeployedFork && id === 57
+            ? reconcileDeployedForkPendingInteractionSchema()
+            : nativeWebhookState !== undefined && id === 61
+              ? reconcileNativeScheduledTaskWebhooks()
+              : nativeWebhookState !== undefined && id === 62
+                ? nativeWebhookState.hasNativeRelayMigration
+                  ? reconcileNativeWebhookRelayDeliveries()
+                  : applyNativeWebhookRelayDeliveries()
+                : nativeWebhookState !== undefined && id === 63
+                  ? nativeWebhookState.hasNativeMcpAppContextMigration
+                    ? reconcileNativeMcpAppModelContext()
+                    : applyNativeMcpAppModelContext()
+                  : migration,
+        ]),
     ),
   );
 
@@ -182,42 +223,99 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
-  const previewMigrations =
-    toMigrationInclusive === undefined || toMigrationInclusive >= 55
-      ? yield* reconcileV2PreviewMigration()
-      : [];
-  const executedMigrations = [
-    ...previewMigrations,
-    ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
-  ];
-  const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
-  yield* migrations.length === 0
-    ? Effect.logDebug("Database schema is current")
-    : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));
-
   // The migrator keys on migration_id: a database that recorded a different
   // migration under a shared id (local or fork builds) keeps that id and
   // silently skips this build's migration at it. Surface the divergence so the
   // skipped schema change is diagnosable.
   const sql = yield* SqlClient.SqlClient;
-  const recorded = yield* sql<{
-    readonly migration_id: number;
-    readonly name: string;
-  }>`SELECT migration_id, name FROM effect_sql_migrations`;
-  const manifestNames = new Map<number, string>(migrationEntries.map(([id, name]) => [id, name]));
-  const divergent = recorded.flatMap((row) => {
-    const expected = manifestNames.get(row.migration_id);
-    if (expected === undefined) {
-      return [`${row.migration_id}:${row.name} (unknown to this build)`];
-    }
-    return expected === row.name
-      ? []
-      : [`${row.migration_id}:${row.name} (this build: ${expected})`];
-  });
-  if (divergent.length > 0) {
-    yield* Effect.logWarning(
-      "Database migration history diverges from this build; recorded migration ids are skipped, not reconciled by name.",
-    ).pipe(Effect.annotateLogs({ divergent }));
+  yield* assertKnownCollidingMigrationJournal(migrationManifest);
+  const recognizedForkJournal = yield* hasSupportedDeployedForkJournal(migrationManifest);
+  const nativeWebhookState = yield* getNativeWebhookMigrationState(migrationManifest);
+  const collisionUpgradePending =
+    nativeWebhookState !== undefined && !nativeWebhookState.forkMigrationsApplied;
+  if (collisionUpgradePending && toMigrationInclusive !== undefined && toMigrationInclusive < 63) {
+    return yield* Effect.fail(
+      new SqliteMigrationLineageError({
+        message: "A native 57–59 collision journal must be upgraded through migration 63.",
+      }),
+    );
   }
-  return executedMigrations;
+  const applyForkBridge =
+    recognizedForkJournal && (toMigrationInclusive === undefined || toMigrationInclusive >= 52);
+
+  const migrations = Effect.gen(function* () {
+    const bridgeApplied = applyForkBridge ? yield* applyDeployedForkNativeSchemaBridge() : false;
+    if (collisionUpgradePending) {
+      yield* Migration0057;
+      if (nativeWebhookState.hasNativeRelayMigration) {
+        yield* Migration0058;
+      }
+      if (nativeWebhookState.hasNativeMcpAppContextMigration) {
+        yield* Migration0059;
+      }
+    }
+    const previewMigrations =
+      toMigrationInclusive === undefined || toMigrationInclusive >= 55
+        ? yield* reconcileV2PreviewMigration()
+        : [];
+    const executedMigrations = [
+      ...previewMigrations,
+      ...(yield* run({
+        loader: makeMigrationLoader(
+          toMigrationInclusive,
+          recognizedForkJournal,
+          nativeWebhookState,
+        ),
+      })),
+    ];
+    const migrationNames = executedMigrations.map(([id, name]) => `${id}_${name}`);
+    yield* migrationNames.length === 0
+      ? Effect.logDebug("Database schema is current")
+      : Effect.log("Migrations ran successfully").pipe(
+          Effect.annotateLogs({ migrations: migrationNames }),
+        );
+
+    if (bridgeApplied) {
+      yield* Effect.logInfo(
+        "Applied native schema migrations 49–51 to the recognized fork database; its journal was preserved.",
+      );
+    }
+
+    const recorded = yield* sql<{
+      readonly migration_id: number;
+      readonly name: string;
+    }>`SELECT migration_id, name FROM effect_sql_migrations`;
+    const manifestNames = new Map<number, string>(migrationEntries.map(([id, name]) => [id, name]));
+    const divergent = recorded.flatMap((row) => {
+      if (recognizedForkJournal && row.migration_id >= 34 && row.migration_id <= 51) {
+        return [];
+      }
+      if (
+        nativeWebhookState !== undefined &&
+        ((row.migration_id === 57 && row.name === "ScheduledTaskWebhooks") ||
+          (row.migration_id === 58 && row.name === "WebhookRelayDeliveries") ||
+          (row.migration_id === 59 && row.name === "McpAppModelContext"))
+      ) {
+        return [];
+      }
+      const expected = manifestNames.get(row.migration_id);
+      if (expected === undefined) {
+        return [`${row.migration_id}:${row.name} (unknown to this build)`];
+      }
+      return expected === row.name
+        ? []
+        : [`${row.migration_id}:${row.name} (this build: ${expected})`];
+    });
+    if (divergent.length > 0) {
+      yield* Effect.logWarning(
+        "Database migration history diverges from this build; recorded migration ids are skipped, not reconciled by name.",
+      ).pipe(Effect.annotateLogs({ divergent }));
+    }
+
+    return executedMigrations;
+  });
+
+  return applyForkBridge || collisionUpgradePending
+    ? yield* sql.withTransaction(migrations)
+    : yield* migrations;
 });

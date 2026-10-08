@@ -71,6 +71,7 @@ const SNAPSHOT: OrchestrationV2ShellSnapshot = {
       createdAt: NOW,
       updatedAt: NOW,
       archivedAt: null,
+      hiddenAt: null,
       settledOverride: null,
       settledAt: null,
       pullRequests: [],

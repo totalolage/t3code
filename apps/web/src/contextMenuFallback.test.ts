@@ -157,6 +157,10 @@ class FakeDocument {
     return new FakeElement(tagName);
   }
 
+  createElementNS(_namespace: string, tagName: string) {
+    return new FakeElement(tagName);
+  }
+
   addEventListener(type: string, listener: FakeListener) {
     const existing = this.listeners.get(type) ?? [];
     existing.push(listener);
@@ -245,6 +249,26 @@ describe("showContextMenuFallback", () => {
     renameButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
     await expect(selectionPromise).resolves.toBe("rename");
+  });
+
+  it("renders and resolves hide and unhide items with their fallback icons", async () => {
+    for (const [id, label, iconChildCount] of [
+      ["hide", "Hide thread", 4],
+      ["unhide", "Unhide thread", 2],
+    ] as const) {
+      const selectionPromise = showContextMenuFallback([
+        { id, label, icon: id === "hide" ? "eye-off" : "eye" },
+      ]);
+      const button = findButton(label);
+      const icon = button?.children[0];
+
+      expect(button).toBeTruthy();
+      expect(icon?.tagName).toBe("svg");
+      expect(icon?.children).toHaveLength(iconChildCount);
+      button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+      await expect(selectionPromise).resolves.toBe(id);
+    }
   });
 
   it("ignores a click from the gesture that opened the menu", async () => {

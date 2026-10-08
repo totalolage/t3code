@@ -9,6 +9,7 @@ import {
   MessageId,
   type ModelSelection,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2AppThread,
   NodeId,
   ProjectId,
   ProviderDriverKind,
@@ -105,6 +106,7 @@ const addRolledBackRecoveryCandidate = Effect.fn("addRolledBackRecoveryCandidate
       createdAt: now,
       updatedAt: now,
       archivedAt: null,
+      hiddenAt: null,
       settledOverride: null,
       settledAt: null,
       lastVisitedAt: null,
@@ -199,6 +201,7 @@ const addOrphanedRecoveryCandidate = Effect.fn("addOrphanedRecoveryCandidate")(f
       createdAt: now,
       updatedAt: now,
       archivedAt: null,
+      hiddenAt: null,
       settledOverride: null,
       settledAt: null,
       lastVisitedAt: null,
@@ -429,6 +432,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -520,6 +524,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -669,6 +674,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             createdAt: now,
             updatedAt: now,
             archivedAt: null,
+            hiddenAt: null,
             settledOverride: null,
             settledAt: null,
             lastVisitedAt: null,
@@ -850,6 +856,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -1445,6 +1452,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         createdAt: now,
         updatedAt: now,
         archivedAt: null,
+        hiddenAt: null,
         settledOverride: null,
         settledAt: null,
         lastVisitedAt: null,
@@ -1520,6 +1528,171 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 
+  it.effect("stores visibility changes as full-thread state in the original shell partition", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const makeThread = (threadId: ThreadId): OrchestrationV2AppThread => ({
+        createdBy: "user",
+        creationSource: "web",
+        id: threadId,
+        projectId: ProjectId.make(`project:${threadId}`),
+        title: `Visibility ${threadId}`,
+        providerInstanceId,
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: null,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        hiddenAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      });
+      const applyThread = (
+        thread: OrchestrationV2AppThread,
+        type: "thread.created" | "thread.hidden" | "thread.unhidden" | "thread.archived",
+        suffix: string,
+        occurredAt = now,
+      ) =>
+        projectionStore.apply({
+          id: EventId.make(`event:projection-visibility:${suffix}`),
+          type,
+          threadId: thread.id,
+          occurredAt,
+          payload: thread,
+        });
+
+      const activeThreadId = ThreadId.make("thread:projection-visibility-active");
+      const activeThread = makeThread(activeThreadId);
+      yield* applyThread(activeThread, "thread.created", "active-create");
+      const hiddenActive = { ...activeThread, hiddenAt: DateTime.add(now, { minutes: 1 }) };
+      yield* applyThread(hiddenActive, "thread.hidden", "active-hide", hiddenActive.hiddenAt!);
+      assert.deepEqual(yield* projectionStore.getThread(activeThreadId), hiddenActive);
+      const hiddenActiveProjection = yield* projectionStore.getThreadProjection(activeThreadId);
+      assert.equal(
+        DateTime.toEpochMillis(hiddenActiveProjection.updatedAt),
+        DateTime.toEpochMillis(now),
+      );
+      let shell = yield* projectionStore.getShellSnapshot();
+      assert.equal(
+        DateTime.toEpochMillis(
+          shell.threads.find((thread) => thread.id === activeThreadId)!.updatedAt,
+        ),
+        DateTime.toEpochMillis(now),
+      );
+      assert.include(
+        shell.threads.map((thread) => thread.id),
+        activeThreadId,
+      );
+      assert.notInclude(
+        shell.archivedThreads.map((thread) => thread.id),
+        activeThreadId,
+      );
+
+      const visibleActive = { ...hiddenActive, hiddenAt: null };
+      yield* applyThread(
+        visibleActive,
+        "thread.unhidden",
+        "active-unhide",
+        DateTime.add(now, { minutes: 2 }),
+      );
+      assert.deepEqual(yield* projectionStore.getThread(activeThreadId), visibleActive);
+      const visibleActiveProjection = yield* projectionStore.getThreadProjection(activeThreadId);
+      assert.equal(
+        DateTime.toEpochMillis(visibleActiveProjection.updatedAt),
+        DateTime.toEpochMillis(now),
+      );
+      shell = yield* projectionStore.getShellSnapshot();
+      assert.equal(
+        DateTime.toEpochMillis(
+          shell.threads.find((thread) => thread.id === activeThreadId)!.updatedAt,
+        ),
+        DateTime.toEpochMillis(now),
+      );
+      assert.include(
+        shell.threads.map((thread) => thread.id),
+        activeThreadId,
+      );
+      assert.equal(shell.threads.find((thread) => thread.id === activeThreadId)?.hiddenAt, null);
+
+      const archivedThreadId = ThreadId.make("thread:projection-visibility-archived");
+      const createdArchived = makeThread(archivedThreadId);
+      yield* applyThread(createdArchived, "thread.created", "archived-create");
+      const archivedAt = DateTime.add(now, { minutes: 3 });
+      const archivedThread = { ...createdArchived, archivedAt, updatedAt: archivedAt };
+      yield* applyThread(archivedThread, "thread.archived", "archive", archivedAt);
+      const hiddenArchived = {
+        ...archivedThread,
+        hiddenAt: DateTime.add(now, { minutes: 4 }),
+      };
+      yield* applyThread(
+        hiddenArchived,
+        "thread.hidden",
+        "archived-hide",
+        hiddenArchived.hiddenAt!,
+      );
+      assert.deepEqual(yield* projectionStore.getThread(archivedThreadId), hiddenArchived);
+      const hiddenArchivedProjection = yield* projectionStore.getThreadProjection(archivedThreadId);
+      assert.equal(
+        DateTime.toEpochMillis(hiddenArchivedProjection.updatedAt),
+        DateTime.toEpochMillis(archivedAt),
+      );
+      shell = yield* projectionStore.getShellSnapshot();
+      assert.equal(
+        DateTime.toEpochMillis(
+          shell.archivedThreads.find((thread) => thread.id === archivedThreadId)!.updatedAt,
+        ),
+        DateTime.toEpochMillis(archivedAt),
+      );
+      assert.notInclude(
+        shell.threads.map((thread) => thread.id),
+        archivedThreadId,
+      );
+      assert.include(
+        shell.archivedThreads.map((thread) => thread.id),
+        archivedThreadId,
+      );
+
+      const visibleArchived = { ...hiddenArchived, hiddenAt: null };
+      yield* applyThread(
+        visibleArchived,
+        "thread.unhidden",
+        "archived-unhide",
+        DateTime.add(now, { minutes: 5 }),
+      );
+      assert.deepEqual(yield* projectionStore.getThread(archivedThreadId), visibleArchived);
+      const visibleArchivedProjection =
+        yield* projectionStore.getThreadProjection(archivedThreadId);
+      assert.equal(
+        DateTime.toEpochMillis(visibleArchivedProjection.updatedAt),
+        DateTime.toEpochMillis(archivedAt),
+      );
+      shell = yield* projectionStore.getShellSnapshot();
+      assert.equal(
+        DateTime.toEpochMillis(
+          shell.archivedThreads.find((thread) => thread.id === archivedThreadId)!.updatedAt,
+        ),
+        DateTime.toEpochMillis(archivedAt),
+      );
+      assert.notInclude(
+        shell.threads.map((thread) => thread.id),
+        archivedThreadId,
+      );
+      assert.equal(
+        shell.archivedThreads.find((thread) => thread.id === archivedThreadId)?.hiddenAt,
+        null,
+      );
+    }),
+  );
+
   it.effect("projects root provider owners into the shell in first-use order", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
@@ -1551,6 +1724,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -1634,6 +1808,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -1714,6 +1889,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         createdAt,
         updatedAt: createdAt,
         archivedAt: null,
+        hiddenAt: null,
         settledOverride: null,
         settledAt: null,
         lastVisitedAt: null,
@@ -1753,6 +1929,91 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 
+  it.effect("memory hide and unhide do not bump projected shell activity timestamps", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const activityAt = yield* DateTime.now;
+      const hiddenAt = DateTime.add(activityAt, { minutes: 1 });
+      const unhiddenAt = DateTime.add(activityAt, { minutes: 2 });
+      const threadId = ThreadId.make("thread:projection-visibility-activity");
+      const thread: OrchestrationV2AppThread = {
+        createdBy: "user",
+        creationSource: "web",
+        id: threadId,
+        projectId: ProjectId.make("project:projection-visibility-activity"),
+        title: "Visibility activity",
+        providerInstanceId,
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: null,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+        forkedFrom: null,
+        createdAt: activityAt,
+        updatedAt: activityAt,
+        archivedAt: null,
+        hiddenAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      };
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-visibility-activity:created"),
+        type: "thread.created",
+        threadId,
+        occurredAt: activityAt,
+        payload: thread,
+      });
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-visibility-activity:hidden"),
+        type: "thread.hidden",
+        threadId,
+        occurredAt: hiddenAt,
+        payload: { ...thread, hiddenAt },
+      });
+      let projection = yield* projectionStore.getThreadProjection(threadId);
+      let shell = (yield* projectionStore.getShellSnapshot()).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      assert.isDefined(shell);
+      assert.equal(
+        DateTime.toEpochMillis(projection.thread.updatedAt),
+        DateTime.toEpochMillis(activityAt),
+      );
+      assert.equal(DateTime.toEpochMillis(shell.updatedAt), DateTime.toEpochMillis(activityAt));
+      assert.equal(
+        DateTime.toEpochMillis(projection.updatedAt),
+        DateTime.toEpochMillis(activityAt),
+      );
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-visibility-activity:unhidden"),
+        type: "thread.unhidden",
+        threadId,
+        occurredAt: unhiddenAt,
+        payload: { ...thread, hiddenAt: null },
+      });
+      projection = yield* projectionStore.getThreadProjection(threadId);
+      shell = (yield* projectionStore.getShellSnapshot()).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      assert.isDefined(shell);
+      assert.equal(
+        DateTime.toEpochMillis(projection.thread.updatedAt),
+        DateTime.toEpochMillis(activityAt),
+      );
+      assert.equal(DateTime.toEpochMillis(shell.updatedAt), DateTime.toEpochMillis(activityAt));
+      assert.equal(
+        DateTime.toEpochMillis(projection.updatedAt),
+        DateTime.toEpochMillis(activityAt),
+      );
+    }).pipe(Effect.provide(ProjectionStore.layerMemory)),
+  );
+
   it.effect("preserves delegated completion ownership across stale run and task updates", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
@@ -1785,6 +2046,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         createdAt: now,
         updatedAt: now,
         archivedAt: null,
+        hiddenAt: null,
         settledOverride: null,
         settledAt: null,
         lastVisitedAt: null,
@@ -1956,6 +2218,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -2165,6 +2428,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         createdAt: now,
         updatedAt: now,
         archivedAt: null,
+        hiddenAt: null,
         settledOverride: null,
         settledAt: null,
         lastVisitedAt: null,
@@ -2225,6 +2489,9 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const threadId = yield* addRolledBackRecoveryCandidate("limit-shell");
       const otherThreadId = yield* addRolledBackRecoveryCandidate("other-limit-shell");
       const original = (yield* store.getThreadProjection(threadId)).runs[0]!;
+      if (original.purpose === "compaction") {
+        throw new Error("Expected the original recovery candidate to be a user run.");
+      }
       const now = yield* DateTime.now;
       const limitItem = {
         id: TurnItemId.make("limit-shell:error"),
@@ -2621,6 +2888,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         createdAt: now,
         updatedAt: now,
         archivedAt: null,
+        hiddenAt: null,
         settledOverride: null,
         settledAt: null,
         lastVisitedAt: null,
@@ -2750,6 +3018,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             createdAt: now,
             updatedAt: now,
             archivedAt: null,
+            hiddenAt: null,
             settledOverride: null,
             settledAt: null,
             lastVisitedAt: null,
@@ -2953,6 +3222,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -3073,6 +3343,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -3110,6 +3381,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -3234,6 +3506,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -3648,6 +3921,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -3685,6 +3959,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -4196,6 +4471,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -4334,6 +4610,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -4398,6 +4675,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,
@@ -4508,6 +4786,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         createdAt: at,
         updatedAt: at,
         archivedAt: null,
+        hiddenAt: null,
         settledOverride: null,
         settledAt: null,
         lastVisitedAt: null,
@@ -4655,6 +4934,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           createdAt: completedAt,
           updatedAt: completedAt,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,

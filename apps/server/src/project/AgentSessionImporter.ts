@@ -298,6 +298,7 @@ const make = Effect.gen(function* () {
             createdAt,
             updatedAt,
             archivedAt: null,
+            hiddenAt: null,
             settledOverride: "settled",
             settledAt: updatedAt,
             unsettledAt: null,

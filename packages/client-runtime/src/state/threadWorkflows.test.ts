@@ -212,6 +212,55 @@ describe("thread workflows", () => {
     ]);
   });
 
+  it("keeps native maintenance busy without exposing it as a queued prompt", () => {
+    const state = deriveThreadQueueWorkflowState({
+      thread: { id: "thread", activeProviderThreadId: "provider-thread" },
+      runs: [
+        {
+          id: "maintenance-active",
+          purpose: "compaction",
+          requestCommandId: "command:compact",
+          status: "running",
+          activeAttemptId: "attempt-maintenance",
+          providerThreadId: "provider-thread",
+        },
+        {
+          id: "maintenance-held",
+          purpose: "compaction",
+          requestCommandId: "command:compact-held",
+          status: "queued",
+          queueHeld: true,
+        },
+      ],
+      messages: [],
+      providerTurns: [
+        {
+          runAttemptId: "attempt-maintenance",
+          status: "running",
+        },
+      ],
+      providerThreads: [
+        {
+          id: "provider-thread",
+          appThreadId: "thread",
+          providerSessionId: "provider-session",
+        },
+      ],
+      providerSessions: [
+        {
+          id: "provider-session",
+          status: "running",
+          capabilities: capabilities({ queued: true, steer: true }),
+        },
+      ],
+    } as never);
+
+    expect(state.activeRun?.id).toBe("maintenance-active");
+    expect(state.queuedRuns).toEqual([]);
+    expect(state.isHeld).toBe(false);
+    expect(state.canPromoteToSteer).toBe(false);
+  });
+
   it("removes only the promoted head from the visible queue", () => {
     const state = deriveThreadQueueWorkflowState({
       thread: { id: "thread", activeProviderThreadId: "provider-thread" },

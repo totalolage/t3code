@@ -31,6 +31,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
+import { markQueuedRunsForUpdate } from "./ServiceUpdateQueuedRuns.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 
 /**
@@ -126,6 +127,8 @@ export interface EventSinkV2Shape {
     readonly acceptedAt: DateTime.Utc;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
+    /** Mark native queue rows held back by the scheduled update admission cut. */
+    readonly serviceUpdateAdmissionClosed?: boolean;
     readonly cancelUnsettledEffects?: {
       readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
       readonly reason: string;
@@ -331,9 +334,11 @@ const layerBase: Layer.Layer<
 
     const applyStoredEvents = (storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>) =>
       Effect.gen(function* () {
-        yield* Effect.forEach(storedEvents, (stored) => projectionStore.apply(stored.event), {
-          concurrency: 1,
-        });
+        yield* Effect.forEach(
+          storedEvents,
+          (stored) => projectionStore.apply(stored.event, stored.sequence),
+          { concurrency: 1 },
+        );
         const sequence = storedEvents.at(-1)?.sequence;
         if (sequence !== undefined) {
           const now = DateTime.formatIso(yield* DateTime.now);
@@ -555,6 +560,9 @@ const layerBase: Layer.Layer<
             );
           }
           yield* applyStoredEvents(storedEvents);
+          if (input.serviceUpdateAdmissionClosed === true) {
+            yield* markQueuedRunsForUpdate(sql, { threadId: input.threadId });
+          }
           yield* effectOutbox.enqueue(input.effects);
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
             commandId: input.commandId,

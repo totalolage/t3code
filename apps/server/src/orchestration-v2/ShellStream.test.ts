@@ -216,6 +216,45 @@ describe("archivedShellStreamItemFromThreadShell", () => {
   });
 });
 
+it("routes hide and unhide deltas through the active or archive stream by archive state", () => {
+  const hiddenAt = "2026-10-04T12:00:00.000Z" as never;
+  const archivedAt = "2026-10-03T12:00:00.000Z" as never;
+  const activeHidden = shellFixture({ archivedAt: null, hiddenAt });
+  const archivedVisible = shellFixture({
+    archivedAt,
+    hiddenAt: null,
+  });
+
+  expect(
+    shellStreamItemFromThreadShell({
+      stored: storedThreadEvent(7, "thread-a", { type: "thread.hidden" }),
+      shell: activeHidden,
+    }),
+  ).toEqual({
+    kind: "thread.updated",
+    sequence: 7,
+    location: "active",
+    thread: activeHidden,
+  });
+  expect(
+    shellStreamItemFromThreadShell({
+      stored: storedThreadEvent(8, "thread-a", { type: "thread.unhidden" }),
+      shell: archivedVisible,
+    }),
+  ).toEqual({
+    kind: "thread.removed",
+    sequence: 8,
+    location: "active",
+    threadId: "thread-a",
+  });
+  expect(
+    archivedShellStreamItemFromThreadShell({
+      stored: storedThreadEvent(8, "thread-a", { type: "thread.unhidden" }),
+      shell: archivedVisible,
+    }),
+  ).toEqual({ kind: "thread.updated", sequence: 8, thread: archivedVisible });
+});
+
 describe("shellStreamItemFromEnrichmentRefresh", () => {
   it("batches nearby completion roots onto one snapshot item", () => {
     expect(
@@ -532,6 +571,7 @@ describe("skipUnchangedThreadShells", () => {
     createdAt: at(0),
     updatedAt: at(0),
     archivedAt: null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     deletedAt: null,

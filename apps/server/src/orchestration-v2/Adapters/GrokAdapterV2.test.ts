@@ -6,11 +6,13 @@ import {
   ProviderSessionId,
   type RuntimeMode,
   ThreadId,
+  type ModelSelection,
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as EffectAcpErrors from "effect-acp/errors";
 import { xAiRateLimitedErrorCode } from "../../provider/acp/XAiAcpExtension.ts";
+import type { AcpSessionRuntimeStartResult } from "../../provider/acp/AcpSessionRuntime.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -32,6 +34,7 @@ import { ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
 import * as RuntimePolicy from "../RuntimePolicy.ts";
 import { acpPermissionDisposition } from "../../provider/acp/AcpClientPolicy.ts";
 import {
+  type AcpAdapterV2Flavor,
   AcpProviderCapabilitiesV2,
   acpCompletedTurnShouldTerminalizeTool,
   acpSubagentStatusBlocksTurnSettlement,
@@ -95,6 +98,81 @@ describe("acpSubagentStatusBlocksTurnSettlement", () => {
 });
 
 describe("GrokAdapterV2 capabilities", () => {
+  it.effect("tracks the last applied legacy ACP reasoning effort per session", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ readonly modelId: string; readonly meta?: unknown }> = [];
+      const flavor = makeGrokAcpAdapterFlavor({
+        makeRuntime: () => Effect.never,
+      } as unknown as GrokAdapterV2Options);
+      const applyModelSelection = flavor.applyModelSelection;
+      assert.isDefined(applyModelSelection);
+      const startResult = {
+        sessionId: "session-grok-effort",
+        initializeResult: { protocolVersion: 1 },
+        sessionSetupResult: {
+          sessionId: "session-grok-effort",
+          models: {
+            currentModelId: "grok-4.6",
+            availableModels: [
+              {
+                modelId: "grok-4.6",
+                name: "Grok 4.6",
+                _meta: { reasoningEffort: "medium" },
+              },
+            ],
+          },
+        },
+        modelConfigId: undefined,
+      } satisfies AcpSessionRuntimeStartResult;
+      const runtime = {
+        setSessionModel: (modelId: string, meta?: unknown) =>
+          Effect.sync(() => {
+            calls.push({ modelId, ...(meta === undefined ? {} : { meta }) });
+            return {};
+          }),
+      } as unknown as Parameters<
+        NonNullable<AcpAdapterV2Flavor["applyModelSelection"]>
+      >[0]["runtime"];
+      const modelSelection: ModelSelection = {
+        instanceId: ProviderInstanceId.make("grok-effort"),
+        model: "grok-4.6",
+        options: [{ id: "reasoningEffort", value: "high" }],
+      };
+
+      assert.equal(
+        yield* applyModelSelection({ runtime, startResult, modelSelection }),
+        "grok-4.6",
+      );
+      assert.deepEqual(calls, [{ modelId: "grok-4.6", meta: { reasoningEffort: "high" } }]);
+
+      yield* applyModelSelection({
+        runtime,
+        startResult,
+        modelSelection: {
+          ...modelSelection,
+          options: [{ id: "reasoningEffort", value: "medium" }],
+        },
+      });
+      assert.deepEqual(calls, [
+        { modelId: "grok-4.6", meta: { reasoningEffort: "high" } },
+        { modelId: "grok-4.6", meta: { reasoningEffort: "medium" } },
+      ]);
+
+      yield* applyModelSelection({
+        runtime,
+        startResult,
+        modelSelection: {
+          ...modelSelection,
+          options: [{ id: "reasoningEffort", value: "medium" }],
+        },
+      });
+      assert.deepEqual(calls, [
+        { modelId: "grok-4.6", meta: { reasoningEffort: "high" } },
+        { modelId: "grok-4.6", meta: { reasoningEffort: "medium" } },
+      ]);
+    }),
+  );
+
   it("preserves Grok's rate-limit stop and distinguishes other prompt failures", () => {
     const flavor = makeGrokAcpAdapterFlavor({
       makeRuntime: () => Effect.never,
@@ -417,6 +495,7 @@ describe("Grok launch permission mode", () => {
             settledOverride: null,
             settledAt: null,
             lastVisitedAt: null,
+            hiddenAt: null,
             deletedAt: null,
           },
           modelSelection,

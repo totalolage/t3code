@@ -61,6 +61,7 @@ function makeProjection(): OrchestrationV2ThreadProjection {
       createdAt,
       updatedAt: createdAt,
       archivedAt: null,
+      hiddenAt: null,
       settledOverride: null,
       settledAt: null,
       lastVisitedAt: null,
@@ -139,6 +140,7 @@ it.effect("cancels active work without reviving a run while disposing delegated 
     const base = makeProjection();
     const parentRun = base.runs.find((run) => run.status === "running")!;
     const queuedRun = base.runs.find((run) => run.status === "queued")!;
+    if (queuedRun.purpose === "compaction") throw new Error("Fixture requires a queued user run.");
     const taskId = NodeId.make("task:delete-plan");
     const projection: OrchestrationV2ThreadProjection = {
       ...base,

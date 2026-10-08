@@ -55,6 +55,10 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 const DESKTOP_APP_ID = "com.t3tools.t3code";
+const F8Y_DESKTOP_APP_ID = "dev.f8y.t3code";
+// The negative lookahead is an absolute end-of-input check; unlike `$`, it
+// rejects a trailing newline as part of the opt-in version.
+const F8Y_VERSION_PATTERN = /^\d+\.\d+\.\d+-f8y\.\d{8}\.\d+(?![\s\S])/u;
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -253,6 +257,56 @@ export class UnsupportedDesktopBuildArchitectureError extends Schema.TaggedError
   override get message(): string {
     return `Unsupported architecture '${this.arch}' for ${this.platform}.`;
   }
+}
+
+const F8yBuildRejectionReason = Schema.Literals(["platform", "target", "arch", "signed"]);
+export type F8yBuildRejectionReason = typeof F8yBuildRejectionReason.Type;
+
+export class UnsupportedF8yDesktopBuildError extends Schema.TaggedError<UnsupportedF8yDesktopBuildError>()(
+  "UnsupportedF8yDesktopBuildError",
+  {
+    reason: F8yBuildRejectionReason,
+    platform: BuildPlatform,
+    target: Schema.String,
+    arch: BuildArch,
+  },
+) {
+  override get message(): string {
+    if (this.reason === "platform") {
+      return "f8y desktop builds support only Linux x64 AppImage and macOS arm64 DMG artifacts.";
+    }
+    if (this.reason === "target") {
+      return `The f8y ${this.platform} build target must be ${this.platform === "mac" ? "dmg" : "AppImage"}.`;
+    }
+    if (this.reason === "arch") {
+      return `The f8y ${this.platform} build architecture must be ${this.platform === "mac" ? "arm64" : "x64"}.`;
+    }
+    return "f8y desktop builds cannot use paid signing.";
+  }
+}
+
+export function resolveF8yBuildRejection(input: {
+  readonly version: string | undefined;
+  readonly platform: typeof BuildPlatform.Type;
+  readonly target: string;
+  readonly arch: typeof BuildArch.Type;
+  readonly signed: boolean;
+}): F8yBuildRejectionReason | undefined {
+  if (input.version === undefined || !F8Y_VERSION_PATTERN.test(input.version)) return undefined;
+  if (input.platform !== "linux" && input.platform !== "mac") return "platform";
+  if (
+    (input.platform === "linux" && input.target !== "AppImage") ||
+    (input.platform === "mac" && input.target !== "dmg")
+  ) {
+    return "target";
+  }
+  if (
+    (input.platform === "linux" && input.arch !== "x64") ||
+    (input.platform === "mac" && input.arch !== "arm64")
+  ) {
+    return "arch";
+  }
+  return input.signed ? "signed" : undefined;
 }
 
 const InvalidMockUpdateServerPortReason = Schema.Literals([
@@ -1639,8 +1693,30 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   }
 
   const target = mergeOptions(input.target, env.target, PLATFORM_CONFIG[platform].defaultTarget);
+  const version = mergeOptions(input.buildVersion, env.version, undefined);
   const defaultArch = yield* getDefaultArch(platform);
   const arch = mergeOptions(input.arch, env.arch, defaultArch);
+  const skipBuild = resolveBooleanFlag(input.skipBuild, env.skipBuild);
+  const keepStage = resolveBooleanFlag(input.keepStage, env.keepStage);
+  const signed = resolveBooleanFlag(input.signed, env.signed);
+  const verbose = resolveBooleanFlag(input.verbose, env.verbose);
+
+  const f8yRejection = resolveF8yBuildRejection({
+    version,
+    platform,
+    target,
+    arch,
+    signed,
+  });
+  if (f8yRejection !== undefined) {
+    return yield* new UnsupportedF8yDesktopBuildError({
+      reason: f8yRejection,
+      platform,
+      target,
+      arch,
+    });
+  }
+
   const supportedArchitectures = PLATFORM_CONFIG[platform].archChoices;
   if (!supportedArchitectures.includes(arch)) {
     return yield* new UnsupportedDesktopBuildArchitectureError({
@@ -1649,7 +1725,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
       supportedArchitectures: [...supportedArchitectures],
     });
   }
-  const version = mergeOptions(input.buildVersion, env.version, undefined);
+
   const releaseDir = resolveBooleanFlag(input.mockUpdates, env.mockUpdates)
     ? "release-mock"
     : "release";
@@ -1657,11 +1733,6 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     repoRoot,
     mergeOptions(input.outputDir, env.outputDir, releaseDir),
   );
-
-  const skipBuild = resolveBooleanFlag(input.skipBuild, env.skipBuild);
-  const keepStage = resolveBooleanFlag(input.keepStage, env.keepStage);
-  const signed = resolveBooleanFlag(input.signed, env.signed);
-  const verbose = resolveBooleanFlag(input.verbose, env.verbose);
 
   const mockUpdates = resolveBooleanFlag(input.mockUpdates, env.mockUpdates);
   const configuredMockUpdateServerPort = Option.getOrUndefined(env.mockUpdateServerPort);
@@ -2565,9 +2636,21 @@ export function resolveDesktopRuntimeDependencies(
   );
 }
 
+type DesktopUpdateChannel = "latest" | "nightly" | "f8y";
+
 export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
-  updateChannel: "latest" | "nightly",
+  updateChannel: DesktopUpdateChannel,
 ) {
+  if (updateChannel === "f8y") {
+    return {
+      provider: "github",
+      owner: "totalolage",
+      repo: "t3code",
+      releaseType: "prerelease",
+      channel: "f8y" as const,
+    };
+  }
+
   const env = yield* Config.all({
     updateRepository: Config.String("T3CODE_DESKTOP_UPDATE_REPOSITORY").pipe(Config.option),
     githubRepository: Config.String("GITHUB_REPOSITORY").pipe(Config.option),
@@ -2591,7 +2674,8 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
   };
 });
 
-export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
+export function resolveDesktopUpdateChannel(version: string): DesktopUpdateChannel {
+  if (F8Y_VERSION_PATTERN.test(version)) return "f8y";
   return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
 }
 
@@ -2606,8 +2690,12 @@ export function isDesktopPreviewVersion(version: string): boolean {
   return /-pr\./.test(version) || /-preview\.\d{8}\.\d+$/.test(version);
 }
 
+function resolveDesktopArtworkChannel(version: string): "latest" | "nightly" {
+  return resolveDesktopUpdateChannel(version) === "nightly" ? "nightly" : "latest";
+}
+
 export function resolveDesktopWebAssetBrand(version: string): WebAssetBrand {
-  return resolveWebAssetBrandForChannel(resolveDesktopUpdateChannel(version));
+  return resolveWebAssetBrandForChannel(resolveDesktopArtworkChannel(version));
 }
 
 export function resolveDesktopBuildIconAssets(version: string): DesktopBuildIconAssets {
@@ -2649,6 +2737,10 @@ export function resolveDesktopProductName(version: string): string {
     : (desktopPackageJson.productName ?? "T3 Code");
 }
 
+export function resolveDesktopAppId(version: string): string {
+  return resolveDesktopUpdateChannel(version) === "f8y" ? F8Y_DESKTOP_APP_ID : DESKTOP_APP_ID;
+}
+
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   platform: typeof BuildPlatform.Type,
   target: string,
@@ -2668,8 +2760,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
 ) {
+  const updateChannel = resolveDesktopUpdateChannel(version);
+  const isF8yBuild = updateChannel === "f8y";
   const buildConfig: Record<string, unknown> = {
-    appId: DESKTOP_APP_ID,
+    appId: resolveDesktopAppId(version),
     productName: resolveDesktopProductName(version),
     artifactName: "T3-Code-${version}-${arch}.${ext}",
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
@@ -2697,9 +2791,16 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       ...(platform === "win" ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
       ...(platform === "win" && wslRuntimeBundled ? WSL_RUNTIME_EXTRA_RESOURCES : []),
     ],
+    ...(isF8yBuild && platform === "mac" ? { forceCodeSigning: true } : {}),
   };
-  const updateChannel = resolveDesktopUpdateChannel(version);
-  if (!isDesktopPreviewVersion(version)) {
+  if (isF8yBuild) {
+    if (platform === "linux") {
+      const publishConfig = yield* resolveGitHubPublishConfig("f8y");
+      if (publishConfig) buildConfig.publish = [publishConfig];
+    } else if (platform === "mac") {
+      buildConfig.publish = null;
+    }
+  } else if (!isDesktopPreviewVersion(version)) {
     const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
     if (publishConfig) {
       buildConfig.publish = [publishConfig];
@@ -2717,7 +2818,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
     buildConfig.mac = {
-      target: target === "dmg" ? [target, "zip"] : [target],
+      target: isF8yBuild ? [target] : target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
       extendInfo: {
@@ -2730,8 +2831,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           schemes: ["t3code", "t3code-dev"],
         },
       ],
-      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
-      ...(macPasskeySigning
+      ...(isF8yBuild ? { identity: "-", notarize: false } : {}),
+      ...(signed && !isF8yBuild ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+      ...(macPasskeySigning && !isF8yBuild
         ? {
             entitlements: macPasskeySigning.entitlementsPath,
             provisioningProfile: macPasskeySigning.provisioningProfilePath,
@@ -2746,7 +2848,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       // DMG window backgrounds by volume name, so reusing a generic name can
       // make a newly built background look unchanged during testing.
       title: `${resolveDesktopProductName(version)} ${version} Installer`,
-      background: `dmg/dmg-background-${updateChannel}.png`,
+      background: `dmg/dmg-background-${resolveDesktopArtworkChannel(version)}.png`,
       window: {
         width: 640,
         // The DMG backend derives bounds from the image, including Finder's
@@ -2770,11 +2872,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
     buildConfig.linux = {
-      // The .deb is built from the same unpacked app after the AppImage.
-      // electron-builder lists both in latest-linux.yml and writes
-      // resources/package-type into the .deb only, so electron-updater updates
-      // each install in its own format.
-      target: target === "AppImage" ? [target, "deb"] : [target],
+      // F8Y publishes only the requested artifact. Other channels also build a
+      // .deb, which electron-builder includes in their update manifests.
+      target: isF8yBuild ? [target] : target === "AppImage" ? [target, "deb"] : [target],
       executableName: "t3code",
       icon: "icons",
       category: "Development",
@@ -3466,6 +3566,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   });
 
   const appVersion = options.version ?? serverPackageJson.version;
+  const isF8yBuild = resolveDesktopUpdateChannel(appVersion) === "f8y";
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
   const commitHash = yield* resolveGitCommitHash(repoRoot);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
@@ -3605,7 +3706,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   if (options.platform === "mac" && options.target === "dmg") {
     yield* stageDesktopDmgBackground(
       stageResourcesDir,
-      resolveDesktopUpdateChannel(appVersion),
+      resolveDesktopArtworkChannel(appVersion),
       options.verbose,
     );
   }
@@ -3655,7 +3756,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* fs.copy(stageResourcesDir, stageProdResourcesDir);
 
   const configuredMacPasskeySigning =
-    options.platform === "mac" && options.signed
+    options.platform === "mac" && options.signed && !isF8yBuild
       ? yield* Effect.try({
           try: () => resolveMacPasskeySigningConfiguration(loadRepoEnv({ repoRoot })),
           catch: MacPasskeySigningConfigurationResolutionError.fromCause,
@@ -3824,7 +3925,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     // takes seconds on a many-core runner instead of about two minutes.
     buildEnv.XZ_DEFAULTS = "-T0";
   }
-  if (!options.signed) {
+  if (!options.signed || isF8yBuild) {
+    // f8y keeps the explicit macOS identity "-" in the builder config for
+    // ad-hoc signing; disabling certificate discovery must not replace it.
     buildEnv.CSC_IDENTITY_AUTO_DISCOVERY = "false";
     delete buildEnv.CSC_LINK;
     delete buildEnv.CSC_KEY_PASSWORD;

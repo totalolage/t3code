@@ -414,9 +414,93 @@ describe("getThreadListV2OrderedSection", () => {
       ),
     ).toEqual(["pinned-first", "pinned-later"]);
   });
+
+  it("omits hidden rows from reorder sections without confusing identical ids across environments", () => {
+    const remoteEnvironmentId = EnvironmentId.make("environment-remote");
+    const sameThreadId = ThreadId.make("same-thread-id");
+    const visibleRemote = makeThread({
+      environmentId: remoteEnvironmentId,
+      id: sameThreadId,
+      title: "Visible remote",
+      pinnedAt: NOW,
+      pinOrderKey: "a",
+    });
+    const hiddenLocal = makeThread({
+      id: sameThreadId,
+      title: "Hidden local",
+      hiddenAt: NOW,
+      pinnedAt: NOW,
+      pinOrderKey: "b",
+    });
+
+    expect(
+      getThreadListV2OrderedSection({
+        threads: [hiddenLocal, visibleRemote],
+        section: "pinned",
+        now: NOW,
+      }),
+    ).toEqual([visibleRemote]);
+  });
 });
 
 describe("buildThreadListV2Items", () => {
+  it("omits hidden active, pinned, and snoozed rows without crossing environment boundaries", () => {
+    const remoteEnvironmentId = EnvironmentId.make("environment-remote");
+    const sameThreadId = ThreadId.make("same-thread-id");
+    const visibleRemote = makeThread({
+      environmentId: remoteEnvironmentId,
+      id: sameThreadId,
+      title: "Visible remote",
+    });
+    const hiddenActive = makeThread({
+      id: sameThreadId,
+      title: "Hidden active",
+      hiddenAt: NOW,
+    });
+    const hiddenPinned = makeThread({
+      id: ThreadId.make("hidden-pinned"),
+      title: "Hidden pinned",
+      hiddenAt: NOW,
+      pinnedAt: NOW,
+    });
+    const hiddenSnoozed = makeThread({
+      id: ThreadId.make("hidden-snoozed"),
+      title: "Hidden snoozed",
+      hiddenAt: NOW,
+      snoozedAt: NOW,
+      snoozedUntil: "2026-06-03T00:00:00.000Z",
+    });
+
+    const layout = buildThreadListV2Items({
+      threads: [hiddenActive, hiddenPinned, hiddenSnoozed, visibleRemote],
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+      snoozedShelfExpanded: true,
+    });
+
+    expect(layout.items.map((item) => item.thread.id)).toEqual([sameThreadId]);
+    expect(layout.snoozedCount).toBe(0);
+    expect(layout.settledCount).toBe(0);
+  });
+
+  it("treats missing and null hidden timestamps as visible and restores an unhidden row", () => {
+    const thread = makeThread({ id: ThreadId.make("reversible"), title: "Reversible" });
+    const layout = (candidate: EnvironmentThreadShell) =>
+      buildThreadListV2Items({
+        threads: [candidate],
+        environmentId: null,
+        searchQuery: "reversible",
+        now: NOW,
+      });
+
+    expect(layout(thread).items.map((item) => item.thread.id)).toEqual([thread.id]);
+    expect(layout({ ...thread, hiddenAt: "2026-06-02T00:00:00.000Z" }).items).toEqual([]);
+    expect(layout({ ...thread, hiddenAt: null }).items.map((item) => item.thread.id)).toEqual([
+      thread.id,
+    ]);
+  });
+
   it("places a persisted settled thread in the settled shelf", () => {
     const thread = makeThread({
       id: ThreadId.make("linked-merged"),

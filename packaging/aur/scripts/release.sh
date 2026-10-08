@@ -5,28 +5,80 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 repo='pingdotgg/t3code'
 tag="${RELEASE_TAG:?RELEASE_TAG is required}"
 pkgrel="${PKGREL:-1}"
+is_f8y=false
+asset_arch='x86_64'
 
 if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   pkgname='t3code-bin'
 elif [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}\.[0-9]+$ ]]; then
   pkgname='t3code-nightly-bin'
+elif [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-f8y\.[0-9]{8}\.[0-9]+$ ]]; then
+  pkgname='t3code-f8y-bin'
+  is_f8y=true
+  asset_arch='x86_64'
+  repo="${SOURCE_REPO:-${GITHUB_REPOSITORY:-}}"
+  owner="${repo%%/*}"
+  repository="${repo#*/}"
+  repo_is_safe=false
+  if [[ -n "$repo" ]] && (
+    export LC_ALL=C
+    [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]
+  ); then
+    repo_is_safe=true
+  fi
+
+  if [[ "$repo_is_safe" != true ||
+        "$owner" == '.' || "$owner" == '..' ||
+        "$repository" == '.' || "$repository" == '..' ||
+        "${repo,,}" == 'pingdotgg/t3code' ]]; then
+    echo "Invalid SOURCE_REPO/GITHUB_REPOSITORY for f8y release: ${repo:-<unset>}." >&2
+    exit 1
+  fi
 else
+  if [[ "$tag" == *f8y* ]]; then
+    echo "Malformed f8y release tag: $tag" >&2
+    exit 1
+  fi
   echo "Release $tag does not publish an AUR package."
   exit 0
 fi
 
-version="${tag#v}"
-pkgver="${version//-/_}"
-asset_name="T3-Code-${version}-x86_64.AppImage"
-release_json="$(gh api "repos/$repo/releases/tags/$tag")"
-asset_digest="$(jq -r --arg name "$asset_name" \
-  '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
-appimage_sha256="${asset_digest#sha256:}"
-
-if [[ ! "$appimage_sha256" =~ ^[0-9a-f]{64}$ ]]; then
-  echo "Release $tag is missing $asset_name or its SHA-256 digest." >&2
+if [[ ! "$pkgrel" =~ ^[1-9][0-9]*$ ]]; then
+  echo "PKGREL must be a positive integer." >&2
   exit 1
 fi
+
+version="${tag#v}"
+pkgver="${version//-/_}"
+asset_name="T3-Code-${version}-${asset_arch}.AppImage"
+release_json="$(gh api "repos/$repo/releases/tags/$tag")"
+expected_url="https://github.com/$repo/releases/download/$tag/$asset_name"
+appimage_sha256="$(
+  jq -er \
+    --arg tag "$tag" \
+    --arg asset_name "$asset_name" \
+    --arg expected_url "$expected_url" \
+    '
+      if .tag_name != $tag then
+        error("release tag does not match requested tag")
+      elif .draft != false then
+        error("release is a draft")
+      else
+        [.assets[]? | select(.name == $asset_name)] as $matches
+        | if ($matches | length) != 1 then
+            error("release must contain exactly one expected AppImage asset")
+          elif ($matches[0].digest | type) != "string" then
+            error("AppImage digest is missing")
+          elif ($matches[0].digest | test("^sha256:[0-9a-f]{64}$") | not) then
+            error("AppImage digest is invalid")
+          elif $matches[0].browser_download_url != $expected_url then
+            error("AppImage download URL does not match requested repository and tag")
+          else
+            $matches[0].digest | sub("^sha256:"; "")
+          end
+      end
+    ' <<<"$release_json"
+)"
 
 work_dir="$(mktemp -d)"
 trap 'rm -rf -- "$work_dir"' EXIT
@@ -36,12 +88,22 @@ license_sha256="$(sha256sum "$work_dir/LICENSE" | awk '{print $1}')"
 
 package_dir="$repo_root/packaging/aur/$pkgname"
 cd "$package_dir"
-sed -Ei \
-  -e "s/^pkgver=.*/pkgver=$pkgver/" \
-  -e "s/^pkgrel=.*/pkgrel=$pkgrel/" \
-  -e "/# AppImage$/s/'[0-9a-f]{64}'/'$appimage_sha256'/" \
-  -e "/# upstream license$/s/'[0-9a-f]{64}'/'$license_sha256'/" \
-  PKGBUILD
+if [[ "$is_f8y" == true ]]; then
+  sed -Ei \
+    -e "s|^_repo=.*|_repo='$repo'|" \
+    -e "s/^pkgver=.*/pkgver=$pkgver/" \
+    -e "s/^pkgrel=.*/pkgrel=$pkgrel/" \
+    -e "/# AppImage$/s/'[0-9a-f]{64}'/'$appimage_sha256'/" \
+    -e "/# upstream license$/s/'[0-9a-f]{64}'/'$license_sha256'/" \
+    PKGBUILD
+else
+  sed -Ei \
+    -e "s/^pkgver=.*/pkgver=$pkgver/" \
+    -e "s/^pkgrel=.*/pkgrel=$pkgrel/" \
+    -e "/# AppImage$/s/'[0-9a-f]{64}'/'$appimage_sha256'/" \
+    -e "/# upstream license$/s/'[0-9a-f]{64}'/'$license_sha256'/" \
+    PKGBUILD
+fi
 
 run_as_builder() {
   if [[ "$(id -u)" == 0 ]]; then

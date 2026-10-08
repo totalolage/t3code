@@ -46,6 +46,7 @@ export function makeRawThreadShell(
     createdAt: now,
     updatedAt: now,
     archivedAt: null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     deletedAt: null,

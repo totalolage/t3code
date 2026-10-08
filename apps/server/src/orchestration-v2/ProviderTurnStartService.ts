@@ -240,7 +240,10 @@ export const layer: Layer.Layer<
       const providerThread = projection.providerThreads.find(
         (candidate) => candidate.id === run.providerThreadId,
       );
-      const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+      const message =
+        run.purpose === "compaction"
+          ? undefined
+          : projection.messages.find((candidate) => candidate.id === run.userMessageId);
       const checkpointScope = projection.checkpointScopes.find(
         (candidate) => candidate.id === rootNode?.checkpointScopeId,
       );
@@ -256,6 +259,7 @@ export const layer: Layer.Layer<
                     source.status === "interrupted" ||
                     (source.status === "completed" &&
                       handoff.delivery === undefined &&
+                      source.purpose !== "compaction" &&
                       projection.messages.some(
                         (message) =>
                           message.id === source.userMessageId &&
@@ -277,7 +281,7 @@ export const layer: Layer.Layer<
         attempt === undefined ||
         providerThread === undefined ||
         providerThread.providerSessionId === null ||
-        message === undefined ||
+        (run.purpose !== "compaction" && message === undefined) ||
         checkpointScope === undefined
       ) {
         return yield* new ProviderTurnStartError({
@@ -375,7 +379,11 @@ export const layer: Layer.Layer<
           });
         },
       );
-      if (message.attachments.length === 0 && message.text.trimStart().startsWith("/")) {
+      if (
+        message !== undefined &&
+        message.attachments.length === 0 &&
+        message.text.trimStart().startsWith("/")
+      ) {
         const isEmptyCompaction =
           message.text.trim().toLowerCase() === "/compact" && !projection.hasConversation;
         // Preparing a run may already point the thread at a newly selected
@@ -840,11 +848,11 @@ export const layer: Layer.Layer<
         createdAt: providerThread.createdAt,
         updatedAt: now,
       };
-      const runningRun: OrchestrationV2Run = {
+      const runningRun = {
         ...run,
         status: "running",
         startedAt: now,
-      };
+      } satisfies OrchestrationV2Run;
       const runningAttempt: OrchestrationV2RunAttempt = {
         ...attempt,
         ...(runningProviderThread.nativeThreadRef?.nativeId == null
@@ -946,6 +954,39 @@ export const layer: Layer.Layer<
       });
       if (!runningWrite.committed) {
         return;
+      }
+      if (runningRun.purpose === "compaction") {
+        yield* runExecution.startRootRun({
+          commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
+          appThread: projection.thread,
+          providerSessionId,
+          session,
+          run: runningRun,
+          rootNode: runningRootNode,
+          checkpointScope,
+          providerThread: runningProviderThread,
+          attempt: runningAttempt,
+          attemptId: attempt.id,
+          shouldStartProviderTurn: runControls.shouldStartProviderTurn,
+          shouldFinalizeRun: runControls.shouldFinalizeRun,
+          hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
+          providerTurnOrdinal:
+            Math.max(
+              0,
+              ...projection.providerTurns
+                .filter((turn) => turn.providerThreadId === providerThread.id)
+                .map((turn) => turn.ordinal),
+            ) + 1,
+          modelSelection: run.modelSelection,
+          runtimePolicy: resolvedRuntimePolicy,
+        });
+        return;
+      }
+      if (message === undefined) {
+        return yield* new ProviderTurnStartError({
+          runId,
+          cause: `Run ${runId} has no user message for its provider turn.`,
+        });
       }
       const routableSubagents = projection.subagents.filter((subagent) =>
         RunExecutionService.canRouteRelatedSubagent(subagent.status),

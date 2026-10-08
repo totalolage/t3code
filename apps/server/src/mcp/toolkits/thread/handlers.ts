@@ -29,6 +29,7 @@ function queueEntry(
   limit: number,
 ) {
   const run = projection.runs.find((run) => run.id === runId && run.status === "queued");
+  if (run?.purpose === "compaction") return undefined;
   const message = projection.messages.find((message) => message.id === run?.userMessageId);
   if (run === undefined || message === undefined) return undefined;
   const characters = Array.from(message.text);

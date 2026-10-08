@@ -44,6 +44,7 @@ import * as LegacyV1ThreadImporter from "./LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "../Orchestrator.ts";
 import * as ProjectionMaintenance from "../ProjectionMaintenance.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
+import { initializeV2Database } from "../../persistence/initializeV2Database.ts";
 import {
   ProviderAdapterProtocolError,
   type ProviderAdapterV2Event,
@@ -52,6 +53,11 @@ import {
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "../testkit/ReplayFixtureWorkspace.ts";
+import {
+  createDeployedForkV1Schema,
+  deployedForkV1FixtureIds,
+  seedDeployedForkV1CutoverRows,
+} from "../../persistence/testkit/DeployedForkV1Fixture.ts";
 
 const PROJECT_ID = "project:cutover";
 const ACTIVE_THREAD = "thread:cutover:active";
@@ -652,6 +658,20 @@ const messageOrdinals = (projection: OrchestrationV2ThreadProjection) =>
     )
     .map((item) => [String(item.messageId), item.ordinal, item.status] as const);
 
+const readOptionalFile = (fs: FileSystem.FileSystem, filePath: string) =>
+  Effect.gen(function* () {
+    if (!(yield* fs.exists(filePath))) return undefined;
+    return yield* fs.readFile(filePath);
+  });
+
+const assertSourceBytesUnchanged = (
+  before: { readonly main: Uint8Array; readonly wal: Uint8Array | undefined },
+  after: { readonly main: Uint8Array; readonly wal: Uint8Array | undefined },
+) => {
+  assert.deepStrictEqual(after.main, before.main, "the F source database main file changed");
+  assert.deepStrictEqual(after.wal, before.wal, "the F source database WAL changed");
+};
+
 describe("orchestration v2 legacy v1 cutover", () => {
   it.live(
     "migrates an untouched v1 database copy through shell import, lazy transcripts, continuation and restart",
@@ -1047,6 +1067,183 @@ describe("orchestration v2 legacy v1 cutover", () => {
           assert.isTrue(
             boot2Logs.some((log) => String(log.message).includes("migration history diverges")),
           );
+        }).pipe(Effect.provide(NodeServices.layer)),
+      ),
+  );
+
+  it.live(
+    "copies the shipped F51 database, bridges native schema, preserves hidden state, and restarts without reimport",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const workspace = yield* checkpointWorkspace("deployed-fork-v1-cutover");
+          const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-fork-v1-cutover-" });
+          const userdata = path.join(stateDir, "userdata");
+          const sourcePath = path.join(userdata, "state.sqlite");
+          const destinationPath = path.join(userdata, "statev2.sqlite");
+          yield* fs.makeDirectory(userdata, { recursive: true });
+
+          yield* Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* sql`PRAGMA foreign_keys = ON`;
+            yield* createDeployedForkV1Schema();
+            yield* seedDeployedForkV1CutoverRows(workspace);
+            yield* sql`
+              INSERT INTO queued_provider_turn_starts (event_sequence, thread_id, message_id)
+              VALUES (8102, ${deployedForkV1FixtureIds.threadId}, ${deployedForkV1FixtureIds.messageIds[0]})
+            `;
+          }).pipe(Effect.scoped, Effect.provide(NodeSqliteClient.layer({ filename: sourcePath })));
+
+          const sourceBefore = {
+            main: yield* fs.readFile(sourcePath),
+            wal: yield* readOptionalFile(fs, `${sourcePath}-wal`),
+          };
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+
+          yield* initializeV2Database(destinationPath);
+
+          const firstBoot = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+              const projections = yield* ProjectionStore.ProjectionStoreV2;
+              const threadId = ThreadId.make(deployedForkV1FixtureIds.threadId);
+
+              assert.equal(yield* importer.pendingThreadCount, 1);
+              assert.deepStrictEqual(yield* importer.reconcileShells, {
+                importedThreadCount: 1,
+                importedMessageCount: 1,
+              });
+              assert.deepStrictEqual(yield* importer.reconcileShells, {
+                importedThreadCount: 0,
+                importedMessageCount: 0,
+              });
+
+              const shell = yield* projections.getThreadProjection(threadId);
+              assert.equal(shell.thread.historyOrigin, "v1_import");
+              assert.equal(DateTime.formatIso(shell.thread.hiddenAt!), "2026-10-04T00:00:00.000Z");
+              assert.equal(
+                DateTime.formatIso(shell.thread.archivedAt!),
+                "2026-10-02T00:00:00.000Z",
+              );
+              assert.equal(DateTime.formatIso(shell.thread.pinnedAt!), "2026-10-03T00:00:00.000Z");
+              assert.equal(shell.thread.modelSelection.model, "gpt-5.4");
+              assert.equal(shell.thread.linkedPullRequest?.number, 42);
+
+              assert.deepStrictEqual(yield* importer.ensureTranscript(threadId), {
+                importedThreadCount: 1,
+                importedMessageCount: 2,
+              });
+              const transcript = yield* projections.getThreadProjection(threadId);
+              assert.deepStrictEqual(
+                transcript.messages.map((message) => message.id),
+                deployedForkV1FixtureIds.messageIds.map((id) => MessageId.make(id)),
+              );
+              assert.deepStrictEqual(
+                transcript.messages.find(
+                  (message) => message.id === deployedForkV1FixtureIds.messageIds[1],
+                )?.attachments,
+                [
+                  {
+                    type: "image",
+                    id: "fork-image",
+                    name: "proof.png",
+                    mimeType: "image/png",
+                    sizeBytes: 123,
+                  },
+                ],
+              );
+
+              const session = yield* sql<{
+                readonly session_id: string;
+                readonly client_surface: string;
+                readonly client_app_version: string;
+              }>`
+                SELECT session_id, client_surface, client_app_version
+                FROM auth_sessions WHERE session_id = ${deployedForkV1FixtureIds.authSessionId}
+              `;
+              assert.deepStrictEqual(session, [
+                {
+                  session_id: deployedForkV1FixtureIds.authSessionId,
+                  client_surface: "desktop",
+                  client_app_version: "1.0.0",
+                },
+              ]);
+
+              const pending = yield* sql<{ readonly request_id: string }>`
+                SELECT request_id FROM pending_interactions
+                WHERE thread_id = ${deployedForkV1FixtureIds.threadId}
+              `;
+              assert.deepStrictEqual(pending, []);
+              const forkQueue = yield* sql<{ readonly event_sequence: number }>`
+                SELECT event_sequence FROM queued_provider_turn_starts WHERE event_sequence = 8102
+              `;
+              assert.deepStrictEqual(forkQueue, [{ event_sequence: 8102 }]);
+              const migration57 = yield* sql<{ readonly name: string }>`
+                SELECT name FROM effect_sql_migrations WHERE migration_id = 57
+              `;
+              assert.deepStrictEqual(migration57, [{ name: "PendingInteractionResponses" }]);
+              const events = yield* sql<{ readonly count: number }>`
+                SELECT COUNT(*) AS count FROM orchestration_events
+                WHERE event_id LIKE 'migration:v1:%'
+              `;
+              return events[0]?.count ?? 0;
+            }).pipe(
+              Effect.provide(
+                layerBoot({
+                  name: "deployed-fork-v1-cutover-first",
+                  dbPath: destinationPath,
+                  workspace,
+                  capturedTurns,
+                }),
+              ),
+            ),
+          );
+
+          assert.deepStrictEqual(yield* Ref.get(capturedTurns), []);
+          assertSourceBytesUnchanged(sourceBefore, {
+            main: yield* fs.readFile(sourcePath),
+            wal: yield* readOptionalFile(fs, `${sourcePath}-wal`),
+          });
+
+          const secondBootEvents = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+              const threadId = ThreadId.make(deployedForkV1FixtureIds.threadId);
+              assert.equal(yield* importer.pendingThreadCount, 0);
+              assert.deepStrictEqual(yield* importer.reconcileShells, {
+                importedThreadCount: 0,
+                importedMessageCount: 0,
+              });
+              assert.deepStrictEqual(yield* importer.ensureTranscript(threadId), {
+                importedThreadCount: 0,
+                importedMessageCount: 0,
+              });
+              const events = yield* sql<{ readonly count: number }>`
+                SELECT COUNT(*) AS count FROM orchestration_events
+                WHERE event_id LIKE 'migration:v1:%'
+              `;
+              return events[0]?.count ?? 0;
+            }).pipe(
+              Effect.provide(
+                layerBoot({
+                  name: "deployed-fork-v1-cutover-restart",
+                  dbPath: destinationPath,
+                  workspace,
+                  capturedTurns,
+                }),
+              ),
+            ),
+          );
+          assert.equal(secondBootEvents, firstBoot);
+          assert.deepStrictEqual(yield* Ref.get(capturedTurns), []);
+          assertSourceBytesUnchanged(sourceBefore, {
+            main: yield* fs.readFile(sourcePath),
+            wal: yield* readOptionalFile(fs, `${sourcePath}-wal`),
+          });
         }).pipe(Effect.provide(NodeServices.layer)),
       ),
   );

@@ -55,6 +55,7 @@ import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
+import * as ServiceUpdateAdmission from "./ServiceUpdateAdmission.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 
 const isLiveStreamBufferError = Schema.is(LiveStreamBufferError);
@@ -78,6 +79,7 @@ const layerIsolatedOutbox = Layer.fresh(EffectOutbox.layer.pipe(Layer.provideMer
 const layerProjectionMaintenanceProvided = ProjectionMaintenance.layer.pipe(
   Layer.provide(layerStoresProvided),
 );
+const layerServiceUpdateAdmission = ServiceUpdateAdmission.layer;
 const layerTest = Layer.mergeAll(
   layerStoresProvided,
   layerEventSinkProvided,
@@ -85,6 +87,7 @@ const layerTest = Layer.mergeAll(
   layerCommandReceiptStoreProvided,
   IdAllocator.layer,
   layerProjectionMaintenanceProvided,
+  layerServiceUpdateAdmission,
 );
 
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -117,6 +120,7 @@ function makeThread(threadId: ThreadId, now: DateTime.Utc): OrchestrationV2AppTh
     createdAt: now,
     updatedAt: now,
     archivedAt: null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     lastVisitedAt: null,
@@ -810,6 +814,18 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         occurredAt: now,
         payload: { ...thread, lastVisitedAt: now },
       });
+      const visibilityEvent = (
+        suffix: string,
+        type: "thread.hidden" | "thread.unhidden",
+        hiddenAt: DateTime.Utc | null,
+      ): OrchestrationV2DomainEvent => ({
+        id: EventId.make(`event:foundation-compact:${suffix}`),
+        type,
+        threadId,
+        providerInstanceId,
+        occurredAt: now,
+        payload: { ...thread, hiddenAt },
+      });
       const messageEvent = (suffix: string, text: string): OrchestrationV2DomainEvent => ({
         id: EventId.make(`event:foundation-compact:${suffix}`),
         type: "message.updated",
@@ -899,6 +915,9 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           messageEvent("message-2", "final"),
           nodeEvent("node-2", "completed"),
           itemEvent("item-2", "final"),
+          visibilityEvent("hide-1", "thread.hidden", now),
+          visibilityEvent("unhide", "thread.unhidden", null),
+          visibilityEvent("hide-2", "thread.hidden", now),
         ],
       });
       const beforeCompaction = yield* projections.getThreadProjection(threadId);
@@ -957,10 +976,10 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         [
           "event:foundation-compact:create",
           "event:foundation-compact:item-1",
-          "event:foundation-compact:visit-2",
           "event:foundation-compact:message-2",
           "event:foundation-compact:node-2",
           "event:foundation-compact:item-2",
+          "event:foundation-compact:hide-2",
         ],
       );
 
@@ -2469,7 +2488,10 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           id: "effect:foundation-retry-order:a-start",
           commandId: CommandId.make("command:foundation-retry-order:start"),
           threadId,
-          request: { type: "provider-turn.start", runId: RunId.make("run:foundation-retry-order") },
+          request: {
+            type: "provider-turn.start",
+            runId: RunId.make("run:foundation-retry-order"),
+          },
         },
         {
           id: "effect:foundation-retry-order:b-title",
@@ -2796,6 +2818,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         const effects = yield* outbox.listByCommandId(
           CommandId.make(`command:restart-prepare:${runId}`),
         );
+        const sql = yield* SqlClient.SqlClient;
         assert.lengthOf(effects, 1);
         assert.equal(effects[0]?.status, "pending");
         assert.deepEqual(effects[0]?.request, {
@@ -2821,7 +2844,10 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           id: "effect:activation-a-restart",
           commandId,
           threadId,
-          request: { type: "provider-runtime.continue", sourceRunId: RunId.make("run:activation") },
+          request: {
+            type: "provider-runtime.continue",
+            sourceRunId: RunId.make("run:activation"),
+          },
         },
         {
           id: "effect:activation-b-cleanup",
@@ -2991,6 +3017,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
             runOnce: Effect.succeed(false),
             nextClaimableAt: Effect.succeed(Option.none()),
             drain: () => Effect.succeed(0),
+            observeActive: Effect.succeed({ active: [], changes: Stream.empty }),
           }),
         ),
       );
@@ -3213,6 +3240,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
             runOnce: Effect.succeed(false),
             nextClaimableAt: Effect.succeed(Option.none()),
             drain: () => Effect.succeed(0),
+            observeActive: Effect.succeed({ active: [], changes: Stream.empty }),
           }),
         ),
       );

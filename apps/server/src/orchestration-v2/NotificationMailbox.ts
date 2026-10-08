@@ -18,6 +18,7 @@ export function isUndeliveredMailboxSteer(
   const run = projection.runs.find((candidate) => candidate.id === message.runId);
   return (
     run !== undefined &&
+    run.purpose !== "compaction" &&
     run.userMessageId !== message.id &&
     (["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(run.status) ||
       latestProviderTurnForAttempt(projection.providerTurns, run.activeAttemptId)?.status ===

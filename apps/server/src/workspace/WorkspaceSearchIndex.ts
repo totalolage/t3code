@@ -26,13 +26,15 @@ import type {
   ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
+import { isBunStandaloneRuntime } from "@t3tools/shared/hostProcess";
 
-// fff-node stays external to the CLI bundle because it dlopens a native
-// library. A static `import` of an external package is a hard error inside a
-// Node single-executable (only built-ins resolve there), so load it through
-// `require`, which reads from the real filesystem in every runtime.
+// Node SEA needs the native package beside the executable; Bun's standalone
+// builder aliases this import to fff-bun so its native library is embedded.
 const requireForFff = NodeModule.createRequire(import.meta.url);
-const { FileFinder } = requireForFff("@ff-labs/fff-node") as typeof import("@ff-labs/fff-node");
+const fileFinderModule: typeof import("@ff-labs/fff-node") = isBunStandaloneRuntime
+  ? await import("@ff-labs/fff-node")
+  : (requireForFff("@ff-labs/fff-node") as typeof import("@ff-labs/fff-node"));
+const { FileFinder } = fileFinderModule;
 
 const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
 const WORKSPACE_INDEX_PAGE_SIZE = WORKSPACE_INDEX_MAX_ENTRIES + 2;

@@ -26,12 +26,18 @@ import {
   latestProviderTurnForAttempt,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
+  OrchestrationV2AppThread,
+  OrchestrationV2AppThreadJson,
   OrchestrationV2Command,
+  OrchestrationCliDispatchCommand,
   OrchestrationV2LimitRecoveryUpdate,
   OrchestrationV2DomainEvent,
+  OrchestrationV2DomainEventJson,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
+  OrchestrationV2Run,
+  OrchestrationV2RunJson,
   OrchestrationV2RpcSchemas,
   OrchestrationV2ShellSnapshot,
   OrchestrationV2SubscribeThreadInput,
@@ -40,11 +46,51 @@ import {
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadStreamItem,
   OrchestrationV2ThreadShell,
+  OrchestrationV2ThreadShellJson,
   OrchestrationV2TurnItem,
   OrchestrationV2TurnItemJson,
 } from "./orchestrationV2.ts";
 
 const now = DateTime.makeUnsafe("2026-04-20T00:00:00.000Z");
+
+describe("F/I-compatible orchestration dispatch commands", () => {
+  const decode = Schema.decodeUnknownSync(OrchestrationCliDispatchCommand);
+  const common = { commandId: "command-1", threadId: "thread-1" };
+
+  it.each([
+    { ...common, type: "thread.active.reorder", orderKey: "a1" },
+    {
+      ...common,
+      type: "thread.pull-request.link",
+      host: "github.com",
+      repository: "app",
+      number: 42,
+      url: "https://github.com/acme/app/pull/42",
+      source: "manual",
+    },
+    {
+      ...common,
+      type: "thread.pull-request.unlink",
+      host: "github.com",
+      repository: "app",
+      number: 42,
+    },
+    {
+      ...common,
+      type: "thread.user-input.dismiss",
+      requestId: "request-1",
+      createdAt: "2026-04-20T00:00:00.000Z",
+    },
+    {
+      ...common,
+      type: "thread.conversation.revert",
+      turnCount: 2,
+      createdAt: "2026-04-20T00:00:00.000Z",
+    },
+  ] as const)("retains shipped command shape %j", (command) => {
+    expect(decode(command)).toEqual(command);
+  });
+});
 const LegacyShellStreamItem = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("synchronized") }),
   Schema.Struct({
@@ -93,6 +139,126 @@ const decodeOrchestrationV2SubscribeThreadInput = Schema.decodeUnknownSync(
 );
 
 describe("orchestration V2 contracts", () => {
+  it("accepts an atomic metadata update with branch precondition and model selection", () => {
+    const command = decodeOrchestrationV2Command({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("metadata-update"),
+      threadId: ThreadId.make("metadata-thread"),
+      title: "Updated title",
+      branch: "next",
+      expectedBranch: "current",
+      worktreePath: "/repo/worktree",
+      linkedPullRequest: null,
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+    });
+
+    expect(command).toMatchObject({
+      type: "thread.metadata.update",
+      branch: "next",
+      expectedBranch: "current",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+    });
+  });
+
+  it("accepts both native timestamp and F sequence auto-settle watermarks", () => {
+    const timestampCommand = decodeOrchestrationV2Command({
+      type: "thread.auto-settle",
+      commandId: CommandId.make("auto-settle-timestamp"),
+      threadId: ThreadId.make("auto-settle-thread"),
+      snapshotAt: now,
+    });
+    const sequenceCommand = decodeOrchestrationV2Command({
+      type: "thread.auto-settle",
+      commandId: CommandId.make("auto-settle-sequence"),
+      threadId: ThreadId.make("auto-settle-thread"),
+      snapshotSequence: 12,
+      settledAt: now,
+    });
+
+    expect(timestampCommand).toMatchObject({ type: "thread.auto-settle", snapshotAt: now });
+    expect(sequenceCommand).toMatchObject({
+      type: "thread.auto-settle",
+      snapshotSequence: 12,
+      settledAt: now,
+    });
+  });
+
+  it("keeps user runs backward compatible and represents maintenance runs without a user message", () => {
+    const run = {
+      id: "run-maintenance-1",
+      threadId: "thread-1",
+      ordinal: 1,
+      providerInstanceId: "codex",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      providerThreadId: "provider-thread-1",
+      rootNodeId: null,
+      activeAttemptId: null,
+      status: "queued",
+      requestedAt: now,
+      startedAt: null,
+      completedAt: null,
+      checkpointId: null,
+      contextHandoffId: null,
+    };
+    const decodeRun = Schema.decodeUnknownSync(OrchestrationV2Run);
+    const decodeRunJson = Schema.decodeUnknownSync(OrchestrationV2RunJson);
+
+    for (const purpose of [undefined, "user"] as const) {
+      const userRun = decodeRun({
+        ...run,
+        userMessageId: "message-1",
+        ...(purpose === undefined ? {} : { purpose }),
+      });
+      expect(userRun).toHaveProperty("userMessageId", MessageId.make("message-1"));
+    }
+
+    const maintenance = decodeRun({
+      ...run,
+      purpose: "compaction",
+      requestCommandId: "command-compact-1",
+    });
+    expect(maintenance).toHaveProperty("purpose", "compaction");
+    expect(maintenance).toHaveProperty("requestCommandId", CommandId.make("command-compact-1"));
+    expect(maintenance).not.toHaveProperty("userMessageId");
+
+    const maintenanceJson = decodeRunJson({
+      ...run,
+      requestedAt: DateTime.formatIso(now),
+      purpose: "compaction",
+      requestCommandId: "command-compact-1",
+    });
+    expect(maintenanceJson).toHaveProperty("purpose", "compaction");
+    expect(maintenanceJson).toHaveProperty("requestCommandId", CommandId.make("command-compact-1"));
+    expect(maintenanceJson).not.toHaveProperty("userMessageId");
+
+    expect(() =>
+      decodeRun({
+        ...run,
+        purpose: "compaction",
+        requestCommandId: "command-compact-1",
+        userMessageId: "message-1",
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeRun({
+        ...run,
+        purpose: "user",
+      }),
+    ).toThrow();
+  });
+
+  it("accepts a native thread.compact command", () => {
+    const command = decodeOrchestrationV2Command({
+      type: "thread.compact",
+      commandId: "command-compact-1",
+      threadId: "thread-1",
+    });
+
+    expect(command.type).toBe("thread.compact");
+    if (command.type !== "thread.compact") throw new Error("expected thread.compact");
+    expect(command.commandId).toBe(CommandId.make("command-compact-1"));
+  });
+
   it("carries command failure metadata through runtime and JSON schemas without output text", () => {
     const base = {
       id: "command-item",
@@ -1166,6 +1332,154 @@ describe("orchestration V2 contracts", () => {
     });
 
     expect(shell.pendingBackgroundTasks).toEqual([]);
+  });
+
+  it("decodes historical V2 thread and shell JSON without hiddenAt as visible", () => {
+    const decodeThread = Schema.decodeUnknownSync(OrchestrationV2AppThread);
+    const decodeThreadJson = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson);
+    const encodeThreadJson = Schema.encodeSync(OrchestrationV2AppThreadJson);
+    const decodeShellJson = Schema.decodeUnknownSync(OrchestrationV2ThreadShellJson);
+    const encodeShellJson = Schema.encodeSync(OrchestrationV2ThreadShellJson);
+    const hiddenAt = DateTime.makeUnsafe("2026-04-21T00:00:00.000Z");
+    const threadFields = {
+      createdBy: "user",
+      creationSource: "web",
+      id: "thread-1",
+      projectId: "project-1",
+      title: "Thread",
+      providerInstanceId: "codex",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      activeProviderThreadId: null,
+      lineage: {
+        parentThreadId: null,
+        relationshipToParent: null,
+        rootThreadId: "thread-1",
+      },
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      deletedAt: null,
+    };
+    const legacyThread = decodeThread(threadFields);
+    expect(legacyThread.hiddenAt).toBeNull();
+
+    const threadJsonFields = {
+      ...threadFields,
+      createdAt: DateTime.formatIso(now),
+      updatedAt: DateTime.formatIso(now),
+    };
+    const legacyThreadJson = decodeThreadJson(threadJsonFields);
+    expect(legacyThreadJson.hiddenAt).toBeNull();
+    expect(encodeThreadJson(legacyThreadJson).hiddenAt).toBeNull();
+
+    const hiddenThread = decodeThread({ ...threadFields, hiddenAt });
+    expect(hiddenThread.hiddenAt).toEqual(hiddenAt);
+    expect(encodeThreadJson(hiddenThread).hiddenAt).toBe(DateTime.formatIso(hiddenAt));
+
+    const shellJsonFields = {
+      ...threadJsonFields,
+      latestRunId: null,
+      activeRunId: null,
+      status: "idle",
+      pendingRuntimeRequest: null,
+      latestVisibleMessage: null,
+      latestUserMessageAt: null,
+      hasActionableProposedPlan: false,
+      itemCount: 0,
+      visibleItemCount: 0,
+      settledOverride: null,
+      settledAt: null,
+    };
+    const legacyShellJson = decodeShellJson(shellJsonFields);
+    expect(legacyShellJson.hiddenAt).toBeNull();
+    expect(encodeShellJson(legacyShellJson).hiddenAt).toBeNull();
+
+    const hiddenShellJson = decodeShellJson({
+      ...shellJsonFields,
+      hiddenAt: DateTime.formatIso(hiddenAt),
+    });
+    expect(hiddenShellJson.hiddenAt).toEqual(hiddenAt);
+    expect(encodeShellJson(hiddenShellJson).hiddenAt).toBe(DateTime.formatIso(hiddenAt));
+  });
+
+  it("accepts native hide and unhide commands", () => {
+    for (const type of ["thread.hide", "thread.unhide"] as const) {
+      const command = decodeOrchestrationV2Command({
+        type,
+        commandId: `command-${type}`,
+        threadId: "thread-1",
+      });
+      expect(command.type).toBe(type);
+    }
+  });
+
+  it("round-trips full-thread hide and unhide events through the JSON codec", () => {
+    const decodeEventJson = Schema.decodeUnknownSync(OrchestrationV2DomainEventJson);
+    const encodeEventJson = Schema.encodeSync(OrchestrationV2DomainEventJson);
+    const threadFields = {
+      createdBy: "user",
+      creationSource: "web",
+      id: "thread-1",
+      projectId: "project-1",
+      title: "Thread",
+      providerInstanceId: "codex",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      activeProviderThreadId: null,
+      lineage: {
+        parentThreadId: null,
+        relationshipToParent: null,
+        rootThreadId: "thread-1",
+      },
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      hiddenAt: null,
+      deletedAt: null,
+    };
+
+    for (const [eventType, hiddenAt] of [
+      ["thread.hidden", now],
+      ["thread.unhidden", null],
+    ] as const) {
+      const eventInput = {
+        id: `event-${eventType}`,
+        type: eventType,
+        threadId: "thread-1",
+        occurredAt: now,
+        payload: { ...threadFields, hiddenAt },
+      };
+      expect(decodeOrchestrationV2DomainEvent(eventInput)).toMatchObject({
+        type: eventType,
+        payload: { hiddenAt },
+      });
+
+      const eventJson = {
+        ...eventInput,
+        occurredAt: DateTime.formatIso(now),
+        payload: {
+          ...threadFields,
+          createdAt: DateTime.formatIso(now),
+          updatedAt: DateTime.formatIso(now),
+          hiddenAt: hiddenAt === null ? null : DateTime.formatIso(hiddenAt),
+        },
+      };
+      const decoded = decodeEventJson(eventJson);
+      expect(decoded).toMatchObject({ type: eventType, payload: { hiddenAt } });
+      expect(encodeEventJson(decoded)).toMatchObject({
+        type: eventType,
+        payload: { hiddenAt: hiddenAt === null ? null : DateTime.formatIso(hiddenAt) },
+      });
+    }
   });
 });
 

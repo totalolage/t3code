@@ -272,6 +272,23 @@ describe("getLatestThreadForProject", () => {
       ).toBe(threads[1]);
     },
   );
+
+  it("skips hidden threads alongside archived threads", () => {
+    const projectId = ProjectId.make("project");
+    const visible = {
+      ...makeThread({ id: "visible", updatedAt: "2026-03-09T11:00:00.000Z" }),
+      projectId,
+      archivedAt: null,
+    };
+    const hidden = {
+      ...makeThread({ id: "hidden", updatedAt: "2026-03-09T12:00:00.000Z" }),
+      projectId,
+      archivedAt: null,
+      hiddenAt: "2026-03-09T12:00:00.000Z",
+    };
+
+    expect(getLatestThreadForProject([visible, hidden], projectId, "updated_at")).toBe(visible);
+  });
 });
 
 describe("planPinnedReorder with hidden rows", () => {

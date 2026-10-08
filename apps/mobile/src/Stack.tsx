@@ -108,6 +108,8 @@ import {
 } from "./features/settings/SettingsOpenSourceLicensesRouteScreen";
 import { SettingsProjectGroupingRouteScreen } from "./features/settings/SettingsProjectGroupingRouteScreen";
 import { SettingsProjectOverviewRouteScreen } from "./features/settings/SettingsProjectOverviewRouteScreen";
+import { SettingsHiddenThreadsRouteScreen } from "./features/settings/SettingsHiddenThreadsRouteScreen";
+import { SETTINGS_SHEET_TARGET_PATHS } from "./features/settings/components/settings-sheet-targets";
 import { UsageLimitAccountScreen } from "./features/usage/UsageLimitsPooled";
 import { UsageRouteScreen } from "./features/usage/UsageRouteScreen";
 import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRouteScreen";
@@ -210,7 +212,7 @@ const SettingsContentStack = createV5SheetStackNavigator({
     }),
     SettingsEnvironments: createNativeStackScreen({
       screen: SettingsEnvironmentsRouteScreen,
-      linking: "environments",
+      linking: SETTINGS_SHEET_TARGET_PATHS.SettingsEnvironments,
       options: {
         title: "Environments",
       },
@@ -269,21 +271,28 @@ const SettingsContentStack = createV5SheetStackNavigator({
     }),
     SettingsArchive: createNativeStackScreen({
       screen: ArchivedThreadsRouteScreen,
-      linking: "archive",
+      linking: SETTINGS_SHEET_TARGET_PATHS.SettingsArchive,
       options: {
         title: "Archived Threads",
       },
     }),
+    SettingsHidden: createNativeStackScreen({
+      screen: SettingsHiddenThreadsRouteScreen,
+      linking: SETTINGS_SHEET_TARGET_PATHS.SettingsHidden,
+      options: {
+        title: "Hidden Threads",
+      },
+    }),
     SettingsAppearance: createNativeStackScreen({
       screen: SettingsAppearanceRouteScreen,
-      linking: "appearance",
+      linking: SETTINGS_SHEET_TARGET_PATHS.SettingsAppearance,
       options: {
         title: "Appearance",
       },
     }),
     SettingsProjectGrouping: createNativeStackScreen({
       screen: SettingsProjectGroupingRouteScreen,
-      linking: "project-grouping",
+      linking: SETTINGS_SHEET_TARGET_PATHS.SettingsProjectGrouping,
       options: {
         title: "Organization",
       },
@@ -351,7 +360,7 @@ const SettingsContentStack = createV5SheetStackNavigator({
     }),
     SettingsClientStorage: createNativeStackScreen({
       screen: SettingsClientStorageRouteScreen,
-      linking: "client-storage",
+      linking: SETTINGS_SHEET_TARGET_PATHS.SettingsClientStorage,
       options: {
         title: "Client Storage",
       },
@@ -378,7 +387,7 @@ const SettingsContentStack = createV5SheetStackNavigator({
     }),
     SettingsOpenSourceLicenses: createNativeStackScreen({
       screen: SettingsOpenSourceLicensesRouteScreen,
-      linking: "open-source-licenses",
+      linking: SETTINGS_SHEET_TARGET_PATHS.SettingsOpenSourceLicenses,
       options: {
         title: "Open source licenses",
       },
@@ -392,7 +401,7 @@ const SettingsContentStack = createV5SheetStackNavigator({
     }),
     SettingsUsage: createNativeStackScreen({
       screen: UsageRouteScreen,
-      linking: "usage",
+      linking: SETTINGS_SHEET_TARGET_PATHS.SettingsUsage,
       options: {
         title: "Usage",
       },

@@ -209,6 +209,10 @@ export interface EffectOutboxV2Shape {
   readonly listByCommandId: (
     commandId: CommandId,
   ) => Effect.Effect<ReadonlyArray<OrchestrationEffectV2>, EffectOutboxError>;
+  /** A claimed start/restart may have reached the provider, even after recovery cancelled it. */
+  readonly hasProviderStartDispatchEvidence: (
+    runId: RunId,
+  ) => Effect.Effect<boolean, EffectOutboxError>;
   readonly cancelUnsettled: (input: {
     readonly threadId: ThreadId;
     readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
@@ -434,6 +438,20 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             isEffectOutboxError(cause)
               ? cause
               : new EffectOutboxError({ operation: "list", cause }),
+          ),
+        ),
+      hasProviderStartDispatchEvidence: (runId) =>
+        sql<{ readonly dispatched: number }>`
+          SELECT 1 AS dispatched
+          FROM orchestration_v2_effect_outbox
+          WHERE effect_type IN ('provider-turn.start', 'provider-turn.restart')
+            AND json_extract(payload_json, '$.runId') = ${runId}
+            AND attempt_count > 0
+          LIMIT 1
+        `.pipe(
+          Effect.map((rows) => rows.length > 0),
+          Effect.mapError(
+            (cause) => new EffectOutboxError({ operation: "dispatch-evidence", cause }),
           ),
         ),
       cancelUnsettled: ({ threadId, effectTypes, reason }) =>

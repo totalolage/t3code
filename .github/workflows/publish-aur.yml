@@ -12,6 +12,10 @@ on:
         required: false
         default: "1"
         type: string
+      source_repo:
+        required: false
+        default: ""
+        type: string
     secrets:
       AUR_SSH_PRIVATE_KEY:
         required: true
@@ -26,6 +30,11 @@ on:
         required: false
         default: "1"
         type: string
+      source_repo:
+        description: "Repository containing the release"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -37,12 +46,50 @@ concurrency:
 jobs:
   publish:
     name: Validate and publish
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 30
     container:
       image: archlinux:base-devel
 
     steps:
+      - name: Validate release source
+        shell: bash
+        env:
+          INVOKING_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_REPO: ${{ inputs.source_repo || github.repository }}
+        run: |
+          set -euo pipefail
+
+          f8y_tag_pattern='^v[0-9]+\.[0-9]+\.[0-9]+-f8y\.[0-9]{8}\.[0-9]+$'
+          source_repo_pattern='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
+
+          if [[ "$RELEASE_TAG" == *f8y* ]]; then
+            if [[ -z "$SOURCE_REPO" || "${SOURCE_REPO,,}" == 'pingdotgg/t3code' ]]; then
+              echo 'f8y releases must use a non-upstream source repository.' >&2
+              exit 1
+            fi
+            if [[ ! "$SOURCE_REPO" =~ $source_repo_pattern ]]; then
+              echo 'SOURCE_REPO must be an owner/repository for f8y releases.' >&2
+              exit 1
+            fi
+            source_owner="${SOURCE_REPO%%/*}"
+            source_name="${SOURCE_REPO#*/}"
+            if [[ "$source_owner" == '.' || "$source_owner" == '..' || "$source_name" == '.' || "$source_name" == '..' ]]; then
+              echo 'SOURCE_REPO components must not be "." or "..".' >&2
+              exit 1
+            fi
+            if [[ ! "$RELEASE_TAG" =~ $f8y_tag_pattern ]]; then
+              echo 'f8y release tags must match v<core>-f8y.<YYYYMMDD>.<run>.' >&2
+              exit 1
+            fi
+          fi
+
+          if [[ "${INVOKING_REPO,,}" != 'pingdotgg/t3code' && ! "$RELEASE_TAG" =~ $f8y_tag_pattern ]]; then
+            echo 'Forks may publish only exact f8y release tags.' >&2
+            exit 1
+          fi
+
       - name: Install Arch packaging tools
         run: pacman -Syu --noconfirm --needed git github-cli jq namcap openssh sudo
 
@@ -61,5 +108,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           PKGREL: ${{ inputs.pkgrel || '1' }}
+          SOURCE_REPO: ${{ inputs.source_repo || github.repository }}
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: packaging/aur/scripts/release.sh

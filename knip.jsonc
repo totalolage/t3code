@@ -12,6 +12,7 @@
         // CodeRabbit loads its configuration by filename.
         ".coderabbit.config.ts",
         ".github/scripts/thread-transfer-report.cjs",
+        ".github/scripts/f8y-release-metadata.cjs",
       ],
       "vite": { "entry": [".github/**/*.test.cjs"] },
       "vitest": { "entry": [".github/**/*.test.cjs"] },
@@ -27,6 +28,9 @@
         "src/bin.ts!",
         "src/claude-history-worker.ts!",
         "scripts/cli.ts",
+        "scripts/buildStandaloneBinary.ts",
+        "scripts/fixtures/standaloneNodeSqliteBoundary.ts",
+        "scripts/fixtures/standaloneRuntimeSmoke.ts",
         "scripts/evaluate-thread-titles.ts",
         "scripts/measure-pr-preview.ts",
         "scripts/probe-claude-fork-local-rollback-replay.ts",
@@ -36,7 +40,7 @@
       ],
       // Keep the transitive Effect runtime pinned for standalone npm installs.
       // The Vite+ web build prerequisite.
-      "ignoreDependencies": ["@effect/platform-node-shared", "@t3tools/web"],
+      "ignoreDependencies": ["@effect/platform-node-shared", "@ff-labs/fff-bun", "@t3tools/web"],
     },
     "apps/desktop": {
       // Electron loads these bundles by filename rather than importing them.

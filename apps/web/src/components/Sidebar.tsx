@@ -46,6 +46,7 @@ import {
   threadRuntimeCanArchive,
   type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/models";
+import { isThreadHidden } from "@t3tools/client-runtime/state/thread-hidden";
 import {
   parseScopedThreadKey,
   scopeProjectRef,
@@ -150,6 +151,7 @@ import {
   usePrimaryEnvironmentId,
 } from "../state/environments";
 import {
+  readEnvironmentSupportsHiding,
   readThreadShell,
   useAllEnvironmentProjectSnapshotsReady,
   useProjects,
@@ -2393,6 +2395,8 @@ export default function Sidebar() {
     reorderActiveThread,
     markThreadUnread,
     archiveThread,
+    hideThread,
+    unhideThread,
     deleteThread,
   } = useThreadActions();
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
@@ -3411,6 +3415,42 @@ export default function Sidebar() {
       })();
     },
     [unsnoozeThread],
+  );
+  const attemptHide = useCallback(
+    (threadRef: ScopedThreadRef) => {
+      void (async () => {
+        const result = await hideThread(threadRef, { navigateAway: true });
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to hide thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+      })();
+    },
+    [hideThread],
+  );
+  const attemptUnhide = useCallback(
+    (threadRef: ScopedThreadRef) => {
+      void (async () => {
+        const result = await unhideThread(threadRef);
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to unhide thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+      })();
+    },
+    [unhideThread],
   );
   const threadListRef = useRef<HTMLUListElement | null>(null);
   const dragLabelOffsetRef = useRef(0);
@@ -4600,6 +4640,7 @@ export default function Sidebar() {
               isSettled,
               autoSettleEnabled: thread.autoSettleDisabledAt == null,
               isSnoozed,
+              isHidden: isThreadHidden(thread),
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
               isRegeneratingTitle,
               isRunning: !threadRuntimeCanArchive(thread.runtime),
@@ -4608,6 +4649,7 @@ export default function Sidebar() {
                 autoSettleOptOut: supportsAutoSettleOptOut,
                 snooze: supportsSnooze,
                 pinning: supportsPinning,
+                hiding: readEnvironmentSupportsHiding(thread.environmentId),
                 titleRegeneration: supportsTitleRegeneration,
               },
               snoozePresets,
@@ -4671,6 +4713,12 @@ export default function Sidebar() {
             return;
           case "unsnooze":
             attemptUnsnooze(threadRef);
+            return;
+          case "hide":
+            attemptHide(threadRef);
+            return;
+          case "unhide":
+            attemptUnhide(threadRef);
             return;
           case "pin":
             attemptPin(threadRef);
@@ -4806,6 +4854,8 @@ export default function Sidebar() {
       attemptPin,
       attemptSettle,
       attemptSnooze,
+      attemptHide,
+      attemptUnhide,
       attemptUnpin,
       attemptUnsettle,
       attemptUnsnooze,

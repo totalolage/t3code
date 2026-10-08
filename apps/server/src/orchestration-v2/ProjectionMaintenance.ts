@@ -149,7 +149,7 @@ export const layer: Layer.Layer<
               .read({ afterSequence: lastSequence, throughSequence, limit: pageSize })
               .pipe(Stream.runCollect);
             for (const stored of page) {
-              yield* projectionStore.apply(stored.event);
+              yield* projectionStore.apply(stored.event, stored.sequence);
               if (stored.event.type === "turn-item.updated") {
                 yield* sql`
                 INSERT INTO orchestration_v2_turn_item_positions (
@@ -207,6 +207,8 @@ export const layer: Layer.Layer<
     // thread.created stays out — verify derives the expected thread set from
     // it, and it anchors replay ordering.
     const SUPERSEDABLE_THREAD_EVENT_TYPES = [
+      "thread.hidden",
+      "thread.unhidden",
       "thread.archived",
       "thread.unarchived",
       "thread.deleted",

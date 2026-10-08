@@ -7,7 +7,7 @@ import {
   NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
-  type OrchestrationV2Run,
+  type OrchestrationV2UserRun,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -99,6 +99,7 @@ const seedScenario = Effect.fn(function* (scenario: Scenario) {
         id,
         projectId,
         title: id,
+        hiddenAt: null,
         providerInstanceId,
         modelSelection,
         runtimeMode: "full-access",
@@ -122,8 +123,8 @@ const seedScenario = Effect.fn(function* (scenario: Scenario) {
   const run = (
     threadId: ThreadId,
     ordinal: number,
-    status: OrchestrationV2Run["status"],
-    overrides: Partial<OrchestrationV2Run> = {},
+    status: OrchestrationV2UserRun["status"],
+    overrides: Partial<OrchestrationV2UserRun> = {},
   ) => {
     const runId = RunId.make(`run:${threadId}:${ordinal}`);
     return apply({

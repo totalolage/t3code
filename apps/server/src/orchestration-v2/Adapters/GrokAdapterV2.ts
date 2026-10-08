@@ -1,4 +1,5 @@
 import { makeProviderFailure } from "../ProviderFailure.ts";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import {
   XAiPromptFailureText,
   isXAiTaskCompletedWakeNotification,
@@ -27,8 +28,10 @@ import * as ServerConfig from "../../config.ts";
 import { makeAcpNativeLoggerFactory } from "../../provider/acp/AcpNativeLogging.ts";
 import {
   applyGrokAcpModelSelection,
+  currentGrokReasoningEffortFromSessionSetup,
   currentGrokModelIdFromSessionSetup,
   grokApprovalOptions,
+  isValidGrokReasoningEffortToken,
   makeGrokAcpRuntime,
   resolveGrokAcpBaseModelId,
 } from "../../provider/acp/GrokAcpSupport.ts";
@@ -230,6 +233,11 @@ export function grokLaunchRuntimeMode(
 }
 
 export function makeGrokAcpAdapterFlavor(options: GrokAdapterV2Options): AcpAdapterV2Flavor {
+  const legacyReasoningEffortBySession = new WeakMap<
+    AcpSessionRuntime.AcpSessionRuntime["Service"],
+    Map<string, string | undefined>
+  >();
+
   return {
     driver: GROK_PROVIDER,
     runtimeHarness: "Grok",
@@ -259,7 +267,12 @@ export function makeGrokAcpAdapterFlavor(options: GrokAdapterV2Options): AcpAdap
         const legacy = startResult.initializeResult.protocolVersion === 1;
         const options = legacy ? [] : yield* runtime.getConfigOptions;
         const configuredModel = options.find((option) => option.category === "model")?.currentValue;
-        return yield* applyGrokAcpModelSelection({
+        const requestedReasoningEffort = legacy
+          ? getModelSelectionStringOptionValue(modelSelection, "reasoningEffort")
+          : undefined;
+        const sessionEfforts = legacyReasoningEffortBySession.get(runtime);
+        const hasRememberedEffort = sessionEfforts?.has(startResult.sessionId) ?? false;
+        const appliedModel = yield* applyGrokAcpModelSelection({
           runtime: legacy
             ? runtime
             : { setSessionModel: (model) => runtime.setModel(model).pipe(Effect.as({})) },
@@ -268,9 +281,29 @@ export function makeGrokAcpAdapterFlavor(options: GrokAdapterV2Options): AcpAdap
             : typeof configuredModel === "string"
               ? configuredModel
               : undefined,
+          currentReasoningEffort: legacy
+            ? hasRememberedEffort
+              ? sessionEfforts?.get(startResult.sessionId)
+              : currentGrokReasoningEffortFromSessionSetup(startResult.sessionSetupResult)
+            : undefined,
           requestedModelId: resolveGrokAcpBaseModelId(modelSelection.model),
+          requestedReasoningEffort,
           mapError: (cause) => cause,
         });
+        if (legacy && requestedReasoningEffort !== undefined) {
+          const normalizedEffort = requestedReasoningEffort.trim();
+          const remembered =
+            normalizedEffort.length > 0 && isValidGrokReasoningEffortToken(normalizedEffort)
+              ? normalizedEffort
+              : undefined;
+          let effortsBySession = sessionEfforts;
+          if (effortsBySession === undefined) {
+            effortsBySession = new Map();
+            legacyReasoningEffortBySession.set(runtime, effortsBySession);
+          }
+          effortsBySession.set(startResult.sessionId, remembered);
+        }
+        return appliedModel;
       }),
     makeRuntime:
       options.makeRuntime ??

@@ -4,17 +4,45 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Result from "effect/Result";
+import { vi } from "vite-plus/test";
 
 import {
   HostProcessArguments,
   HostProcessExecutablePath,
   HostProcessIsExecutable,
   HostProcessPlatform,
+  isBunStandaloneRuntime,
 } from "./hostProcess.ts";
 import { resolveNodeExecutable, resolveSelfInvocation, selfInvocationArgs } from "./nodeRuntime.ts";
 import { symlinksSupported } from "./testing/symlinks.ts";
 
 describe("Self invocation", () => {
+  it("does not treat the ordinary test runtime as a Bun standalone build", () => {
+    expect(isBunStandaloneRuntime).toBe(false);
+  });
+
+  it.effect("recognizes a Node SEA when the Bun standalone flag is false", () =>
+    Effect.gen(function* () {
+      vi.stubGlobal("__T3_BUN_STANDALONE__", false);
+      const original = process.getBuiltinModule;
+      const getBuiltinModule = vi
+        .spyOn(process, "getBuiltinModule")
+        .mockImplementation((name) =>
+          name === "node:sea"
+            ? ({ isSea: () => true } as unknown as ReturnType<typeof process.getBuiltinModule>)
+            : original(name),
+        );
+
+      try {
+        expect(Reflect.get(globalThis, "__T3_BUN_STANDALONE__")).toBe(false);
+        expect(yield* HostProcessIsExecutable).toBe(true);
+      } finally {
+        getBuiltinModule.mockRestore();
+        vi.unstubAllGlobals();
+      }
+    }),
+  );
+
   it.effect("runs the entrypoint script with the current runtime", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   AuthEnvironmentScopes,
@@ -12,6 +12,7 @@ import {
   sessionGrantsScope,
   sessionHasLegacyPermissions,
 } from "./auth.ts";
+import { AuthSessionId } from "./baseSchemas.ts";
 
 describe("authorization grants", () => {
   it("decodes legacy review credentials without offering them in new grants", () => {
@@ -152,5 +153,48 @@ describe("legacy permission notice", () => {
     ]) {
       expect(sessionHasLegacyPermissions({ authenticated: true, permissions })).toBe(false);
     }
+  });
+});
+
+const decodeSessionState = Schema.decodeUnknownSync(AuthSessionState);
+const encodeSessionState = Schema.encodeUnknownSync(AuthSessionState);
+const isAuthSessionId = Schema.is(AuthSessionId);
+
+const auth = {
+  policy: "remote-reachable",
+  bootstrapMethods: ["one-time-token"],
+  sessionMethods: ["bearer-access-token"],
+  sessionCookieName: "t3_session",
+} as const;
+
+describe("AuthSessionState", () => {
+  it("decodes legacy authenticated session state without a principal", () => {
+    const decoded = decodeSessionState({
+      authenticated: true,
+      auth,
+      scopes: ["orchestration:read"],
+      sessionMethod: "bearer-access-token",
+    });
+
+    expect(decoded.principal).toBeUndefined();
+  });
+
+  it("round-trips the native branded session principal", () => {
+    const sessionId = AuthSessionId.make("native-session");
+    const state = {
+      authenticated: true,
+      auth,
+      scopes: ["orchestration:read"],
+      sessionMethod: "bearer-access-token",
+      principal: {
+        sessionId,
+        subject: "native-session-subject",
+      },
+    } as const;
+
+    const decoded = decodeSessionState(encodeSessionState(state));
+
+    expect(decoded.principal).toEqual(state.principal);
+    expect(isAuthSessionId(decoded.principal?.sessionId)).toBe(true);
   });
 });

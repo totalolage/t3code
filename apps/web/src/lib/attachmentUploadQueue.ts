@@ -5,7 +5,6 @@ import {
   type EnvironmentId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
-import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import {
   deletePendingAttachmentUpload,
   runAttachmentUploadCycle,
@@ -23,6 +22,7 @@ import {
   type ComposerImageAttachment,
   type ComposerThreadTarget,
 } from "../composerDraftStore";
+import { resolvePreparedAssetUrl } from "../assets/preparedAssetUrl";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentCatalog } from "../connection/catalog";
 import { assetEnvironment } from "../state/assets";
@@ -299,7 +299,7 @@ async function runUpload(job: UploadJob): Promise<void> {
         return null;
       }
       const connection = readPreparedConnection(job.environmentId);
-      return connection ? resolveAssetUrl(connection.httpBaseUrl, relativeUrl) : null;
+      return connection ? resolvePreparedAssetUrl(connection, relativeUrl) : null;
     },
     transport: (url) =>
       uploadBytes({

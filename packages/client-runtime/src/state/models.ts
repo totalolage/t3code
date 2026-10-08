@@ -144,6 +144,7 @@ export interface EnvironmentThreadShell {
   /** Pending title regeneration marker; null when no request is in flight. */
   readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: string } | null;
   readonly deletedAt: string | null;
+  readonly hiddenAt: string | null;
   readonly source: OrchestrationV2ThreadShell;
 }
 
@@ -266,6 +267,7 @@ export function presentThreadShell(
     createdAt: iso(thread.createdAt),
     updatedAt,
     archivedAt: nullableIso(thread.archivedAt),
+    hiddenAt: nullableIso(thread.hiddenAt ?? null),
     settledOverride: thread.settledOverride,
     settledAt: nullableIso(thread.settledAt),
     unsettledAt: nullableIso(thread.unsettledAt ?? null),

@@ -34,6 +34,7 @@ import { writeFileStringAtomically } from "../atomicWrite.ts";
 import { ServerConfig } from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { hasValidClaudeManifestAdapters } from "./ClaudeModelManifest.ts";
+import { hasValidCodexManifestAdapters } from "./CodexModelManifestSchema.ts";
 import bundledManifestJson from "./model-manifest.json" with { type: "json" };
 import { ProviderCompatibilityPolicy } from "./providerCompatibility.ts";
 import type { ServerProviderDraft } from "./providerSnapshot.ts";
@@ -118,6 +119,9 @@ const ModelManifestSchema = ModelManifestEnvelopeSchema.pipe(
     }),
     Schema.makeFilter(hasValidClaudeManifestAdapters, {
       expected: "valid Claude adapter metadata",
+    }),
+    Schema.makeFilter(hasValidCodexManifestAdapters, {
+      expected: "valid Codex adapter metadata",
     }),
   ),
 );

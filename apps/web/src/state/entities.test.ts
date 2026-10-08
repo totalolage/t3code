@@ -1,10 +1,46 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { resolveThreadDetailRef } from "./entities";
+const testState = vi.hoisted(() => ({
+  serverConfigs: new Map<
+    string,
+    {
+      readonly environment: {
+        readonly capabilities: { readonly threadHiding?: boolean };
+      };
+    }
+  >(),
+}));
+
+vi.mock("@effect/atom-react", () => ({
+  useAtomValue: () => testState.serverConfigs,
+}));
+vi.mock("../rpc/atomRegistry", () => ({
+  appAtomRegistry: {
+    get: () => testState.serverConfigs,
+  },
+}));
+
+import {
+  readEnvironmentSupportsHiding,
+  resolveThreadDetailRef,
+  useEnvironmentSupportsHiding,
+} from "./entities";
 
 const threadRef = scopeThreadRef(EnvironmentId.make("environment-1"), ThreadId.make("thread-1"));
+
+function setThreadHidingCapability(environmentId: EnvironmentId, value: boolean | undefined): void {
+  testState.serverConfigs.set(environmentId, {
+    environment: {
+      capabilities: value === undefined ? {} : { threadHiding: value },
+    },
+  });
+}
+
+beforeEach(() => {
+  testState.serverConfigs.clear();
+});
 
 describe("resolveThreadDetailRef", () => {
   it("does not subscribe to a reserved draft thread before it enters the shell index", () => {
@@ -32,5 +68,31 @@ describe("resolveThreadDetailRef", () => {
         waitForShell: false,
       }),
     ).toBe(threadRef);
+  });
+});
+
+describe("thread-hiding capability", () => {
+  it.each([
+    ["missing", undefined, false],
+    ["false", false, false],
+    ["true", true, true],
+  ] as const)("reads an explicitly advertised %s capability", (_, capability, expected) => {
+    setThreadHidingCapability(threadRef.environmentId, capability);
+
+    expect(readEnvironmentSupportsHiding(threadRef.environmentId)).toBe(expected);
+    const readHookSupport = useEnvironmentSupportsHiding;
+    expect(readHookSupport(threadRef.environmentId)).toBe(expected);
+  });
+
+  it("returns false for a null environment and reads the requested environment", () => {
+    const activeEnvironmentId = EnvironmentId.make("environment-active");
+    const requestedEnvironmentId = EnvironmentId.make("environment-requested");
+    setThreadHidingCapability(activeEnvironmentId, false);
+    setThreadHidingCapability(requestedEnvironmentId, true);
+
+    expect(useEnvironmentSupportsHiding(null)).toBe(false);
+    expect(readEnvironmentSupportsHiding(requestedEnvironmentId)).toBe(true);
+    const readHookSupport = useEnvironmentSupportsHiding;
+    expect(readHookSupport(requestedEnvironmentId)).toBe(true);
   });
 });

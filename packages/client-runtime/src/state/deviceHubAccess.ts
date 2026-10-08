@@ -54,6 +54,10 @@ export const resolveDeviceHubAccess = Effect.fn("clientRuntime.state.resolveDevi
       httpBase,
       wsBase,
       query: { wsTicket: ticket.ticket },
+      ...(input.prepared.target._tag === "BearerConnectionTarget" &&
+      input.prepared.queryParameters !== undefined
+        ? { queryParameters: input.prepared.queryParameters }
+        : {}),
       credentials: false,
     };
   },

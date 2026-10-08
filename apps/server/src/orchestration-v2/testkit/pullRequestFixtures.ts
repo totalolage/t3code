@@ -68,6 +68,7 @@ export function v2PullRequestThread(thread: PullRequestTestThread): Orchestratio
     createdAt: DateTime.makeUnsafe(thread.createdAt),
     updatedAt: DateTime.makeUnsafe(thread.updatedAt),
     archivedAt: thread.archivedAt ? DateTime.makeUnsafe(thread.archivedAt) : null,
+    hiddenAt: null,
     settledOverride: thread.settledOverride,
     settledAt: thread.settledAt ? DateTime.makeUnsafe(thread.settledAt) : null,
     deletedAt: null,

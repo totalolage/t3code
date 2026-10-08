@@ -28,6 +28,8 @@ export type ThreadActionMenuId =
   | "copy-branch"
   | "copy-thread-id"
   | "archive"
+  | "hide"
+  | "unhide"
   | "delete";
 
 export type DraftActionMenuId =
@@ -88,6 +90,8 @@ export interface ThreadActionMenuState {
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
   readonly isRegeneratingTitle: boolean;
+  /** Defaults to false for callers that do not yet have hidden-thread state. */
+  readonly isHidden?: boolean;
   /** Archive rejects a thread with an attached provider, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
   readonly supports: {
@@ -97,6 +101,7 @@ export interface ThreadActionMenuState {
     readonly snooze: boolean;
     readonly pinning: boolean;
     readonly titleRegeneration: boolean;
+    readonly hiding?: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
 }
@@ -122,6 +127,9 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
 export function buildThreadActionMenuItems(
   state: ThreadActionMenuState,
 ): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
+  const isHidden = state.isHidden ?? false;
+  const supportsHiding = state.supports.hiding === true;
+
   const items: ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> = [
     ...(state.branch
       ? [
@@ -230,6 +238,16 @@ export function buildThreadActionMenuItems(
       ],
     },
     { id: "project-settings", label: "Project settings", icon: "settings" },
+    ...(supportsHiding
+      ? [
+          {
+            id: isHidden ? ("unhide" as const) : ("hide" as const),
+            label: isHidden ? "Unhide thread" : "Hide thread",
+            icon: isHidden ? "eye" : "eye-off",
+            separatorBefore: true,
+          },
+        ]
+      : []),
     // Archive removes the thread from the sidebar while keeping its
     // conversation under Settings > Archived threads — distinct from Settle
     // (stays visible in the Settled shelf) and Delete (clears history for
@@ -240,7 +258,7 @@ export function buildThreadActionMenuItems(
       label: "Archive thread",
       icon: "archive",
       disabled: state.isRunning,
-      separatorBefore: true,
+      separatorBefore: !supportsHiding,
     },
     {
       id: "delete",

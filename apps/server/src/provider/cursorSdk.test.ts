@@ -17,6 +17,7 @@ import { spawn } from "node:child_process";
 
 const dir = mkdtempSync(join(tmpdir(), "cursor-sdk-stub-"));
 const stub = join(dir, "stub.cjs");
+const sdkResolutionConditions = [];
 writeFileSync(
   stub,
   "module.exports = { Agent: {}, AuthenticationError: class {}, createAgentPlatform: () => ({}), Cursor: {}, CursorSdkError: class {}, InMemoryCredentialStore: class {} };",
@@ -24,6 +25,7 @@ writeFileSync(
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "@cursor/sdk") {
+      sdkResolutionConditions.push(context.conditions);
       return { url: pathToFileURL(stub).href, shortCircuit: true };
     }
     return next(specifier, context);
@@ -75,6 +77,7 @@ if (mode === "predicate") {
       ),
       plain: isCursorShellSpawnFailure(new Error("boom")),
       string: isCursorShellSpawnFailure("spawn ENOENT"),
+      sdkResolutionConditions,
     }),
   );
   process.exit(0);
@@ -150,7 +153,14 @@ describe("isCursorShellSpawnFailure", () => {
   it("matches only Cursor's shell wrapper", async () => {
     const result = await runProbe("predicate");
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({
+    const { sdkResolutionConditions, ...output } = JSON.parse(result.stdout) as {
+      sdkResolutionConditions: ReadonlyArray<ReadonlyArray<string>>;
+      [key: string]: unknown;
+    };
+    expect(sdkResolutionConditions).toHaveLength(1);
+    expect(sdkResolutionConditions[0]).toContain("require");
+    expect(sdkResolutionConditions[0]).not.toContain("import");
+    expect(output).toEqual({
       cursorShell: true,
       bashShell: true,
       sandboxRestore: true,

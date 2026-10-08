@@ -10,6 +10,7 @@ import {
 import { AsyncResult } from "effect/reactivity";
 
 import { useConnectionController } from "../connection/useConnectionController";
+import { pairingConnectionInputFromUrl } from "../connection/pairing";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import type { MobileThemeId } from "../../lib/mobileTheme";
 import { useProjects, useThreadShells } from "../../state/entities";
@@ -58,7 +59,7 @@ function sceneFromPathname(pathname: string): ShowcaseScene | null {
 
 export function ShowcaseCaptureCoordinator(props: { readonly pathname: string }) {
   const navigation = useNavigation();
-  const { connectPairingUrl } = useConnectionController();
+  const { connectPairing } = useConnectionController();
   const {
     isReady: appearancePreferencesReady,
     themeId,
@@ -174,8 +175,9 @@ export function ShowcaseCaptureCoordinator(props: { readonly pathname: string })
       await Promise.all(
         pairingUrls.map(async (pairingUrl) => {
           if (cancelled || attemptedPairingRef.current.has(pairingUrl)) return;
+          const pairingInput = pairingConnectionInputFromUrl(pairingUrl);
           const paired = await retryShowcaseOperation(
-            async () => AsyncResult.isSuccess(await connectPairingUrl(pairingUrl)),
+            async () => AsyncResult.isSuccess(await connectPairing(pairingInput)),
             { isCancelled: () => cancelled },
           );
           if (paired) attemptedPairingRef.current.add(pairingUrl);
@@ -185,7 +187,7 @@ export function ShowcaseCaptureCoordinator(props: { readonly pathname: string })
     return () => {
       cancelled = true;
     };
-  }, [connectPairingUrl, pairingUrls]);
+  }, [connectPairing, pairingUrls]);
 
   const routeScene = sceneFromPathname(props.pathname);
   // Agent activity is captured over the thread list: the runner locks the

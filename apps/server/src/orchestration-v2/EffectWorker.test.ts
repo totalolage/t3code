@@ -13,10 +13,12 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
@@ -30,6 +32,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ServiceUpdateAdmission from "./ServiceUpdateAdmission.ts";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
 const oldSessionId = ProviderSessionId.make("provider-session:effect-worker-restart:old");
@@ -40,6 +43,82 @@ const providerThreadId = ProviderThreadId.make("provider-thread:effect-worker-re
 const providerTurnId = ProviderTurnId.make("provider-turn:effect-worker-restart");
 const attemptId = RunAttemptId.make("run-attempt:effect-worker-restart");
 const runId = RunId.make("run:effect-worker-restart");
+
+const openAdmissionLayer = ServiceUpdateAdmission.layer;
+
+it.effect("tracks a claimed effect until its durable settlement completes", () =>
+  Effect.gen(function* () {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const effect: EffectOutbox.OrchestrationEffectV2 = {
+      id: "effect:worker-owned-settlement",
+      commandId: CommandId.make("command:worker-owned-settlement"),
+      threadId: ThreadId.make("thread:worker-owned-settlement"),
+      request: { type: "terminal.cleanup" },
+      status: "running",
+      attemptCount: 1,
+      availableAt: now,
+      leaseOwner: "worker-owned-settlement",
+      leaseExpiresAt: now,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      lastError: null,
+    };
+    const started = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const outboxLayer = Layer.mock(EffectOutbox.EffectOutboxV2)({
+      claimNext: () => Effect.succeed(Option.some(effect)),
+      awaitCancellation: () => Effect.never,
+      get: () => Effect.succeed(Option.some(effect)),
+      clearCancellation: () => Effect.void,
+      succeed: () => Effect.succeed(true),
+    });
+    const executorLayer = Layer.succeed(
+      EffectWorker.OrchestrationEffectExecutorV2,
+      EffectWorker.OrchestrationEffectExecutorV2.of({
+        execute: () =>
+          Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      }),
+    );
+    const workerLayer = Layer.mergeAll(
+      EffectWorker.layerWithOptions({ workerId: "worker-owned-settlement" }).pipe(
+        Layer.provide(Layer.mergeAll(outboxLayer, executorLayer, openAdmissionLayer)),
+      ),
+      openAdmissionLayer,
+    );
+
+    yield* Effect.gen(function* () {
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const observation = yield* worker.observeActive;
+      assert.isEmpty(observation.active);
+      const run = yield* worker.runOnce.pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(started);
+      yield* Stream.runHead(observation.changes);
+      const executing = yield* worker.observeActive;
+      assert.equal(executing.active.length, 1);
+      assert.equal(executing.active[0]?.effectId, effect.id);
+      assert.equal(executing.active[0]?.effectType, effect.request.type);
+      assert.equal(executing.active[0]?.threadId, effect.threadId);
+
+      const admission = yield* ServiceUpdateAdmission.ServiceUpdateAdmission;
+      yield* admission.withExclusive((_, setState) =>
+        worker.observeActive.pipe(
+          Effect.tap((snapshot) =>
+            Effect.sync(() =>
+              assert.isTrue(snapshot.active.some((activity) => activity.effectId === effect.id)),
+            ),
+          ),
+          Effect.andThen(setState("sealed")),
+        ),
+      );
+
+      yield* Deferred.succeed(release, undefined);
+      assert.isTrue(yield* Fiber.join(run));
+      const settled = yield* worker.observeActive;
+      assert.isEmpty(settled.active);
+    }).pipe(Effect.provide(workerLayer));
+  }),
+);
 
 function restartEffect(
   now: DateTime.Utc,
@@ -108,6 +187,7 @@ function layerExecutorFor(input: {
         closeInstance: () => Effect.void,
         release: () => record("release"),
         detach: () => record("detach"),
+        observeActive: Effect.succeed({ active: [], changes: Stream.empty }),
       }),
     ),
     Layer.succeed(
@@ -278,13 +358,13 @@ it.effect("requeues a claim when a pre-execution worker check fails", () =>
         execute: () => Ref.update(executionCount, (count) => count + 1),
       }),
     );
-    const layerWorker = EffectWorker.layerWithOptions({ workerId }).pipe(
-      Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+    const workerLayer = EffectWorker.layerWithOptions({ workerId }).pipe(
+      Layer.provide(Layer.mergeAll(layerOutbox, layerExecutor, openAdmissionLayer)),
     );
 
     const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
       Effect.flatMap((worker) => worker.runOnce),
-      Effect.provide(layerWorker),
+      Effect.provide(workerLayer),
       Effect.exit,
     );
 
@@ -352,13 +432,13 @@ it.effect("arms cancellation before the durable pre-execution check", () =>
           Effect.yieldNow.pipe(Effect.andThen(Ref.update(executionCount, (count) => count + 1))),
       }),
     );
-    const layerWorker = EffectWorker.layerWithOptions({ workerId }).pipe(
-      Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+    const workerLayer = EffectWorker.layerWithOptions({ workerId }).pipe(
+      Layer.provide(Layer.mergeAll(layerOutbox, layerExecutor, openAdmissionLayer)),
     );
 
     const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
       Effect.flatMap((worker) => worker.runOnce),
-      Effect.provide(layerWorker),
+      Effect.provide(workerLayer),
       Effect.exit,
     );
 
@@ -419,13 +499,13 @@ it.effect("terminalizes a process-bound claim when success settlement fails", ()
         execute: () => Ref.update(executionCount, (count) => count + 1),
       }),
     );
-    const layerWorker = EffectWorker.layerWithOptions({ workerId }).pipe(
-      Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+    const workerLayer = EffectWorker.layerWithOptions({ workerId }).pipe(
+      Layer.provide(Layer.mergeAll(layerOutbox, layerExecutor, openAdmissionLayer)),
     );
 
     const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
       Effect.flatMap((worker) => worker.runOnce),
-      Effect.provide(layerWorker),
+      Effect.provide(workerLayer),
       Effect.exit,
     );
 
@@ -481,13 +561,13 @@ it.effect("requeues a replay-safe claim when success settlement fails", () =>
       EffectWorker.OrchestrationEffectExecutorV2,
       EffectWorker.OrchestrationEffectExecutorV2.of({ execute: () => Effect.void }),
     );
-    const layerWorker = EffectWorker.layerWithOptions({ workerId }).pipe(
-      Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+    const workerLayer = EffectWorker.layerWithOptions({ workerId }).pipe(
+      Layer.provide(Layer.mergeAll(layerOutbox, layerExecutor, openAdmissionLayer)),
     );
 
     const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
       Effect.flatMap((worker) => worker.runOnce),
-      Effect.provide(layerWorker),
+      Effect.provide(workerLayer),
       Effect.exit,
     );
 
@@ -556,13 +636,13 @@ it.effect("keeps a process-bound executor failure retryable when retry settlemen
           ),
       }),
     );
-    const layerWorker = EffectWorker.layerWithOptions({ workerId }).pipe(
-      Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+    const workerLayer = EffectWorker.layerWithOptions({ workerId }).pipe(
+      Layer.provide(Layer.mergeAll(layerOutbox, layerExecutor, openAdmissionLayer)),
     );
 
     const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
       Effect.flatMap((worker) => worker.runOnce),
-      Effect.provide(layerWorker),
+      Effect.provide(workerLayer),
       Effect.exit,
     );
 
@@ -628,13 +708,13 @@ it.effect("keeps a max-attempt replay-safe failure terminal when fail settlement
           ),
       }),
     );
-    const layerWorker = EffectWorker.layerWithOptions({ workerId, maxAttempts: 5 }).pipe(
-      Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+    const workerLayer = EffectWorker.layerWithOptions({ workerId, maxAttempts: 5 }).pipe(
+      Layer.provide(Layer.mergeAll(layerOutbox, layerExecutor, openAdmissionLayer)),
     );
 
     const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
       Effect.flatMap((worker) => worker.runOnce),
-      Effect.provide(layerWorker),
+      Effect.provide(workerLayer),
       Effect.exit,
     );
 
@@ -665,6 +745,7 @@ it.effect("uses durable deadlines, notifications, and a slow liveness poll", () 
       }),
       nextClaimableAt: Ref.get(nextClaimableAt),
       drain: () => Effect.succeed(0),
+      observeActive: Effect.succeed({ active: [], changes: Stream.empty }),
     });
     const awaitAttempts = Effect.fnUntraced(function* (expected: number) {
       while ((yield* Ref.get(attempts)) < expected) {
@@ -716,6 +797,7 @@ it.effect("does not hot-loop when a claim fails", () =>
       ),
       nextClaimableAt: Effect.succeed(Option.some(now)),
       drain: () => Effect.succeed(0),
+      observeActive: Effect.succeed({ active: [], changes: Stream.empty }),
     });
 
     yield* EffectWorker.runDaemonWithOptions({
@@ -744,6 +826,7 @@ it.effect("backs off briefly when a due deadline loses a claim race", () =>
       runOnce: Ref.update(attempts, (count) => count + 1).pipe(Effect.as(false)),
       nextClaimableAt: Effect.succeed(Option.some(now)),
       drain: () => Effect.succeed(0),
+      observeActive: Effect.succeed({ active: [], changes: Stream.empty }),
     });
 
     yield* EffectWorker.runDaemonWithOptions({

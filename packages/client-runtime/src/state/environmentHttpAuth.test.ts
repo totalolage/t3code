@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import {
   EnvironmentId,
   ORCHESTRATION_PROTOCOL_HEADER,
@@ -23,7 +24,9 @@ import type { HttpClient } from "effect/http";
 
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import {
+  BearerConnectionTarget,
   ConnectionTransientError,
+  PrimaryConnectionTarget,
   RelayConnectionTarget,
   type PreparedConnection,
   type PreparedHttpAuthorization,
@@ -48,13 +51,54 @@ const TARGET = new RelayConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
   label: "Remote environment",
 });
+const PRIMARY_TARGET = new PrimaryConnectionTarget({
+  environmentId: EnvironmentId.make("primary-environment-1"),
+  label: "Primary environment",
+  httpBaseUrl: "https://primary.example.test",
+  wsBaseUrl: "wss://primary.example.test/ws",
+});
+const BEARER_TARGET = new BearerConnectionTarget({
+  environmentId: EnvironmentId.make("bearer-environment-1"),
+  label: "Bearer environment",
+  connectionId: "connection-1",
+});
+const STRAY_QUERY_PARAMETERS = [
+  { key: "tenant", value: "stray-tenant" },
+  { key: "stray", value: "ignored" },
+] satisfies ReadonlyArray<RemoteQueryParameter>;
+const BEARER_QUERY_PARAMETERS = [
+  { key: "tenant", value: "tenant-a" },
+  { key: "tenant", value: "tenant-b" },
+  { key: "token", value: "must-not-leak" },
+  { key: "turnLimit", value: "99" },
+  { key: "beforeCursor", value: "custom-page" },
+] satisfies ReadonlyArray<RemoteQueryParameter>;
 const PREPARED: PreparedConnection = {
   environmentId: TARGET.environmentId,
   label: TARGET.label,
   httpBaseUrl: "https://previous.example.test",
   socketUrl: "wss://previous.example.test/ws",
   httpAuthorization: { _tag: "Dpop", accessToken: "expired-token", expiresAtEpochMs: 0 },
+  queryParameters: STRAY_QUERY_PARAMETERS,
   target: TARGET,
+};
+const PRIMARY_PREPARED: PreparedConnection = {
+  environmentId: PRIMARY_TARGET.environmentId,
+  label: PRIMARY_TARGET.label,
+  httpBaseUrl: PRIMARY_TARGET.httpBaseUrl,
+  socketUrl: PRIMARY_TARGET.wsBaseUrl,
+  httpAuthorization: null,
+  queryParameters: STRAY_QUERY_PARAMETERS,
+  target: PRIMARY_TARGET,
+};
+const BEARER_PREPARED: PreparedConnection = {
+  environmentId: BEARER_TARGET.environmentId,
+  label: BEARER_TARGET.label,
+  httpBaseUrl: "https://bearer.example.test",
+  socketUrl: "wss://bearer.example.test/ws",
+  httpAuthorization: { _tag: "Bearer", token: "bearer-token" },
+  queryParameters: BEARER_QUERY_PARAMETERS,
+  target: BEARER_TARGET,
 };
 const CURRENT_ORIGIN = "https://current.example.test";
 const RENEWED_ORIGIN = "https://renewed.example.test";
@@ -63,6 +107,9 @@ const DIFF = {
   repository: "owner/repository",
   number: 42,
 };
+const DIFF_BODY = new TextEncoder().encode(
+  '{"projectId":"project-1","repository":"owner/repository","number":42}',
+);
 const DIFF_RESULT = { patch: "diff --git a/file.ts b/file.ts", truncated: false, nextCursor: null };
 const AUTH = {
   policy: "remote-reachable",
@@ -86,7 +133,10 @@ const SHELL = {
 } satisfies OrchestrationV2ShellSnapshot;
 const THREAD = {
   snapshotSequence: 2,
-  projection: v2Projection,
+  projection: {
+    ...v2Projection,
+    thread: { ...v2Projection.thread, hiddenAt: null },
+  },
 } satisfies OrchestrationV2ThreadDetailSnapshot;
 const BOUNDED_THREAD = {
   ...THREAD,
@@ -113,7 +163,10 @@ function credentialRejectedResponse(reason = "invalid_credential") {
   );
 }
 
-function makeHarness(reply: (requestNumber: number) => Response | Promise<Response>) {
+function makeHarness(
+  reply: (requestNumber: number) => Response | Promise<Response>,
+  prepared: PreparedConnection = PREPARED,
+) {
   const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
   const authorizations: Array<
     Parameters<
@@ -158,7 +211,7 @@ function makeHarness(reply: (requestNumber: number) => Response | Promise<Respon
     proofs,
     remoteAuthorization,
     input: {
-      prepared: PREPARED,
+      prepared,
       signer: Option.some(signer),
       remoteAuthorization: Option.some(remoteAuthorization),
     },
@@ -265,6 +318,9 @@ describe("authenticated environment HTTP requests", () => {
       const url = new URL(call.url);
       expect(url.origin).toBe(CURRENT_ORIGIN);
       expect(url.pathname).toBe(loader.path);
+      expect([...url.searchParams.entries()]).toEqual(
+        loader.name === "older thread history" ? [["cursor", "older-page"]] : [],
+      );
       expect(call.init.method).toBe(loader.method);
       expect(new Headers(call.init.headers).get("authorization")).toBe("DPoP current-token");
       expect(new Headers(call.init.headers).get("dpop")).toBe("proof-1");
@@ -286,6 +342,74 @@ describe("authenticated environment HTTP requests", () => {
         expect(url.searchParams.get("cursor")).toBe("older-page");
       }
       expect(PREPARED.httpAuthorization).toMatchObject({ accessToken: "expired-token" });
+    }),
+  );
+
+  it.effect.each(LOADERS)("uses query parameters only for bearer $name", (loader) =>
+    Effect.gen(function* () {
+      const harness = makeHarness(() => Response.json(loader.response), BEARER_PREPARED);
+      const result = yield* loader.load(harness.input).pipe(Effect.provide(harness.httpLayer));
+
+      expect(result).toEqual(loader.response);
+      expect(harness.calls).toHaveLength(1);
+      const call = harness.calls[0]!;
+      const url = new URL(call.url);
+      const endpointQueryPairs =
+        loader.name === "older thread history"
+          ? [
+              ["cursor", "older-page"],
+              ["tenant", "tenant-a"],
+              ["tenant", "tenant-b"],
+              ["turnLimit", "99"],
+              ["beforeCursor", "custom-page"],
+            ]
+          : [
+              ["tenant", "tenant-a"],
+              ["tenant", "tenant-b"],
+              ["turnLimit", "99"],
+              ["beforeCursor", "custom-page"],
+            ];
+      expect([...url.searchParams.entries()]).toEqual(endpointQueryPairs);
+      expect(url.origin).toBe("https://bearer.example.test");
+      expect(url.pathname).toBe(loader.path);
+      expect(call.init.method).toBe(loader.method);
+      expect(new Headers(call.init.headers).get("authorization")).toBe("Bearer bearer-token");
+      expect(new Headers(call.init.headers).get("dpop")).toBeNull();
+      expect(call.init.credentials).toBeUndefined();
+      const body = call.init.body;
+      expect(body instanceof Uint8Array ? Array.from(body) : body).toEqual(
+        loader.name === "PR diff" ? Array.from(DIFF_BODY) : undefined,
+      );
+      expect(url.searchParams.has("token")).toBe(false);
+      expect(harness.authorizations).toEqual([]);
+      expect(harness.proofs).toEqual([]);
+    }),
+  );
+
+  it.effect.each(LOADERS)("ignores query parameters for primary $name", (loader) =>
+    Effect.gen(function* () {
+      const harness = makeHarness(() => Response.json(loader.response), PRIMARY_PREPARED);
+      const result = yield* loader.load(harness.input).pipe(Effect.provide(harness.httpLayer));
+
+      expect(result).toEqual(loader.response);
+      expect(harness.calls).toHaveLength(1);
+      const call = harness.calls[0]!;
+      const url = new URL(call.url);
+      expect([...url.searchParams.entries()]).toEqual(
+        loader.name === "older thread history" ? [["cursor", "older-page"]] : [],
+      );
+      expect(url.origin).toBe("https://primary.example.test");
+      expect(url.pathname).toBe(loader.path);
+      expect(call.init.method).toBe(loader.method);
+      expect(new Headers(call.init.headers).get("authorization")).toBeNull();
+      expect(new Headers(call.init.headers).get("dpop")).toBeNull();
+      expect(call.init.credentials).toBe("include");
+      const body = call.init.body;
+      expect(body instanceof Uint8Array ? Array.from(body) : body).toEqual(
+        loader.name === "PR diff" ? Array.from(DIFF_BODY) : undefined,
+      );
+      expect(harness.authorizations).toEqual([]);
+      expect(harness.proofs).toEqual([]);
     }),
   );
 
@@ -543,6 +667,7 @@ describe("authenticated environment HTTP requests", () => {
         expect(harness.calls[0]!.init.credentials).toBe(
           authorization === null ? "include" : undefined,
         );
+        expect([...new URL(harness.calls[0]!.url).searchParams.entries()]).toEqual([]);
       }),
   );
 
@@ -631,7 +756,7 @@ describe("authenticated environment HTTP requests", () => {
       expect(error).toMatchObject({
         _tag: "RemoteEnvironmentAuthFetchError",
         message: "Could not authorize the environment request.",
-        cause: failure,
+        cause: "fetch",
       });
       expect(harness.calls).toEqual([]);
       expect(harness.proofs).toEqual([]);

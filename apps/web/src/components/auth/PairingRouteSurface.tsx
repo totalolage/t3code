@@ -183,6 +183,7 @@ export function HostedPairingRouteSurface() {
     const result = await connectPairingEnvironment({
       host: request.host,
       pairingCode: request.token,
+      queryParameters: request.queryParameters,
     });
     if (result._tag === "Success") {
       setStatus("paired");

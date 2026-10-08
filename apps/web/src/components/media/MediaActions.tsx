@@ -3,7 +3,7 @@ import {
   mediaReferenceFileName,
   type MediaReference,
 } from "@t3tools/client-runtime/media-reference";
-import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
+import { resolvePreparedAssetUrl } from "../../assets/preparedAssetUrl";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   AuthFilesystemReadScope,
@@ -90,7 +90,7 @@ export function useMediaActions(source: MediaActionSource) {
     const result = await createAssetUrl({ environmentId, input: { resource } });
     if (result._tag === "Failure") throw squashAtomCommandFailure(result);
     assertCanReadMedia();
-    const url = resolveAssetUrl(connection.httpBaseUrl, result.value.relativeUrl);
+    const url = resolvePreparedAssetUrl(connection, result.value.relativeUrl);
     if (!url) throw new Error("The environment returned an invalid media URL.");
     return url;
   }, [source, createAssetUrl, assertCanReadMedia]);

@@ -81,6 +81,7 @@ function shell(overrides: Partial<OrchestrationV2ThreadShell> = {}): Orchestrati
     createdAt: DateTime.makeUnsafe(NOW),
     updatedAt: DateTime.makeUnsafe(NOW),
     archivedAt: null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     snoozedUntil: null,
@@ -286,6 +287,8 @@ describe("AgentAwarenessRelay", () => {
       "provider-turn.updated",
       "thread.visited",
       "thread.pinned",
+      "thread.hidden",
+      "thread.unhidden",
     ] as const) {
       assert.isFalse(AgentAwarenessRelay.shouldPublishAgentAwarenessEvent({ type }));
     }
@@ -812,6 +815,7 @@ describe("AgentAwarenessRelay", () => {
           createdAt: now,
           updatedAt: now,
           archivedAt: null,
+          hiddenAt: null,
           settledOverride: null,
           settledAt: null,
           lastVisitedAt: null,

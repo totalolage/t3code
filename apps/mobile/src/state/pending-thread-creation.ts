@@ -173,6 +173,7 @@ export function pendingThreadCreationShell(
     createdAt: timestamp,
     updatedAt: timestamp,
     archivedAt: null,
+    hiddenAt: null,
     settledOverride: null,
     settledAt: null,
     unsettledAt: null,

@@ -2,7 +2,12 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as NodeDns from "node:dns";
 import * as NodeOS from "node:os";
-import * as NodeSea from "node:sea";
+
+declare const __T3_BUN_STANDALONE__: boolean;
+
+/** This build fact identifies Bun's standalone artifact, not every executable runtime. */
+export const isBunStandaloneRuntime =
+  typeof __T3_BUN_STANDALONE__ !== "undefined" && __T3_BUN_STANDALONE__;
 
 export const HostProcessPlatform = Context.Reference<NodeJS.Platform>(
   "@t3tools/shared/hostProcess/HostProcessPlatform",
@@ -74,7 +79,8 @@ export const HostProcessInvokedAs = Context.Reference<string>(
 export const HostProcessIsExecutable = Context.Reference<boolean>(
   "@t3tools/shared/hostProcess/HostProcessIsExecutable",
   {
-    defaultValue: () => NodeSea.isSea(),
+    defaultValue: () =>
+      isBunStandaloneRuntime || (process.getBuiltinModule("node:sea")?.isSea() ?? false),
   },
 );
 

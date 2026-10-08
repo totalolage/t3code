@@ -53,6 +53,9 @@ import {
 const FIRST_FINAL = "provider thread resume fixture first turn complete";
 const SECOND_FINAL = "provider thread resume fixture second turn complete";
 
+const layerReplayDatabase = (dbPath: string) =>
+  SqlitePersistence.layerFromPath(dbPath).pipe(Layer.provide(NodeServices.layer), Layer.orDie);
+
 const decodeCodexTranscript = Schema.decodeUnknownEffect(
   CodexReplay.CodexAppServerReplayTranscript,
 );
@@ -134,7 +137,7 @@ const runCursorRecovery = Effect.fn("runCursorRecovery")(function* (input: {
   const { phase1Commands, phase1Steps, phase2Commands, phase2Steps } =
     splitAfterFirstIdle(materialized);
   const options = {
-    databaseLayer: SqlitePersistence.layerFromPath(dbPath).pipe(Layer.provide(NodeServices.layer)),
+    databaseLayer: layerReplayDatabase(dbPath),
   };
   const harness = {
     ...CursorOrchestratorReplayHarness,
@@ -238,9 +241,7 @@ describe("orchestrator replay recovery", () => {
               CodexAdapterV2Testkit.layer({ transcript, driver }),
           };
           const options = {
-            databaseLayer: SqlitePersistence.layerFromPath(dbPath).pipe(
-              Layer.provide(NodeServices.layer),
-            ),
+            databaseLayer: layerReplayDatabase(dbPath),
           };
 
           yield* runOrchestratorV2ProviderReplayScenario(
@@ -338,9 +339,7 @@ describe("orchestrator replay recovery", () => {
           splitAfterFirstIdle(materialized);
         const { harness, assertComplete } = makeClaudeRestartReplayHarness(transcript);
         const options = {
-          databaseLayer: SqlitePersistence.layerFromPath(path.join(tempDir, "state.sqlite")).pipe(
-            Layer.provide(NodeServices.layer),
-          ),
+          databaseLayer: layerReplayDatabase(path.join(tempDir, "state.sqlite")),
         };
 
         yield* Effect.scoped(
