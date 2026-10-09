@@ -9,6 +9,7 @@ import {
   PlusIcon,
   Trash2Icon,
 } from "lucide-react";
+import * as Option from "effect/Option";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   EnvironmentId,
@@ -46,7 +47,10 @@ import {
 } from "../../providerInstances";
 import { usePrimaryCloudLinkState } from "../../cloud/primaryCloudLinkState";
 import { requestConfirmDialog } from "../../confirmDialog";
-import { webhookAddress } from "@t3tools/client-runtime/webhook-address";
+import {
+  suggestedWebhookPublicBaseUrl,
+  webhookAddress,
+} from "@t3tools/client-runtime/webhook-address";
 import { Link } from "@tanstack/react-router";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import {
@@ -61,7 +65,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { WorktreeBaseBranchPicker } from "../WorktreeBaseBranchPicker";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
-import { readEnvironmentScope } from "~/state/session";
+import { readEnvironmentScope, usePreparedConnection } from "~/state/session";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { searchableSetting } from "./settingsSearch";
 import {
@@ -333,6 +337,13 @@ function WebhookSettingsSection() {
   const mixed = useScopedSettingsMixed(["webhookPublicBaseUrl"]);
   const edited = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  const preparedConnection = usePreparedConnection(
+    connectedEnvironments.length === 1 ? connectedEnvironments[0]!.environmentId : null,
+  );
+  const suggestion =
+    !mixed && settings.webhookPublicBaseUrl === ""
+      ? suggestedWebhookPublicBaseUrl(Option.getOrNull(preparedConnection))
+      : null;
   if (
     connectedEnvironments.length === 0 ||
     connectedEnvironments.some(
@@ -348,7 +359,21 @@ function WebhookSettingsSection() {
       <SettingsRow
         {...searchableSetting("scheduled-tasks-webhook-public-base-url")}
         description="Address senders use to reach this environment, such as https://code.example.com behind your own reverse proxy or tunnel. It replaces the T3 Connect address, so requests fail while this environment is offline instead of being held and retried. Leave empty to use T3 Connect."
-        status={error}
+        status={
+          error ??
+          (suggestion ? (
+            <>
+              You are connected through {suggestion}.{" "}
+              <Button
+                variant="link"
+                size="xs"
+                onClick={() => updateSettings({ webhookPublicBaseUrl: suggestion })}
+              >
+                Use it
+              </Button>
+            </>
+          ) : null)
+        }
         serverScoped
         settingKeys={["webhookPublicBaseUrl"]}
         resetAction={

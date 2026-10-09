@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { webhookAddress } from "./webhookAddress.ts";
+import { suggestedWebhookPublicBaseUrl, webhookAddress } from "./webhookAddress.ts";
 
 const path = "/api/hooks/scheduled-task%3Ahook/token";
 const endpoint = (url: string | null, urlSource?: "t3-connect" | "public-base-url") => ({
@@ -45,5 +45,37 @@ describe("webhookAddress", () => {
       address: path,
       copyable: false,
     });
+  });
+});
+
+describe("suggestedWebhookPublicBaseUrl", () => {
+  const direct = (httpBaseUrl: string, tag = "PrimaryConnectionTarget") => ({
+    httpBaseUrl,
+    target: { _tag: tag },
+  });
+
+  it("suggests a direct https address on a public host, keeping its base path", () => {
+    expect(suggestedWebhookPublicBaseUrl(direct("https://code.example.com/"))).toBe(
+      "https://code.example.com",
+    );
+    expect(
+      suggestedWebhookPublicBaseUrl(direct("https://proxy.acme.dev/t3/", "BearerConnectionTarget")),
+    ).toBe("https://proxy.acme.dev/t3");
+  });
+
+  it("suggests nothing senders could not reach", () => {
+    for (const url of [
+      "http://code.example.com/",
+      "https://localhost:3773/",
+      "https://192.168.1.20:3773/",
+      "https://devbox.tail1234.ts.net/",
+      "https://devbox.local/",
+    ]) {
+      expect(suggestedWebhookPublicBaseUrl(direct(url))).toBeNull();
+    }
+    expect(
+      suggestedWebhookPublicBaseUrl(direct("https://relay.t3.codes/x/", "RelayConnectionTarget")),
+    ).toBeNull();
+    expect(suggestedWebhookPublicBaseUrl(null)).toBeNull();
   });
 });

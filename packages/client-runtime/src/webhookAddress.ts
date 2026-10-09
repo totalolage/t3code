@@ -1,5 +1,8 @@
-import type { ScheduledTaskWebhookEndpoint } from "@t3tools/contracts";
-import { isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
+import {
+  normalizeWebhookPublicBaseUrl,
+  type ScheduledTaskWebhookEndpoint,
+} from "@t3tools/contracts";
+import { isLocalLoopbackHost, isPublicFaviconHost } from "@t3tools/shared/hostClassification";
 
 /**
  * Where a sender can call a webhook task, as a client shows it. With a public
@@ -44,4 +47,23 @@ export function webhookAddress(
       ? "Only this computer can call this address. Set a public base URL or link T3 Connect for one senders can reach."
       : "Works wherever this environment's address is reachable, for example over Tailscale. Set a public base URL or link T3 Connect for one senders can reach.",
   };
+}
+
+/**
+ * The address this client reaches an environment at, offered as a one-click
+ * public base URL when it looks reachable from the internet: a direct https
+ * route to a public host. Loopback, LAN, tailnet, SSH, and T3 Connect routes
+ * get no suggestion, since external senders cannot use them.
+ */
+export function suggestedWebhookPublicBaseUrl(
+  connection: { readonly httpBaseUrl: string; readonly target: { readonly _tag: string } } | null,
+): string | null {
+  if (
+    connection === null ||
+    (connection.target._tag !== "PrimaryConnectionTarget" &&
+      connection.target._tag !== "BearerConnectionTarget")
+  )
+    return null;
+  const url = normalizeWebhookPublicBaseUrl(connection.httpBaseUrl);
+  return url !== null && isPublicFaviconHost(new URL(url).hostname) ? url : null;
 }

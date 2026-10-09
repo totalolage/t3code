@@ -78,7 +78,8 @@ A full URL senders can reach comes from one of two places:
 - **Public base URL**, under **Webhooks** in **Settings → Scheduled tasks**:
   the `https://` address where this environment is already reachable, such as
   your own domain behind a reverse proxy or tunnel. Include any path prefix
-  the proxy adds. When set, it replaces the T3 Connect URL.
+  the proxy adds. When set, it replaces the T3 Connect URL. If you are
+  connected through such an address, the setting offers it with **Use it**.
 - A [T3 Connect](remote-access.md) managed tunnel, used when no public base
   URL is set.
 
