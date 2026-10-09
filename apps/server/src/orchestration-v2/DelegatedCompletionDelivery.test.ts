@@ -1272,4 +1272,120 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
       );
     }),
   );
+
+  it.effect("publishes a child's result once its own subagent settles after its run", () =>
+    Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:nested-settle-parent");
+      const projectId = ProjectId.make("project:nested-settle-parent");
+      const runId = RunId.make("run:nested-settle-parent");
+      const rootNodeId = NodeId.make("node:nested-settle-parent-root");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId,
+        runId,
+        rootNodeId,
+        taskId: NodeId.make("node:nested-settle-parent-settled"),
+        deliveryState: "delivered",
+        now,
+      });
+      const child = yield* seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId,
+        parentRunId: runId,
+        rootNodeId,
+        name: "nested-settle-child",
+        completionWake: "always",
+        continuationPending: false,
+        runStatus: "completed",
+        now,
+      });
+      // The child's run ended while its own native subagent still worked, so
+      // the run's terminal event could only see waiting_for_children.
+      const nested = (status: "running" | "completed") => ({
+        id: EventId.make(`event:nested-settle-child:native:${status}`),
+        type: "subagent.updated" as const,
+        threadId: child.childThreadId,
+        runId: child.childRunId,
+        nodeId: NodeId.make("node:nested-settle-child:native"),
+        driver,
+        providerInstanceId: modelSelection.instanceId,
+        occurredAt: now,
+        payload: {
+          id: NodeId.make("node:nested-settle-child:native"),
+          threadId: child.childThreadId,
+          runId: child.childRunId,
+          parentNodeId: NodeId.make("node:nested-settle-child:root"),
+          origin: "provider_native" as const,
+          createdBy: "agent" as const,
+          driver,
+          providerInstanceId: modelSelection.instanceId,
+          providerThreadId: null,
+          childThreadId: null,
+          nativeTaskRef: null,
+          prompt: "Review one file.",
+          title: null,
+          model: null,
+          status,
+          result: status === "completed" ? "nested finished" : null,
+          startedAt: now,
+          completedAt: status === "completed" ? now : null,
+          updatedAt: now,
+        },
+      });
+      yield* eventSink.write({
+        commandId: reconcileCommandId("nested-settle-child:native-running"),
+        events: [
+          nested("running"),
+          {
+            id: EventId.make("event:nested-settle-child:result"),
+            type: "message.updated",
+            threadId: child.childThreadId,
+            runId: child.childRunId,
+            occurredAt: now,
+            payload: {
+              id: MessageId.make("message:nested-settle-child:result"),
+              threadId: child.childThreadId,
+              runId: child.childRunId,
+              nodeId: null,
+              role: "assistant",
+              text: "Reviewed with a helper.",
+              attachments: [],
+              streaming: false,
+              createdBy: "agent",
+              creationSource: "server",
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+      assert.isTrue(yield* orchestrator.delegatedTaskResultPending(child.childThreadId));
+
+      const afterSequence = yield* eventSink.latestSequence();
+      yield* eventSink.write({
+        commandId: CommandId.make("command:nested-settle-child:native-completed"),
+        events: [nested("completed")],
+      });
+      const settled = yield* eventSink
+        .stream({ afterSequence, threadId, eventType: "subagent.updated" })
+        .pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "subagent.updated" &&
+              stored.event.payload.id === child.taskId &&
+              stored.event.payload.status === "completed",
+          ),
+          Stream.take(1),
+          Stream.runHead,
+        );
+      assert.isTrue(settled._tag === "Some");
+      const parent = yield* orchestrator.getThreadProjection(threadId);
+      const task = parent.subagents.find((row) => row.id === child.taskId);
+      assert.equal(task?.result, "Reviewed with a helper.");
+      assert.equal(task?.completionDelivery?.state, "claimed");
+    }),
+  );
 });

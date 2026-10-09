@@ -43,6 +43,7 @@ import {
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
+  isOrchestrationV2WorkActive,
   latestProviderTurnForAttempt,
   orchestrationV2RunWorkStartedAt,
   ProviderDriverKind,
@@ -11044,21 +11045,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
     );
 
+  // finalize writes the parent thread and startNextQueuedRun writes the child
+  // thread, so each takes its own thread's lock, sequentially and never
+  // nested: dispatchDelegatedTaskRequest already writes child events while
+  // holding the parent lock, so nesting the parent lock inside the child lock
+  // would invert that order, and the keyed executor's semaphores are neither
+  // reentrant nor deadlock-aware.
+  const finalizeIfAppOwnedSubagent = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const parentThreadId = yield* appOwnedSubagentParentThreadId(threadId);
+      if (parentThreadId !== undefined) {
+        yield* threadDispatch.withLock(parentThreadId, finalizeAppOwnedSubagent(threadId));
+      }
+    });
+
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>
     serviceUpdateAdmission
       .withAdmission((admissionClosed) =>
         Effect.gen(function* () {
           const threadId = stored.event.threadId;
-          // finalize writes the parent thread and startNextQueuedRun writes this
-          // thread, so each takes its own thread's lock, sequentially and never
-          // nested: dispatchDelegatedTaskRequest already writes child events
-          // while holding the parent lock, so nesting the parent lock inside the
-          // child lock here would invert that order, and the keyed executor's
-          // semaphores are neither reentrant nor deadlock-aware.
-          const parentThreadId = yield* appOwnedSubagentParentThreadId(threadId);
-          if (parentThreadId !== undefined) {
-            yield* threadDispatch.withLock(parentThreadId, finalizeAppOwnedSubagent(threadId));
-          }
+          yield* finalizeIfAppOwnedSubagent(threadId);
           if (stored.event.type === "run.updated") {
             yield* threadDispatch.withLock(
               threadId,
@@ -11107,6 +11113,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             stored.event.payload.status === "rolled_back"),
       ),
       Stream.runForEach(handleTerminalRun),
+      Effect.forkDetach,
+    );
+  // A delegated child's run can end while its own subagents still work, which
+  // holds its result back as waiting_for_children. Their settling is the next
+  // chance to publish it, and to wake the parent.
+  yield* eventSink
+    .stream({ afterSequence: terminalEventsAfterSequence, eventType: "subagent.updated" })
+    .pipe(
+      Stream.filter(
+        (stored) =>
+          stored.event.type === "subagent.updated" &&
+          !String(stored.commandId).startsWith("command:runtime-reconcile:") &&
+          !isOrchestrationV2WorkActive(stored.event.payload.status),
+      ),
+      Stream.runForEach((stored) =>
+        serviceUpdateAdmission
+          .withAdmission(() => finalizeIfAppOwnedSubagent(stored.event.threadId))
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Failed to react to settled V2 subagent", {
+                threadId: stored.event.threadId,
+                sequence: stored.sequence,
+                cause,
+              }),
+            ),
+          ),
+      ),
       Effect.forkDetach,
     );
 
