@@ -6,6 +6,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { ScheduledTaskUpsertInput, SecretRequestError } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -77,7 +78,7 @@ const withService = <A, E>(
     readonly gate?: Deferred.Deferred<void>;
     readonly hookBaseUrl?: string;
     readonly source?: ScheduledTaskService.WebhookOrigin["source"];
-    readonly origin?: ScheduledTaskService.ScheduledTaskWebhookOrigin["Service"];
+    readonly origin?: Context.Service.Shape<typeof ScheduledTaskService.ScheduledTaskWebhookOrigin>;
   } = {},
 ) =>
   Effect.gen(function* () {
