@@ -1272,4 +1272,149 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
       );
     }),
   );
+
+  it.effect.each(["subagent", "background task"] as const)(
+    "publishes a child's result once its %s settles after its run",
+    (blocker) =>
+      Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const now = yield* DateTime.now;
+        const name = `nested-settle-${blocker.replace(" ", "-")}`;
+        const threadId = ThreadId.make(`thread:${name}-parent`);
+        const projectId = ProjectId.make(`project:${name}-parent`);
+        const runId = RunId.make(`run:${name}-parent`);
+        const rootNodeId = NodeId.make(`node:${name}-parent-root`);
+        yield* seedParentWithTerminalTask({
+          threadId,
+          projectId,
+          runId,
+          rootNodeId,
+          taskId: NodeId.make(`node:${name}-parent-settled`),
+          deliveryState: "delivered",
+          now,
+        });
+        const child = yield* seedRestartCancelledChild({
+          parentThreadId: threadId,
+          projectId,
+          parentRunId: runId,
+          rootNodeId,
+          name: `${name}-child`,
+          completionWake: "always",
+          continuationPending: false,
+          runStatus: "completed",
+          now,
+        });
+        // The child's run ended while its own work still ran, so the run's
+        // terminal event could only see waiting_for_children.
+        const nested = (status: "running" | "completed") => ({
+          id: EventId.make(`event:${name}:native:${status}`),
+          type: "subagent.updated" as const,
+          threadId: child.childThreadId,
+          runId: child.childRunId,
+          nodeId: NodeId.make(`node:${name}:native`),
+          driver,
+          providerInstanceId: modelSelection.instanceId,
+          occurredAt: now,
+          payload: {
+            id: NodeId.make(`node:${name}:native`),
+            threadId: child.childThreadId,
+            runId: child.childRunId,
+            parentNodeId: NodeId.make(`node:${name}:root`),
+            origin: "provider_native" as const,
+            createdBy: "agent" as const,
+            driver,
+            providerInstanceId: modelSelection.instanceId,
+            providerThreadId: null,
+            childThreadId: null,
+            nativeTaskRef: null,
+            prompt: "Review one file.",
+            title: null,
+            model: null,
+            status,
+            result: status === "completed" ? "nested finished" : null,
+            startedAt: now,
+            completedAt: status === "completed" ? now : null,
+            updatedAt: now,
+          },
+        });
+        const backgroundTasks = (running: boolean) => ({
+          id: EventId.make(`event:${name}:provider-thread:${running}`),
+          type: "provider-thread.updated" as const,
+          threadId: child.childThreadId,
+          driver,
+          providerInstanceId: modelSelection.instanceId,
+          occurredAt: now,
+          payload: {
+            id: ProviderThreadId.make(`provider-thread:${name}`),
+            driver,
+            providerInstanceId: modelSelection.instanceId,
+            providerSessionId: null,
+            appThreadId: child.childThreadId,
+            ownerNodeId: null,
+            nativeThreadRef: { driver, nativeId: `native:${name}`, strength: "strong" as const },
+            nativeConversationHeadRef: null,
+            status: "active" as const,
+            firstRunOrdinal: 1,
+            lastRunOrdinal: 1,
+            handoffIds: [],
+            forkedFrom: null,
+            pendingBackgroundTasks: running ? [{ taskId: "review", kind: "command" as const }] : [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventSink.write({
+          commandId: reconcileCommandId(`${name}:held`),
+          events: [
+            blocker === "subagent" ? nested("running") : backgroundTasks(true),
+            {
+              id: EventId.make(`event:${name}:result`),
+              type: "message.updated",
+              threadId: child.childThreadId,
+              runId: child.childRunId,
+              occurredAt: now,
+              payload: {
+                id: MessageId.make(`message:${name}:result`),
+                threadId: child.childThreadId,
+                runId: child.childRunId,
+                nodeId: null,
+                role: "assistant",
+                text: "Reviewed with a helper.",
+                attachments: [],
+                streaming: false,
+                createdBy: "agent",
+                creationSource: "server",
+                createdAt: now,
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+        assert.isTrue(yield* orchestrator.delegatedTaskResultPending(child.childThreadId));
+
+        const afterSequence = yield* eventSink.latestSequence();
+        yield* eventSink.write({
+          commandId: CommandId.make(`command:${name}:settled`),
+          events: [blocker === "subagent" ? nested("completed") : backgroundTasks(false)],
+        });
+        const settled = yield* eventSink
+          .stream({ afterSequence, threadId, eventType: "subagent.updated" })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "subagent.updated" &&
+                stored.event.payload.id === child.taskId &&
+                stored.event.payload.status === "completed",
+            ),
+            Stream.take(1),
+            Stream.runHead,
+          );
+        assert.isTrue(settled._tag === "Some");
+        const parent = yield* orchestrator.getThreadProjection(threadId);
+        const task = parent.subagents.find((row) => row.id === child.taskId);
+        assert.equal(task?.result, "Reviewed with a helper.");
+        assert.equal(task?.completionDelivery?.state, "claimed");
+      }),
+  );
 });
