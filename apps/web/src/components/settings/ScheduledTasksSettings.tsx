@@ -64,8 +64,8 @@ import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { WorktreeBaseBranchPicker } from "../WorktreeBaseBranchPicker";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
-import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
-import { readEnvironmentScope, usePreparedConnection } from "~/state/session";
+import { AuthOrchestrationOperateScope, AuthSettingsWriteScope } from "@t3tools/contracts";
+import { readEnvironmentScope, useEnvironmentScope, usePreparedConnection } from "~/state/session";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { searchableSetting } from "./settingsSearch";
 import {
@@ -337,11 +337,12 @@ function WebhookSettingsSection() {
   const mixed = useScopedSettingsMixed(["webhookPublicBaseUrl"]);
   const edited = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  const preparedConnection = usePreparedConnection(
-    connectedEnvironments.length === 1 ? connectedEnvironments[0]!.environmentId : null,
-  );
+  const soleEnvironmentId =
+    connectedEnvironments.length === 1 ? connectedEnvironments[0]!.environmentId : null;
+  const preparedConnection = usePreparedConnection(soleEnvironmentId);
+  const canWrite = useEnvironmentScope(soleEnvironmentId, AuthSettingsWriteScope);
   const suggestion =
-    !mixed && settings.webhookPublicBaseUrl === ""
+    canWrite && !mixed && settings.webhookPublicBaseUrl === ""
       ? suggestedWebhookPublicBaseUrl(Option.getOrNull(preparedConnection))
       : null;
   if (

@@ -53,13 +53,19 @@ export function webhookAddress(
  * The address this client reaches an environment at, offered as a one-click
  * public base URL when it looks reachable from the internet: a direct https
  * route to a public host. Loopback, LAN, tailnet, SSH, and T3 Connect routes
- * get no suggestion, since external senders cannot use them.
+ * get no suggestion, since external senders cannot use them. Nor does a route
+ * that needs query parameters, which a base URL cannot carry.
  */
 export function suggestedWebhookPublicBaseUrl(
-  connection: { readonly httpBaseUrl: string; readonly target: { readonly _tag: string } } | null,
+  connection: {
+    readonly httpBaseUrl: string;
+    readonly queryParameters?: ReadonlyArray<unknown>;
+    readonly target: { readonly _tag: string };
+  } | null,
 ): string | null {
   if (
     connection === null ||
+    (connection.queryParameters?.length ?? 0) > 0 ||
     (connection.target._tag !== "PrimaryConnectionTarget" &&
       connection.target._tag !== "BearerConnectionTarget")
   )

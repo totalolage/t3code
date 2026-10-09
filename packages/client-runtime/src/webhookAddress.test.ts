@@ -76,6 +76,12 @@ describe("suggestedWebhookPublicBaseUrl", () => {
     expect(
       suggestedWebhookPublicBaseUrl(direct("https://relay.t3.codes/x/", "RelayConnectionTarget")),
     ).toBeNull();
+    expect(
+      suggestedWebhookPublicBaseUrl({
+        ...direct("https://proxy.acme.dev/", "BearerConnectionTarget"),
+        queryParameters: [{ name: "route", value: "backend" }],
+      }),
+    ).toBeNull();
     expect(suggestedWebhookPublicBaseUrl(null)).toBeNull();
   });
 });
