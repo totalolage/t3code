@@ -1659,6 +1659,35 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
 
+    it.effect("gives a public base URL webhook address the same visibility", () =>
+      Effect.gen(function* () {
+        const upserted = yield* Ref.make(0);
+        const webhook = {
+          path: "/api/hooks/scheduled-task/secret",
+          url: "https://code.example.com/t3/api/hooks/scheduled-task/secret",
+          urlSource: "public-base-url" as const,
+          hasSecret: false,
+        };
+        const listed = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) => mcp.listScheduledTasks(supervisedClient, { projectId })),
+          Effect.provide(
+            service(
+              [
+                task({ runtimeMode: "full-access", webhook }),
+                task({ id: ScheduledTaskId.make("scheduled-task:supervised"), webhook }),
+              ],
+              null,
+              upserted,
+            ),
+          ),
+        );
+        assert.deepEqual(
+          listed.tasks.map((summary) => summary.webhookUrl),
+          [undefined, webhook.url],
+        );
+      }),
+    );
+
     it.effect("hides a webhook URL from a thread whose turn has ended", () =>
       Effect.gen(function* () {
         const callerId = ThreadId.make("thread:scheduled-ended");

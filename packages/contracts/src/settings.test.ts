@@ -8,6 +8,7 @@ import {
   ClientSettingsPatch,
   ClaudeSettings,
   DEFAULT_SERVER_SETTINGS,
+  normalizeWebhookPublicBaseUrl,
   resolveProviderInstanceEnabled,
   ServiceUpdateRepository,
   ServerSettings,
@@ -22,6 +23,39 @@ const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 const decodeServiceUpdateRepository = Schema.decodeUnknownSync(ServiceUpdateRepository);
+
+describe("webhookPublicBaseUrl", () => {
+  it("defaults to empty and accepts an https base URL in settings and patches", () => {
+    expect(decodeServerSettings({}).webhookPublicBaseUrl).toBe("");
+    const input = { webhookPublicBaseUrl: "https://code.example.com/t3" };
+    expect(decodeServerSettings(input).webhookPublicBaseUrl).toBe(input.webhookPublicBaseUrl);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+  });
+
+  it.each([
+    "http://code.example.com",
+    "https://user:pass@code.example.com",
+    "https://code.example.com/?token=1",
+    "https://code.example.com/#hooks",
+    "code.example.com",
+    "/t3",
+  ])("rejects %s", (webhookPublicBaseUrl) => {
+    expect(normalizeWebhookPublicBaseUrl(webhookPublicBaseUrl)).toBeNull();
+    expect(() => decodeServerSettingsPatch({ webhookPublicBaseUrl })).toThrow();
+  });
+
+  it.each([
+    ["https://code.example.com", "https://code.example.com"],
+    ["  https://Code.Example.com/  ", "https://code.example.com"],
+    ["https://code.example.com:443/t3//", "https://code.example.com/t3"],
+    ["https://code.example.com:8443/a/b/", "https://code.example.com:8443/a/b"],
+    // A bare "?" or "#" carries nothing, so the URL parser drops it.
+    ["https://code.example.com/t3?", "https://code.example.com/t3"],
+    ["https://code.example.com/t3#", "https://code.example.com/t3"],
+  ])("normalizes %s", (input, expected) => {
+    expect(normalizeWebhookPublicBaseUrl(input)).toBe(expected);
+  });
+});
 
 describe("ServerSettings response streaming", () => {
   it("defaults to paragraph buffering", () => {

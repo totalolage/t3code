@@ -2,17 +2,20 @@
 import * as NodeCrypto from "node:crypto";
 
 import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import { ScheduledTaskUpsertInput, SecretRequestError } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as EffectScheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
@@ -71,7 +74,12 @@ const withService = <A, E>(
     /** Secrets the user entered for an agent, by ref; consuming one removes it. */
     readonly secretsByRef: Map<string, string>;
   }) => Effect.Effect<A, E, never>,
-  options: { readonly gate?: Deferred.Deferred<void>; readonly relayHookBaseUrl?: string } = {},
+  options: {
+    readonly gate?: Deferred.Deferred<void>;
+    readonly hookBaseUrl?: string;
+    readonly source?: ScheduledTaskService.WebhookOrigin["source"];
+    readonly origin?: Context.Service.Shape<typeof ScheduledTaskService.ScheduledTaskWebhookOrigin>;
+  } = {},
 ) =>
   Effect.gen(function* () {
     const launches = yield* Queue.unbounded<LaunchInput>();
@@ -98,7 +106,13 @@ const withService = <A, E>(
       }),
       Layer.succeed(
         ScheduledTaskService.ScheduledTaskWebhookOrigin,
-        Effect.succeed({ relayHookBaseUrl: options.relayHookBaseUrl ?? null }),
+        options.origin ?? {
+          current: Effect.succeed({
+            hookBaseUrl: options.hookBaseUrl ?? null,
+            source: options.source ?? "t3-connect",
+          }),
+          changes: Stream.empty,
+        },
       ),
     );
     return yield* Effect.gen(function* () {
@@ -166,9 +180,115 @@ it.effect("gives webhook tasks a relay URL when the environment has a managed tu
           task.webhook?.url,
           `https://relay.example.com/v1/hooks/0123456789abcdef/scheduled-task%3Ahook/${token}`,
         );
+        assert.equal(task.webhook?.urlSource, "t3-connect");
       }),
-    { relayHookBaseUrl: "https://relay.example.com/v1/hooks/0123456789abcdef" },
+    { hookBaseUrl: "https://relay.example.com/v1/hooks/0123456789abcdef" },
   ),
+);
+
+describe("resolveWebhookOrigin", () => {
+  const relay = "https://relay.example.com/v1/hooks/0123456789abcdef";
+
+  it.effect("prefers a configured public base URL over T3 Connect", () =>
+    Effect.gen(function* () {
+      const origin = yield* ScheduledTaskService.resolveWebhookOrigin({
+        publicBaseUrl: "https://code.example.com/",
+        readRelayHookBaseUrl: Effect.die("relay must not be read"),
+      });
+      assert.deepEqual(origin, {
+        hookBaseUrl: "https://code.example.com/api/hooks",
+        source: "public-base-url",
+      });
+    }),
+  );
+
+  it.effect("keeps a proxy path prefix and drops trailing slashes", () =>
+    Effect.gen(function* () {
+      const origin = yield* ScheduledTaskService.resolveWebhookOrigin({
+        publicBaseUrl: "https://example.com:8443/t3//",
+        readRelayHookBaseUrl: Effect.succeed(relay),
+      });
+      assert.equal(origin.hookBaseUrl, "https://example.com:8443/t3/api/hooks");
+    }),
+  );
+
+  it.effect("falls back to T3 Connect when unset or invalid", () =>
+    Effect.gen(function* () {
+      for (const publicBaseUrl of ["", "http://code.example.com", "not a url"]) {
+        const origin = yield* ScheduledTaskService.resolveWebhookOrigin({
+          publicBaseUrl,
+          readRelayHookBaseUrl: Effect.succeed(relay),
+        });
+        assert.deepEqual(origin, { hookBaseUrl: relay, source: "t3-connect" });
+      }
+    }),
+  );
+
+  it.effect("has no URL without either", () =>
+    Effect.gen(function* () {
+      const origin = yield* ScheduledTaskService.resolveWebhookOrigin({
+        publicBaseUrl: "",
+        readRelayHookBaseUrl: Effect.succeed(null),
+      });
+      assert.isNull(origin.hookBaseUrl);
+    }),
+  );
+});
+
+it.effect("gives webhook tasks a direct URL under the public base URL", () =>
+  withService(
+    ({ service }) =>
+      Effect.gen(function* () {
+        const { task } = yield* service.upsert(yield* webhookTaskInput());
+        assert.equal(task.webhook?.url, `https://code.example.com/t3${task.webhook!.path}`);
+        assert.equal(task.webhook?.urlSource, "public-base-url");
+      }),
+    { hookBaseUrl: "https://code.example.com/t3/api/hooks", source: "public-base-url" },
+  ),
+);
+
+it.effect("re-emits live task lists when the webhook origin changes", () =>
+  Effect.gen(function* () {
+    const publicBaseUrl = yield* Ref.make("");
+    const originChanged = yield* Queue.unbounded<void>();
+    yield* withService(
+      ({ service }) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            yield* service.upsert(yield* webhookTaskInput());
+            const urls = yield* Queue.unbounded<string | null>();
+            yield* service.subscribeList().pipe(
+              Stream.runForEach(({ tasks }) => Queue.offer(urls, tasks[0]?.webhook?.url ?? null)),
+              Effect.forkScoped,
+            );
+            assert.isNull(yield* Queue.take(urls));
+
+            yield* Ref.set(publicBaseUrl, "https://code.example.com");
+            yield* Queue.offer(originChanged, undefined);
+            assert.isTrue(
+              (yield* Queue.take(urls))?.startsWith("https://code.example.com/api/hooks/"),
+            );
+
+            yield* Ref.set(publicBaseUrl, "");
+            yield* Queue.offer(originChanged, undefined);
+            assert.isNull(yield* Queue.take(urls));
+          }),
+        ),
+      {
+        origin: {
+          current: Ref.get(publicBaseUrl).pipe(
+            Effect.flatMap((url) =>
+              ScheduledTaskService.resolveWebhookOrigin({
+                publicBaseUrl: url,
+                readRelayHookBaseUrl: Effect.succeed(null),
+              }),
+            ),
+          ),
+          changes: Stream.fromQueue(originChanged),
+        },
+      },
+    );
+  }),
 );
 
 it.effect("answers not found for a wrong token or unknown hook without logging", () =>

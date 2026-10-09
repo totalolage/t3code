@@ -231,6 +231,7 @@ export const make = Effect.gen(function* () {
       storageCleanup: true,
       projectWorktreeCleanup: true,
       worktreesDirectory: true,
+      webhookPublicBaseUrl: true,
       threadRestartContinuation: true,
       projectSettingsOverrides: true,
       threadSnooze: true,

@@ -119,6 +119,7 @@ import * as McpOAuth from "./auth/McpOAuth.ts";
 import * as McpOAuthHttp from "./auth/mcpOAuthHttp.ts";
 import {
   relayHookBaseUrl,
+  resolveWebhookOrigin,
   ScheduledTaskWebhookOrigin,
 } from "./scheduledTasks/ScheduledTaskService.ts";
 import {
@@ -448,29 +449,40 @@ const layerCloudManagedEndpointRuntime = Layer.mergeAll(
   ),
 );
 
-// Webhook URLs go through the relay only when the managed tunnel it forwards
-// to is configured; otherwise clients show the environment-relative path.
+// Webhook URLs use the configured public base URL, else the relay when the
+// managed tunnel it forwards to is configured; otherwise clients show the
+// environment-relative path.
 const layerScheduledTaskWebhookOrigin = Layer.effect(
   ScheduledTaskWebhookOrigin,
   Effect.gen(function* () {
     const secrets = yield* ServerSecretStore.ServerSecretStore;
-    // The reference holds an effect so each read sees the current link state.
-    return Effect.gen(function* () {
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const readRelayHookBaseUrl = Effect.gen(function* () {
       const [relayUrl, tunnelConfig] = yield* Effect.all([
         secrets.get(RELAY_URL_SECRET),
         secrets.get(CLOUD_ENDPOINT_RUNTIME_CONFIG),
       ]).pipe(Effect.orElseSucceed(() => [Option.none(), Option.none()] as const));
-      if (Option.isNone(relayUrl) || Option.isNone(tunnelConfig)) {
-        return { relayHookBaseUrl: null };
-      }
+      if (Option.isNone(relayUrl) || Option.isNone(tunnelConfig)) return null;
       const config = decodeRuntimeConfig(new TextDecoder().decode(tunnelConfig.value));
-      return {
-        relayHookBaseUrl: relayHookBaseUrl({
-          relayUrl: new TextDecoder().decode(relayUrl.value),
-          tunnelName: Option.isSome(config) ? config.value.tunnelName : undefined,
-        }),
-      };
+      return relayHookBaseUrl({
+        relayUrl: new TextDecoder().decode(relayUrl.value),
+        tunnelName: Option.isSome(config) ? config.value.tunnelName : undefined,
+      });
     });
+    return {
+      current: Effect.gen(function* () {
+        const publicBaseUrl = yield* settings.getSettings.pipe(
+          Effect.map((current) => current.webhookPublicBaseUrl),
+          Effect.orElseSucceed(() => ""),
+        );
+        return yield* resolveWebhookOrigin({ publicBaseUrl, readRelayHookBaseUrl });
+      }),
+      changes: settings.streamChanges.pipe(
+        Stream.map((current) => current.webhookPublicBaseUrl),
+        Stream.changes,
+        Stream.as(undefined),
+      ),
+    };
   }),
 );
 

@@ -526,6 +526,37 @@ export const ServiceUpdateRepository = Schema.String.check(
 );
 export type ServiceUpdateRepository = typeof ServiceUpdateRepository.Type;
 
+/**
+ * The base external senders use to reach this environment's HTTP server
+ * directly, such as `https://code.example.com` or `https://example.com/t3`
+ * behind a proxy prefix. Returns it without a trailing slash, or null unless it
+ * is an absolute https URL without credentials, query, or fragment. Plain http
+ * is refused because webhook URLs carry their secret token in the path.
+ */
+export function normalizeWebhookPublicBaseUrl(value: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "") return null;
+  if (url.search !== "" || url.hash !== "") return null;
+  return `${url.origin}${url.pathname.replace(/\/+$/u, "")}`;
+}
+
+/** Empty when unset; see `normalizeWebhookPublicBaseUrl` for what is accepted. */
+export const WebhookPublicBaseUrl = TrimmedString.check(
+  Schema.isMaxLength(2048),
+  Schema.makeFilter(
+    (value) =>
+      value === "" ||
+      normalizeWebhookPublicBaseUrl(value) !== null ||
+      "Use an absolute https:// URL without credentials, query, or fragment.",
+  ),
+);
+export type WebhookPublicBaseUrl = typeof WebhookPublicBaseUrl.Type;
+
 /** USD per million tokens. Omitted cache rates use the input rate. */
 export const UsageModelPriceOverride = Schema.Struct({
   inputCostPerMillionTokens: UsageModelTokenPrice,
@@ -1282,6 +1313,12 @@ export const ServerSettings = Schema.Struct({
   serviceUpdateRepository: ServiceUpdateRepository.pipe(
     Schema.withDecodingDefault(Effect.succeed("" as const)),
   ),
+  /**
+   * Where external senders reach this environment directly. When set, webhook
+   * task URLs use it instead of T3 Connect, which then neither holds nor
+   * retries their requests.
+   */
+  webhookPublicBaseUrl: WebhookPublicBaseUrl.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   // Retain the update-era key; recovery now needs an environment-owned opt-in.
   continueThreadsAfterServerUpdate: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
@@ -1687,6 +1724,7 @@ export const ServerSettingsPatch = Schema.Struct({
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   serviceUpdateRepository: Schema.optionalKey(ServiceUpdateRepository),
+  webhookPublicBaseUrl: Schema.optionalKey(WebhookPublicBaseUrl),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   projectAgentBrowserAccessOverrides: Schema.optionalKey(

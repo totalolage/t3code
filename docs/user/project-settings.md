@@ -69,10 +69,21 @@ Leaving an edited form asks before discarding unsaved changes.
 
 In **Settings → Scheduled tasks**, choose **On webhook**
 as a task's schedule to run it whenever another service calls its URL, such as
-GitHub on a new pull request or a CI job that failed. A public URL needs a
-[T3 Connect](remote-access.md) managed tunnel; after you save the task, copy
-its URL from the editor. Without one, the editor shows only the URL's path.
-**Rotate** replaces the URL and the old one stops working.
+GitHub on a new pull request or a CI job that failed. After you save the
+task, copy its URL from the editor. **Rotate** replaces the URL and the old one
+stops working.
+
+A full URL senders can reach comes from one of two places:
+
+- **Public base URL**, under **Webhooks** in **Settings → Scheduled tasks**:
+  the `https://` address where this environment is already reachable, such as
+  your own domain behind a reverse proxy or tunnel. Include any path prefix
+  the proxy adds. When set, it replaces the T3 Connect URL. If you are
+  connected through such an address, the setting offers it with **Use it**.
+- A [T3 Connect](remote-access.md) managed tunnel, used when no public base
+  URL is set.
+
+With neither, the editor shows only the URL's path.
 
 The prompt decides what the agent sees. Placeholders pull values out of the
 request: `{{body.path}}` for a JSON or form field, `{{headers.name}}`,
@@ -95,8 +106,9 @@ redeliver from the sender, such as GitHub's **Recent Deliveries**, once it is
 back. To have T3 Connect keep requests instead, turn on **Hold webhooks while
 offline** in **Settings → Connections**. T3 Connect then stores requests to a
 T3 Connect URL for up to 24 hours and delivers them when the environment
-returns. Leave it off if you don't want request bodies stored outside your
-machine. To skip requests that waited too long, set **Skip requests older
+returns. Requests to a public base URL never pass through T3 Connect, so leave
+that setting empty if you want holding. Leave holding off if you don't want
+request bodies stored outside your machine. To skip requests that waited too long, set **Skip requests older
 than** on the task.
 
 ## Defaults and inheritance
