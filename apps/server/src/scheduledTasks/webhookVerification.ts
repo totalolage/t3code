@@ -100,7 +100,15 @@ function verifyStandardWebhooks(input: {
   const id = input.headers["webhook-id"]?.trim();
   const timestamp = input.headers["webhook-timestamp"]?.trim();
   const signatures = input.headers["webhook-signature"];
-  if (!id || timestamp === undefined || !/^\d+$/.test(timestamp) || signatures === undefined) {
+  // A period in the id would blur where the id ends and the timestamp begins,
+  // letting one signature stand for a different id, timestamp and body.
+  if (
+    !id ||
+    id.includes(".") ||
+    timestamp === undefined ||
+    !/^\d+$/.test(timestamp) ||
+    signatures === undefined
+  ) {
     return REJECTED;
   }
   const receivedAtSeconds = Math.floor(input.receivedAtMs / 1000);

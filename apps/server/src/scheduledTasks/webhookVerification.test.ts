@@ -220,6 +220,28 @@ describe("verifyWebhookSignature with Standard Webhooks", () => {
     }
   });
 
+  it("rejects an id with a period, which could shift the signed boundaries", () => {
+    // Signed as id "msg_example", timestamp 1600000000, body "1800000000.1",
+    // then replayed as id "msg_example.1600000000", timestamp 1800000000, body "1".
+    const signed = posthogSign({
+      secret: vector.secret,
+      id: "msg_example",
+      timestamp: 1_600_000_000,
+      body: "1800000000.1",
+    });
+    assert.isFalse(
+      verify({
+        headers: {
+          ...signed,
+          "webhook-id": "msg_example.1600000000",
+          "webhook-timestamp": "1800000000",
+        },
+        body: new TextEncoder().encode("1"),
+        receivedAtMs: 1_800_000_000_000,
+      }).verified,
+    );
+  });
+
   it("rejects a secret that is not base64 or is shorter than 24 bytes", () => {
     assert.isFalse(verify({ secret: "shared-secret" }).verified);
     assert.isFalse(
