@@ -119,12 +119,17 @@ export function resolveWebhookOrigin(input: {
   );
 }
 
-export class ScheduledTaskWebhookOrigin extends Context.Reference<Effect.Effect<WebhookOrigin>>(
-  "t3/scheduledTasks/ScheduledTaskWebhookOrigin",
-  {
-    defaultValue: () => Effect.succeed({ hookBaseUrl: null, source: "t3-connect" }),
-  },
-) {}
+export class ScheduledTaskWebhookOrigin extends Context.Reference<{
+  /** Re-read on every list, so it sees the current settings and link state. */
+  readonly current: Effect.Effect<WebhookOrigin>;
+  /** Emits when `current` may have changed, so live task lists re-emit their URLs. */
+  readonly changes: Stream.Stream<void>;
+}>("t3/scheduledTasks/ScheduledTaskWebhookOrigin", {
+  defaultValue: () => ({
+    current: Effect.succeed({ hookBaseUrl: null, source: "t3-connect" }),
+    changes: Stream.empty,
+  }),
+}) {}
 
 /** A queued webhook delivery that no longer applies to its task; `reason` is shown in the delivery log. */
 class WebhookDeliverySkipped extends Data.TaggedError("WebhookDeliverySkipped")<{
@@ -422,7 +427,8 @@ export const layer = Layer.effect(
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const secretRequests = yield* SecretRequests.SecretRequests;
     const scheduler = yield* Scheduler.Scheduler;
-    const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
+    const webhookOrigin = yield* ScheduledTaskWebhookOrigin;
+    const readWebhookOrigin = webhookOrigin.current;
     // Webhook deliveries for one task dispatch in arrival order rather than
     // being dropped while an earlier delivery is still dispatching.
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
@@ -438,6 +444,10 @@ export const layer = Layer.effect(
     // latest signal — an unbounded backlog would just grow memory.
     const changesPubSub = yield* PubSub.sliding<void>(1);
     const notifyChanged = PubSub.publish(changesPubSub, undefined).pipe(Effect.asVoid);
+    yield* webhookOrigin.changes.pipe(
+      Stream.runForEach(() => notifyChanged),
+      Effect.forkScoped,
+    );
 
     const selectAllRows = () => sql<ScheduledTaskRow>`
       SELECT

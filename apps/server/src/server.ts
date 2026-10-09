@@ -469,14 +469,20 @@ const layerScheduledTaskWebhookOrigin = Layer.effect(
         tunnelName: Option.isSome(config) ? config.value.tunnelName : undefined,
       });
     });
-    // The reference holds an effect so each read sees the current settings and link state.
-    return Effect.gen(function* () {
-      const publicBaseUrl = yield* settings.getSettings.pipe(
-        Effect.map((current) => current.webhookPublicBaseUrl),
-        Effect.orElseSucceed(() => ""),
-      );
-      return yield* resolveWebhookOrigin({ publicBaseUrl, readRelayHookBaseUrl });
-    });
+    return {
+      current: Effect.gen(function* () {
+        const publicBaseUrl = yield* settings.getSettings.pipe(
+          Effect.map((current) => current.webhookPublicBaseUrl),
+          Effect.orElseSucceed(() => ""),
+        );
+        return yield* resolveWebhookOrigin({ publicBaseUrl, readRelayHookBaseUrl });
+      }),
+      changes: settings.streamChanges.pipe(
+        Stream.map((current) => current.webhookPublicBaseUrl),
+        Stream.changes,
+        Stream.as(undefined),
+      ),
+    };
   }),
 );
 
