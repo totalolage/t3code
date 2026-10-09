@@ -1,6 +1,7 @@
 import {
   CommandId,
   MessageId,
+  normalizeWebhookPublicBaseUrl,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ScheduledTask,
   ScheduledTaskError,
@@ -68,11 +69,13 @@ const WEBHOOK_MAX_QUEUED_PER_TASK = 20;
 const WEBHOOK_RATE_LIMIT_PER_MINUTE = 60;
 
 /**
- * Where a webhook task's public URL points: `${relayHookBaseUrl}/${taskId}/${token}`.
- * Null when the environment has no managed tunnel on T3 Connect; clients then show the path.
+ * Where a webhook task's full URL points: `${hookBaseUrl}/${taskId}/${token}`.
+ * Null when the environment has neither a public base URL nor a managed tunnel
+ * on T3 Connect; clients then show the path.
  */
-interface WebhookOrigin {
-  readonly relayHookBaseUrl: string | null;
+export interface WebhookOrigin {
+  readonly hookBaseUrl: string | null;
+  readonly source: "t3-connect" | "public-base-url";
 }
 
 const ENDPOINT_KEY = /^[0-9a-f]{16}$/;
@@ -94,10 +97,32 @@ export function relayHookBaseUrl(input: {
   return `${relayUrl}/v1/hooks/${endpointKey}`;
 }
 
+/**
+ * Picks the hook base for webhook URLs. A public base URL the user configured
+ * wins over T3 Connect: they set it deliberately, even though only the relay
+ * holds requests while the environment is offline.
+ */
+export function resolveWebhookOrigin(input: {
+  readonly publicBaseUrl: string;
+  /** Read only when no public base URL is configured. */
+  readonly readRelayHookBaseUrl: Effect.Effect<string | null>;
+}): Effect.Effect<WebhookOrigin> {
+  const publicBaseUrl = normalizeWebhookPublicBaseUrl(input.publicBaseUrl);
+  if (publicBaseUrl !== null) {
+    return Effect.succeed({
+      hookBaseUrl: `${publicBaseUrl}${WEBHOOK_ROUTE_PREFIX}`,
+      source: "public-base-url",
+    });
+  }
+  return input.readRelayHookBaseUrl.pipe(
+    Effect.map((hookBaseUrl) => ({ hookBaseUrl, source: "t3-connect" as const })),
+  );
+}
+
 export class ScheduledTaskWebhookOrigin extends Context.Reference<Effect.Effect<WebhookOrigin>>(
   "t3/scheduledTasks/ScheduledTaskWebhookOrigin",
   {
-    defaultValue: () => Effect.succeed({ relayHookBaseUrl: null }),
+    defaultValue: () => Effect.succeed({ hookBaseUrl: null, source: "t3-connect" }),
   },
 ) {}
 
@@ -300,10 +325,11 @@ function webhookEndpoint(
   origin: WebhookOrigin | null,
 ): ScheduledTask["webhook"] {
   if (row.webhook_token === null) return undefined;
-  const base = origin?.relayHookBaseUrl ?? null;
+  const base = origin?.hookBaseUrl ?? null;
   return {
     path: webhookPath(row.task_id, row.webhook_token),
     url: base === null ? null : `${base}/${encodeURIComponent(row.task_id)}/${row.webhook_token}`,
+    ...(base === null ? {} : { urlSource: origin!.source }),
     hasSecret: row.webhook_secret !== null,
   };
 }

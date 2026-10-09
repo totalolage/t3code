@@ -28,6 +28,7 @@ import {
   MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
   MIN_SCHEDULED_TASK_INTERVAL_MS,
   ProviderInstanceId,
+  normalizeWebhookPublicBaseUrl,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
 import {
@@ -62,6 +63,12 @@ import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import { readEnvironmentScope } from "~/state/session";
 import { useSettingsScope } from "./SettingsScopeContext";
+import { searchableSetting } from "./settingsSearch";
+import {
+  useScopedSettings,
+  useScopedSettingsMixed,
+  useUpdateScopedSettings,
+} from "./useScopedSettings";
 import {
   WEBHOOK_SIGNATURE_DEFAULTS,
   matchesScheduledTaskScope,
@@ -95,6 +102,7 @@ import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
+  SettingResetButton,
   SettingsPageContainer,
   SettingsRow,
   SettingsSection,
@@ -304,6 +312,7 @@ export function ScheduledTasksSettings(target: {
           </div>
         )}
       </SettingsSection>
+      {scope.kind !== "unavailable" && environments.length > 0 ? <WebhookSettingsSection /> : null}
       {editor ? (
         <ScheduledTaskEditorDialog
           key={`${editor.environmentId}:${editor.task?.id ?? "new"}`}
@@ -313,6 +322,75 @@ export function ScheduledTasksSettings(target: {
         />
       ) : null}
     </SettingsPageContainer>
+  );
+}
+
+/** Environment-wide webhook settings, hidden until every selected server supports them. */
+function WebhookSettingsSection() {
+  const { connectedEnvironments, targets } = useSettingsScope();
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  const mixed = useScopedSettingsMixed(["webhookPublicBaseUrl"]);
+  const edited = useRef(false);
+  const [error, setError] = useState<string | null>(null);
+  if (
+    connectedEnvironments.length === 0 ||
+    connectedEnvironments.some(
+      (environment) =>
+        environment.serverConfig?.environment.capabilities.webhookPublicBaseUrl !== true,
+    )
+  )
+    return null;
+  const scopeKey = targets.map((target) => target.environmentId).join(",");
+
+  return (
+    <SettingsSection title="Webhooks">
+      <SettingsRow
+        {...searchableSetting("scheduled-tasks-webhook-public-base-url")}
+        description="Address senders use to reach this environment, such as https://code.example.com behind your own reverse proxy or tunnel. It replaces the T3 Connect address, so requests fail while this environment is offline instead of being held and retried. Leave empty to use T3 Connect."
+        status={error}
+        serverScoped
+        settingKeys={["webhookPublicBaseUrl"]}
+        resetAction={
+          mixed || settings.webhookPublicBaseUrl !== "" ? (
+            <SettingResetButton
+              label="public base URL"
+              onClick={() => {
+                setError(null);
+                updateSettings({ webhookPublicBaseUrl: "" });
+              }}
+            />
+          ) : null
+        }
+        control={
+          <Input
+            key={`${scopeKey}:${mixed}:${settings.webhookPublicBaseUrl}`}
+            aria-label="Public base URL"
+            aria-invalid={error !== null || undefined}
+            type="url"
+            autoCapitalize="none"
+            spellCheck={false}
+            placeholder={mixed ? "Mixed" : "Use T3 Connect"}
+            defaultValue={mixed ? "" : settings.webhookPublicBaseUrl}
+            onChange={() => {
+              edited.current = true;
+              setError(null);
+            }}
+            onBlur={(event) => {
+              const raw = event.target.value.trim();
+              const value = raw === "" ? "" : normalizeWebhookPublicBaseUrl(raw);
+              if (value === null) {
+                setError("Use an absolute https:// URL without credentials, query, or fragment.");
+                return;
+              }
+              if (edited.current && (mixed || value !== settings.webhookPublicBaseUrl))
+                updateSettings({ webhookPublicBaseUrl: value });
+              edited.current = false;
+            }}
+          />
+        }
+      />
+    </SettingsSection>
   );
 }
 
@@ -743,7 +821,9 @@ function WebhookEndpointField({
         </Button>
       </div>
       {note !== null ? <p className="text-xs text-muted-foreground">{note}</p> : null}
-      {endpoint.url !== null ? <WebhookDeliveryMode environmentId={environmentId} /> : null}
+      {endpoint.url !== null && endpoint.urlSource !== "public-base-url" ? (
+        <WebhookDeliveryMode environmentId={environmentId} />
+      ) : null}
     </div>
   );
 }

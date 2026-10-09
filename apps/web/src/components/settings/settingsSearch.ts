@@ -153,6 +153,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["worktree location folder directory path drive external disk"],
   },
   {
+    id: "scheduled-tasks-webhook-public-base-url",
+    title: "Public base URL",
+    to: "/settings/scheduled-tasks",
+    scope: "environment-defaults",
+    searchTerms: ["webhook public url address reverse proxy tunnel domain https t3 connect"],
+  },
+  {
     id: "storage-artifacts",
     title: "Artifacts and logs",
     to: "/settings/storage",
