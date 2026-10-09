@@ -15,6 +15,7 @@ import {
   type ScheduledTaskListWebhookDeliveriesInput,
   type ScheduledTaskListWebhookDeliveriesResult,
   type ScheduledTaskRotateWebhookTokenInput,
+  type ScheduledTaskWebhookDeliveryIdSource,
   type ScheduledTaskWebhookDeliveryOutcome,
   type ScheduledTaskListResult,
   type ScheduledTaskMutationResult,
@@ -53,6 +54,7 @@ import {
   renderWebhookPrompt,
   type WebhookRequest,
 } from "./webhookTemplate.ts";
+import { webhookDeliveryId, webhookDeliveryTime } from "./webhookReplay.ts";
 import {
   constantTimeEquals,
   standardWebhooksKey,
@@ -170,6 +172,7 @@ export type WebhookDeliveryOutcome =
   | "disabled"
   | "rejected_signature"
   | "expired"
+  | "invalid_request"
   | "not_found"
   | "error";
 
@@ -188,7 +191,9 @@ export type WebhookTriggerResult =
       /** Too many requests to this hook, or too many runs already waiting. */
       readonly outcome: "rate_limited" | "queue_full";
     }
-  | { readonly _tag: "expired" };
+  | { readonly _tag: "expired" }
+  /** Replay protection is on and the request lacks the id or timestamp it names. */
+  | { readonly _tag: "invalid_request" };
 
 const decodeTask = Schema.decodeUnknownEffect(ScheduledTask);
 const decodeTaskId = Schema.decodeUnknownOption(ScheduledTaskId);
@@ -436,6 +441,12 @@ export const layer = Layer.effect(
     // Webhook deliveries for one task dispatch in arrival order rather than
     // being dropped while an earlier delivery is still dispatching.
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
+      new Map(),
+    );
+    // Deliveries for one task are admitted one at a time, so a request that
+    // finds a delivery id claimed sees the claim only once the request that
+    // made it has settled whether it runs or gives the claim back.
+    const webhookAdmissions = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
       new Map(),
     );
     // Keyed by task id and creation time, so deliveries of a deleted task that
@@ -1061,6 +1072,17 @@ export const layer = Layer.effect(
         // Keep the existing next_run_at when the schedule itself is untouched:
         // editing a title or prompt must not postpone (or resurrect) a due
         // run — only schedule/enabled changes restart the clock.
+        // Replay protection is kept when a save omits it, so a client that
+        // predates it cannot switch it off by editing the task.
+        const existingWebhook =
+          existingTask?.schedule.type === "webhook" ? existingTask.schedule : null;
+        const deliveryId = (
+          source: ScheduledTaskWebhookDeliveryIdSource | null | undefined,
+        ): ScheduledTaskWebhookDeliveryIdSource | null => {
+          if (source === undefined) return existingWebhook?.deliveryId ?? null;
+          if (source === null || source.type === "body") return source;
+          return { type: "header", name: source.name.toLowerCase() };
+        };
         const schedule: ScheduledTask["schedule"] =
           input.schedule.type === "webhook"
             ? {
@@ -1077,6 +1099,11 @@ export const layer = Layer.effect(
                           prefix: input.schedule.signature.prefix,
                         },
                 maxDeliveryAgeMinutes: input.schedule.maxDeliveryAgeMinutes ?? null,
+                deliveryId: deliveryId(input.schedule.deliveryId),
+                deliveryTimestamp:
+                  input.schedule.deliveryTimestamp === undefined
+                    ? (existingWebhook?.deliveryTimestamp ?? null)
+                    : input.schedule.deliveryTimestamp,
               }
             : input.schedule;
         const webhook =
@@ -1200,11 +1227,13 @@ export const layer = Layer.effect(
               next.delete(input.id);
               return next;
             }),
-            Ref.update(webhookPermits, (permits) => {
-              const next = new Map(permits);
-              next.delete(input.id);
-              return next;
-            }),
+            ...[webhookPermits, webhookAdmissions].map((semaphores) =>
+              Ref.update(semaphores, (permits) => {
+                const next = new Map(permits);
+                next.delete(input.id);
+                return next;
+              }),
+            ),
           ]),
         ),
         Effect.andThen(notifyChanged),
@@ -1411,12 +1440,15 @@ export const layer = Layer.effect(
         },
       );
 
-    const webhookPermit = (id: ScheduledTaskId) =>
+    const webhookPermit = (
+      id: ScheduledTaskId,
+      semaphores: Ref.Ref<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>> = webhookPermits,
+    ) =>
       Effect.gen(function* () {
-        const existing = (yield* Ref.get(webhookPermits)).get(id);
+        const existing = (yield* Ref.get(semaphores)).get(id);
         if (existing !== undefined) return existing;
         const created = yield* Semaphore.make(1);
-        return yield* Ref.modify(webhookPermits, (permits) => {
+        return yield* Ref.modify(semaphores, (permits) => {
           const raced = permits.get(id);
           return raced === undefined
             ? [created, new Map(permits).set(id, created)]
@@ -1518,45 +1550,60 @@ export const layer = Layer.effect(
             : `delivery:relay:${request.relayDeliveryId}`,
         );
         // A held request may already have reached this environment directly
-        // before a timeout; it runs once. Claimed in its own table, kept longer
-        // than the relay holds a request, because the delivery log is trimmed.
-        // A rate-limited delivery stays held on the relay, so it must give up
-        // its claim or the next pass would treat it as already delivered.
-        const releaseClaim = <A>(result: A) =>
-          request.relayDeliveryId === undefined
-            ? Effect.succeed(result)
-            : sql`
+        // before a timeout; it runs once. So does a request carrying a sender
+        // delivery id this task already accepted. Claims live in their own
+        // table, kept longer than the relay holds a request or a delivery
+        // timestamp may be off, because the delivery log is trimmed.
+        // A rate-limited delivery stays held on the relay, and a sender retries
+        // a refused one, so it must give up its claims or the retry would be
+        // treated as already delivered.
+        const claims: Array<string> = [];
+        const claim = (key: string) =>
+          Effect.gen(function* () {
+            const claimed = yield* sql<{ relay_delivery_id: string }>`
+              INSERT INTO scheduled_task_webhook_relay_deliveries
+                (relay_delivery_id, task_id, seen_at)
+              VALUES (${key}, ${task.id}, ${iso(now)})
+              ON CONFLICT (relay_delivery_id) DO NOTHING
+              RETURNING relay_delivery_id
+            `.pipe(
+              Effect.mapError((cause) =>
+                taskError("Could not record webhook delivery.", { taskId: task.id, cause }),
+              ),
+            );
+            if (claimed.length === 0) return false;
+            claims.push(key);
+            // Older claims can no longer be replayed by the relay, and a
+            // request this old fails any delivery timestamp check.
+            yield* sql`
+              DELETE FROM scheduled_task_webhook_relay_deliveries
+              WHERE seen_at < ${iso(DateTime.subtract(now, { hours: 48 }))}
+            `.pipe(Effect.ignore);
+            return true;
+          });
+        const releaseClaims = Effect.suspend(() =>
+          Effect.forEach(
+            claims,
+            (key) =>
+              sql`
                 DELETE FROM scheduled_task_webhook_relay_deliveries
-                WHERE relay_delivery_id = ${request.relayDeliveryId}
-              `.pipe(Effect.ignore, Effect.as(result));
+                WHERE relay_delivery_id = ${key}
+              `.pipe(Effect.ignore),
+            { discard: true },
+          ),
+        );
+        const releaseClaim = <A>(result: A) => releaseClaims.pipe(Effect.as(result));
         // From the claim until the run is forked nothing may interrupt: a
         // request dropped in between (the relay hangs up after its timeout)
         // would leave a claimed delivery that never runs, or a queue slot
         // that is never released. Everything in here is local and quick.
+        const admission = yield* webhookPermit(task.id, webhookAdmissions);
         return yield* Effect.uninterruptible(
           Effect.gen(function* () {
-            if (request.relayDeliveryId !== undefined) {
-              const claimed = yield* sql<{ relay_delivery_id: string }>`
-                INSERT INTO scheduled_task_webhook_relay_deliveries
-                  (relay_delivery_id, task_id, seen_at)
-                VALUES (${request.relayDeliveryId}, ${task.id}, ${iso(now)})
-                ON CONFLICT (relay_delivery_id) DO NOTHING
-                RETURNING relay_delivery_id
-              `.pipe(
-                Effect.mapError((cause) =>
-                  taskError("Could not record webhook delivery.", { taskId: task.id, cause }),
-                ),
-              );
-              if (claimed.length === 0) {
-                // A held request this environment already ran: accepted, not run twice.
-                yield* observe("duplicate");
-                return { _tag: "accepted" as const, deliveryId, outcome: "duplicate" as const };
-              }
-              // Older claims can no longer be replayed by the relay.
-              yield* sql`
-                DELETE FROM scheduled_task_webhook_relay_deliveries
-                WHERE seen_at < ${iso(DateTime.subtract(now, { hours: 48 }))}
-              `.pipe(Effect.ignore);
+            if (request.relayDeliveryId !== undefined && !(yield* claim(request.relayDeliveryId))) {
+              // A held request this environment already ran: accepted, not run twice.
+              yield* observe("duplicate");
+              return { _tag: "accepted" as const, deliveryId, outcome: "duplicate" as const };
             }
             const log = (
               outcome: ScheduledTaskWebhookDeliveryOutcome,
@@ -1623,6 +1670,64 @@ export const layer = Layer.effect(
               return { _tag: "expired" as const };
             }
 
+            // Replay protection reads the request only once it is authenticated,
+            // so an unauthenticated request can never claim a delivery id.
+            const invalid = (error: string) =>
+              Effect.gen(function* () {
+                yield* log("invalid_request", { signatureVerified: signature !== null, error });
+                yield* observe("invalid_request");
+                return { _tag: "invalid_request" as const };
+              });
+            const deliveryTimestamp = schedule.deliveryTimestamp ?? null;
+            if (deliveryTimestamp !== null) {
+              const sentAt = webhookDeliveryTime(deliveryTimestamp, request);
+              if (sentAt === undefined) {
+                return yield* invalid(
+                  `The body has no readable timestamp at ${deliveryTimestamp.path}.`,
+                );
+              }
+              if (
+                Math.abs(DateTime.toEpochMillis(receivedAt) - sentAt) >
+                deliveryTimestamp.toleranceSeconds * 1000
+              ) {
+                yield* log("expired", {
+                  signatureVerified: signature !== null,
+                  error: `The delivery timestamp is more than ${deliveryTimestamp.toleranceSeconds} seconds from when it arrived.`,
+                });
+                yield* observe("expired");
+                return { _tag: "expired" as const };
+              }
+            }
+            const deliveryIdSource = schedule.deliveryId ?? null;
+            if (deliveryIdSource !== null) {
+              const senderDeliveryId = webhookDeliveryId(deliveryIdSource, request);
+              if (senderDeliveryId === undefined) {
+                return yield* invalid(
+                  deliveryIdSource.type === "header"
+                    ? `The request has no delivery id in the ${deliveryIdSource.name} header.`
+                    : `The body has no delivery id at ${deliveryIdSource.path}.`,
+                );
+              }
+              const digest = yield* crypto
+                .digest("SHA-256", new TextEncoder().encode(senderDeliveryId))
+                .pipe(
+                  Effect.mapError((cause) =>
+                    taskError("Could not record webhook delivery.", { taskId: task.id, cause }),
+                  ),
+                );
+              // Relay ids are UUIDs, so the prefix keeps the two apart, and the
+              // hash bounds the key whatever the sender sends.
+              const key = `sender:${task.id}:${Buffer.from(digest).toString("hex")}`;
+              if (!(yield* claim(key))) {
+                yield* log("duplicate", {
+                  signatureVerified: signature !== null,
+                  error: "This delivery id was already accepted, so it did not run again.",
+                });
+                yield* observe("duplicate");
+                return { _tag: "accepted" as const, deliveryId, outcome: "duplicate" as const };
+              }
+            }
+
             const rendered = renderWebhookPrompt(task.prompt, request);
             // A provider refuses a turn this long, so it is not started. The
             // delivery is not retryable, so the claim is kept. Providers trim
@@ -1668,7 +1773,7 @@ export const layer = Layer.effect(
               signatureVerified: signature !== null,
               missing: rendered.missing,
               renderedPrompt: rendered.prompt,
-            }).pipe(Effect.onError(() => release));
+            }).pipe(Effect.onError(() => Effect.andThen(release, releaseClaims)));
             yield* observe("accepted");
             const permit = yield* webhookPermit(task.id);
             const runOutcome = (outcome: "started" | "skipped" | "failed") =>
@@ -1711,7 +1816,7 @@ export const layer = Layer.effect(
               Effect.forkIn(serviceScope),
             );
             return { _tag: "accepted" as const, deliveryId, outcome: "accepted" as const };
-          }),
+          }).pipe(admission.withPermits(1)),
         );
       });
 

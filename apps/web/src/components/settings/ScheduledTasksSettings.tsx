@@ -28,6 +28,7 @@ import type {
 import { DEFAULT_WEBHOOK_PROMPT } from "@t3tools/client-runtime/scheduled-task-webhook";
 import {
   MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
+  MAX_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS,
   MIN_SCHEDULED_TASK_INTERVAL_MS,
   ProviderInstanceId,
   normalizeWebhookPublicBaseUrl,
@@ -75,11 +76,16 @@ import {
   useUpdateScopedSettings,
 } from "./useScopedSettings";
 import {
+  WEBHOOK_REPLAY_DEFAULTS,
   WEBHOOK_SIGNATURE_DEFAULTS,
+  webhookReplayDraftProblem,
+  defaultDeliveryIdHeader,
+  withDeliveryIdMode,
   matchesScheduledTaskScope,
   scheduleFromDraft,
   scheduledTaskDefaultModel,
   taskToDraft,
+  type DeliveryIdMode,
   type DraftState,
   type ScheduleMode,
   type WorkspaceMode,
@@ -149,6 +155,7 @@ const EMPTY_DRAFT: DraftState = {
   ...WEBHOOK_SIGNATURE_DEFAULTS,
   signatureSecret: "",
   maxDeliveryAgeMinutes: "",
+  ...WEBHOOK_REPLAY_DEFAULTS,
 };
 
 /** Labelled field: a caption sitting above its control. */
@@ -224,6 +231,12 @@ export function relativeLabel(value: string | null): string {
   return `in ${Math.round(hours / 24)}d`;
 }
 
+const DELIVERY_ID_MODE_LABELS: Record<DeliveryIdMode, string> = {
+  off: "Off",
+  header: "Request header",
+  body: "Body field",
+};
+
 const DELIVERY_OUTCOME_LABELS: Record<ScheduledTaskWebhookDeliveryOutcome, string> = {
   accepted: "Ran",
   dispatch_failed: "Run failed",
@@ -231,6 +244,8 @@ const DELIVERY_OUTCOME_LABELS: Record<ScheduledTaskWebhookDeliveryOutcome, strin
   disabled: "Task paused",
   rate_limited: "Rate limited",
   expired: "Too old",
+  duplicate: "Duplicate",
+  invalid_request: "Invalid request",
 };
 
 const SIGNATURE_SCHEME_LABELS: Record<ScheduledTaskWebhookSignature["scheme"], string> = {
@@ -240,6 +255,7 @@ const SIGNATURE_SCHEME_LABELS: Record<ScheduledTaskWebhookSignature["scheme"], s
 
 function deliveryOutcomeVariant(outcome: ScheduledTaskWebhookDeliveryOutcome) {
   if (outcome === "accepted") return "success";
+  if (outcome === "duplicate") return "info";
   if (outcome === "disabled" || outcome === "rate_limited" || outcome === "expired") {
     return "warning";
   }
@@ -989,6 +1005,11 @@ function ScheduledTaskEditorDialog({
       reportFailure("Scheduled task is incomplete", "Add a title, prompt, project, and model.");
       return;
     }
+    const replayProblem = webhookReplayDraftProblem(draft);
+    if (replayProblem !== null) {
+      reportFailure("Replay protection is incomplete", replayProblem);
+      return;
+    }
     const schedule = scheduleFromDraft(draft);
     if (schedule === null) {
       reportFailure(
@@ -1432,6 +1453,102 @@ function ScheduledTaskEditorDialog({
                       ) : null}
                     </div>
                   ) : null}
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="Delivery id" hint="optional" htmlFor="scheduled-task-delivery-id">
+                      <Select
+                        value={draft.deliveryIdMode}
+                        onValueChange={(value) =>
+                          setDraft((current) => withDeliveryIdMode(current, value))
+                        }
+                      >
+                        <SelectTrigger size="sm" id="scheduled-task-delivery-id">
+                          <SelectValue>{DELIVERY_ID_MODE_LABELS[draft.deliveryIdMode]}</SelectValue>
+                        </SelectTrigger>
+                        <SelectPopup>
+                          <SelectItem value="off">{DELIVERY_ID_MODE_LABELS.off}</SelectItem>
+                          <SelectItem value="header">{DELIVERY_ID_MODE_LABELS.header}</SelectItem>
+                          <SelectItem value="body">{DELIVERY_ID_MODE_LABELS.body}</SelectItem>
+                        </SelectPopup>
+                      </Select>
+                    </Field>
+                    {draft.deliveryIdMode === "header" ? (
+                      <Field label="Header" htmlFor="scheduled-task-delivery-id-header">
+                        <Input
+                          id="scheduled-task-delivery-id-header"
+                          value={draft.deliveryIdHeader}
+                          placeholder={defaultDeliveryIdHeader(draft)}
+                          onChange={(event) =>
+                            setDraft((current) => ({
+                              ...current,
+                              deliveryIdHeader: event.target.value,
+                            }))
+                          }
+                        />
+                      </Field>
+                    ) : draft.deliveryIdMode === "body" ? (
+                      <Field label="Body field" htmlFor="scheduled-task-delivery-id-path">
+                        <Input
+                          id="scheduled-task-delivery-id-path"
+                          value={draft.deliveryIdPath}
+                          placeholder="event.id"
+                          onChange={(event) =>
+                            setDraft((current) => ({
+                              ...current,
+                              deliveryIdPath: event.target.value,
+                            }))
+                          }
+                        />
+                      </Field>
+                    ) : null}
+                    <Field
+                      label="Timestamp field"
+                      hint="optional"
+                      htmlFor="scheduled-task-delivery-timestamp"
+                    >
+                      <Input
+                        id="scheduled-task-delivery-timestamp"
+                        value={draft.deliveryTimestampPath}
+                        placeholder="sent_at"
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            deliveryTimestampPath: event.target.value,
+                          }))
+                        }
+                      />
+                    </Field>
+                    {draft.deliveryTimestampPath.trim() ? (
+                      <Field
+                        label="Tolerance"
+                        hint="seconds"
+                        htmlFor="scheduled-task-delivery-timestamp-tolerance"
+                      >
+                        <Input
+                          id="scheduled-task-delivery-timestamp-tolerance"
+                          type="number"
+                          nativeInput
+                          min={1}
+                          max={MAX_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS}
+                          value={draft.deliveryTimestampToleranceSeconds}
+                          onChange={(event) =>
+                            setDraft((current) => ({
+                              ...current,
+                              deliveryTimestampToleranceSeconds: event.target.value,
+                            }))
+                          }
+                        />
+                      </Field>
+                    ) : null}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    A delivery id accepted in the last 48 hours does not run again. An id in a
+                    header the signature does not cover, like GitHub's, only stops honest retries;
+                    Standard Webhooks' signed webhook-id or an id in the signed JSON body also stops
+                    replayed requests. Standard Webhooks already refuses requests older than 5
+                    minutes. For HMAC, the timestamp field refuses requests sent outside the
+                    tolerance, which stops older replays, and only means something when the
+                    signature covers it.
+                  </p>
                 </div>
               ) : draft.scheduleMode === "fixed" ? (
                 <div className="flex flex-wrap items-center gap-3">
