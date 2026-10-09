@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
@@ -56,7 +57,11 @@ const ScheduledTaskFixedTimeSchedule = Schema.Struct({
   description: "Run at a fixed local wall-clock time on selected weekdays.",
 });
 
-const ScheduledTaskWebhookSignatureFields = {
+const ScheduledTaskHmacSignatureFields = {
+  // Rows saved before Standard Webhooks support have no scheme; they are all HMAC.
+  scheme: Schema.Literal("hmac_sha256")
+    .annotate({ description: "HMAC-SHA256 over the raw body. The default when omitted." })
+    .pipe(Schema.withDecodingDefaultKey(Effect.succeed("hmac_sha256" as const))),
   header: TrimmedNonEmptyString.annotate({
     description: "Request header carrying the signature, such as x-hub-signature-256.",
   }),
@@ -68,10 +73,26 @@ const ScheduledTaskWebhookSignatureFields = {
   }),
 };
 
-/** HMAC-SHA256 over the raw request body. The secret is never part of the read model. */
-export const ScheduledTaskWebhookSignature = Schema.Struct(
-  ScheduledTaskWebhookSignatureFields,
-).annotate({ description: "Optional HMAC-SHA256 signature check over the raw request body." });
+const ScheduledTaskStandardWebhooksSignatureFields = {
+  scheme: Schema.Literal("standard_webhooks").annotate({
+    description:
+      "Standard Webhooks (standardwebhooks.com): webhook-id, webhook-timestamp and webhook-signature headers, as PostHog and Svix send. The secret is base64, optionally prefixed with whsec_.",
+  }),
+};
+
+/**
+ * How a webhook task checks a request's signature. The secret is never part of
+ * the read model.
+ */
+export const ScheduledTaskWebhookSignature = Schema.Union([
+  Schema.Struct(ScheduledTaskHmacSignatureFields).annotate({
+    description: "HMAC-SHA256 over the raw request body, in a header the sender names.",
+  }),
+  Schema.Struct(ScheduledTaskStandardWebhooksSignatureFields).annotate({
+    description:
+      "Standard Webhooks signature over the message id, timestamp and raw body. Requests more than 5 minutes from their timestamp are rejected.",
+  }),
+]).annotate({ description: "Optional signature check over the raw request body." });
 export type ScheduledTaskWebhookSignature = typeof ScheduledTaskWebhookSignature.Type;
 
 /** Matches how long the relay holds a request for an offline environment. */
@@ -96,22 +117,29 @@ const ScheduledTaskWebhookSchedule = Schema.Struct({
     "Run on each request to the task's webhook URL. The prompt may use {{body.path}}, {{headers.name}}, {{query.name}}, {{body}} and {{request}} placeholders.",
 });
 
+const SignatureSecretFields = {
+  secret: Schema.optional(TrimmedNonEmptyString).annotate({
+    description: "Shared signing secret. Omit to keep the stored secret.",
+  }),
+  secretRef: Schema.optional(SecretRef).annotate({
+    description:
+      "A secret the user entered through request_secret, used instead of secret. It is consumed by this save.",
+  }),
+};
+
 const ScheduledTaskUpsertWebhookSchedule = Schema.Struct({
   type: Schema.Literal("webhook").annotate({
     description: "Run when the task's webhook URL receives a request.",
   }),
   signature: Schema.optional(
     Schema.NullOr(
-      Schema.Struct({
-        ...ScheduledTaskWebhookSignatureFields,
-        secret: Schema.optional(TrimmedNonEmptyString).annotate({
-          description: "Shared signing secret. Omit to keep the stored secret.",
+      Schema.Union([
+        Schema.Struct({ ...ScheduledTaskHmacSignatureFields, ...SignatureSecretFields }),
+        Schema.Struct({
+          ...ScheduledTaskStandardWebhooksSignatureFields,
+          ...SignatureSecretFields,
         }),
-        secretRef: Schema.optional(SecretRef).annotate({
-          description:
-            "A secret the user entered through request_secret, used instead of secret. It is consumed by this save.",
-        }),
-      }),
+      ]),
     ),
   ).annotate({
     description: "Signature check; omit or null to accept requests by URL token only.",

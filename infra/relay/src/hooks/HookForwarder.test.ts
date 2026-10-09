@@ -217,6 +217,9 @@ describe("HookForwarder", () => {
             "content-type": "application/octet-stream",
             authorization: "Bearer sender-secret",
             "x-hub-signature-256": "sha256=abc",
+            "webhook-id": "msg_1",
+            "webhook-timestamp": "1614265330",
+            "webhook-signature": "v1,abc= v1,def=",
             cookie: "session=1",
             "cf-connecting-ip": "1.2.3.4",
             "x-forwarded-for": "1.2.3.4",
@@ -235,6 +238,9 @@ describe("HookForwarder", () => {
       expect(Array.from(requestBytes(sent))).toEqual(Array.from(body));
       expect(sent.headers.authorization).toBe("Bearer sender-secret");
       expect(sent.headers["x-hub-signature-256"]).toBe("sha256=abc");
+      expect(sent.headers["webhook-id"]).toBe("msg_1");
+      expect(sent.headers["webhook-timestamp"]).toBe("1614265330");
+      expect(sent.headers["webhook-signature"]).toBe("v1,abc= v1,def=");
       expect(sent.headers["content-type"]).toBe("application/octet-stream");
       for (const dropped of [
         "cookie",

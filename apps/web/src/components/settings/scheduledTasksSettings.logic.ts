@@ -4,6 +4,7 @@ import {
   ScheduledTaskId,
   type ScheduledTask,
   type ScheduledTaskUpsertSchedule,
+  type ScheduledTaskWebhookSignature,
   type ModelSelection,
   type RuntimeMode,
   type ProviderInteractionMode,
@@ -74,6 +75,8 @@ export interface DraftState {
    */
   readonly baseModelSelection: ModelSelection | null;
   readonly signatureEnabled: boolean;
+  readonly signatureScheme: ScheduledTaskWebhookSignature["scheme"];
+  /** Header, encoding and prefix apply to the HMAC scheme only. */
   readonly signatureHeader: string;
   readonly signatureEncoding: "hex" | "base64";
   readonly signaturePrefix: string;
@@ -85,6 +88,7 @@ export interface DraftState {
 
 /** GitHub's signature settings, the most common sender. */
 export const WEBHOOK_SIGNATURE_DEFAULTS = {
+  signatureScheme: "hmac_sha256",
   signatureHeader: "x-hub-signature-256",
   signatureEncoding: "hex",
   signaturePrefix: "sha256=",
@@ -98,14 +102,17 @@ export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedul
     const secret = draft.signatureSecret.trim();
     return {
       type: "webhook",
-      signature: draft.signatureEnabled
-        ? {
-            header: draft.signatureHeader.trim(),
-            encoding: draft.signatureEncoding,
-            prefix: draft.signaturePrefix,
-            ...(secret ? { secret } : {}),
-          }
-        : null,
+      signature: !draft.signatureEnabled
+        ? null
+        : draft.signatureScheme === "standard_webhooks"
+          ? { scheme: "standard_webhooks", ...(secret ? { secret } : {}) }
+          : {
+              scheme: "hmac_sha256",
+              header: draft.signatureHeader.trim(),
+              encoding: draft.signatureEncoding,
+              prefix: draft.signaturePrefix,
+              ...(secret ? { secret } : {}),
+            },
       maxDeliveryAgeMinutes,
     };
   }
@@ -154,14 +161,21 @@ export function taskToDraft(task: ScheduledTask): DraftState {
     runtimeMode: task.runtimeMode,
     interactionMode: task.interactionMode,
     baseModelSelection: task.modelSelection,
-    ...(schedule.type === "webhook" && schedule.signature !== null
-      ? {
-          signatureEnabled: true,
-          signatureHeader: schedule.signature.header,
-          signatureEncoding: schedule.signature.encoding,
-          signaturePrefix: schedule.signature.prefix,
-        }
-      : { signatureEnabled: false, ...WEBHOOK_SIGNATURE_DEFAULTS }),
+    ...(schedule.type !== "webhook" || schedule.signature === null
+      ? { signatureEnabled: false, ...WEBHOOK_SIGNATURE_DEFAULTS }
+      : schedule.signature.scheme === "standard_webhooks"
+        ? {
+            ...WEBHOOK_SIGNATURE_DEFAULTS,
+            signatureEnabled: true,
+            signatureScheme: "standard_webhooks",
+          }
+        : {
+            signatureEnabled: true,
+            signatureScheme: "hmac_sha256",
+            signatureHeader: schedule.signature.header,
+            signatureEncoding: schedule.signature.encoding,
+            signaturePrefix: schedule.signature.prefix,
+          }),
     signatureSecret: "",
     maxDeliveryAgeMinutes:
       schedule.type === "webhook" && schedule.maxDeliveryAgeMinutes != null

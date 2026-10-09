@@ -453,11 +453,14 @@ function scheduledTaskFromUpsert(input: ScheduledTaskUpsertInput): ScheduledTask
             signature:
               input.schedule.signature == null
                 ? null
-                : {
-                    header: input.schedule.signature.header,
-                    encoding: input.schedule.signature.encoding,
-                    prefix: input.schedule.signature.prefix,
-                  },
+                : input.schedule.signature.scheme === "standard_webhooks"
+                  ? { scheme: "standard_webhooks" }
+                  : {
+                      scheme: "hmac_sha256",
+                      header: input.schedule.signature.header,
+                      encoding: input.schedule.signature.encoding,
+                      prefix: input.schedule.signature.prefix,
+                    },
           }
         : input.schedule,
     projectId: input.projectId,

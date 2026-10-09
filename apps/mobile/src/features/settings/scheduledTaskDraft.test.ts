@@ -53,12 +53,15 @@ describe("scheduleDraftForTask", () => {
     });
   });
 
-  it("keeps a webhook signature on save without sending a secret", () => {
-    const signature = {
+  it.each([
+    {
+      scheme: "hmac_sha256" as const,
       header: "x-hub-signature-256",
       encoding: "hex" as const,
       prefix: "sha256=",
-    };
+    },
+    { scheme: "standard_webhooks" as const },
+  ])("keeps a $scheme signature on save without sending a secret", (signature) => {
     const saved = scheduleFromDraft(
       scheduleDraftForTask({ schedule: { type: "webhook", signature } }),
     );
