@@ -11115,24 +11115,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       Stream.runForEach(handleTerminalRun),
       Effect.forkDetach,
     );
-  // A delegated child's run can end while its own subagents still work, which
-  // holds its result back as waiting_for_children. Their settling is the next
-  // chance to publish it, and to wake the parent.
-  yield* eventSink
-    .stream({ afterSequence: terminalEventsAfterSequence, eventType: "subagent.updated" })
-    .pipe(
+  // A delegated child's run can end while its own subagents or background
+  // tasks still work, which holds its result back as waiting_for_children.
+  // Their settling is the next chance to publish it, and to wake the parent.
+  const finalizeWhenSettled = (
+    eventType: "subagent.updated" | "provider-thread.updated",
+    settled: (event: OrchestrationV2DomainEvent) => boolean,
+  ) =>
+    eventSink.stream({ afterSequence: terminalEventsAfterSequence, eventType }).pipe(
       Stream.filter(
         (stored) =>
-          stored.event.type === "subagent.updated" &&
           !String(stored.commandId).startsWith("command:runtime-reconcile:") &&
-          !isOrchestrationV2WorkActive(stored.event.payload.status),
+          settled(stored.event),
       ),
       Stream.runForEach((stored) =>
         serviceUpdateAdmission
           .withAdmission(() => finalizeIfAppOwnedSubagent(stored.event.threadId))
           .pipe(
             Effect.catchCause((cause) =>
-              Effect.logWarning("Failed to react to settled V2 subagent", {
+              Effect.logWarning("Failed to react to settled V2 child work", {
                 threadId: stored.event.threadId,
                 sequence: stored.sequence,
                 cause,
@@ -11142,6 +11143,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
       Effect.forkDetach,
     );
+  yield* finalizeWhenSettled(
+    "subagent.updated",
+    (event) =>
+      event.type === "subagent.updated" && !isOrchestrationV2WorkActive(event.payload.status),
+  );
+  yield* finalizeWhenSettled(
+    "provider-thread.updated",
+    (event) =>
+      event.type === "provider-thread.updated" &&
+      (event.payload.pendingBackgroundTasks?.length ?? 0) === 0,
+  );
 
   // Settles child results and completion deliveries whose runs ended without
   // the listener above: before this boot, or in runtime reconciliation, which
