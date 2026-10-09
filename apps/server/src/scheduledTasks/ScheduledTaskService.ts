@@ -53,7 +53,11 @@ import {
   renderWebhookPrompt,
   type WebhookRequest,
 } from "./webhookTemplate.ts";
-import { constantTimeEquals, verifyWebhookSignature } from "./webhookVerification.ts";
+import {
+  constantTimeEquals,
+  standardWebhooksKey,
+  verifyWebhookSignature,
+} from "./webhookVerification.ts";
 
 /** Path prefix of the environment route that receives webhook requests. */
 export const WEBHOOK_ROUTE_PREFIX = "/api/hooks";
@@ -1064,11 +1068,14 @@ export const layer = Layer.effect(
                 signature:
                   input.schedule.signature == null
                     ? null
-                    : {
-                        header: input.schedule.signature.header.toLowerCase(),
-                        encoding: input.schedule.signature.encoding,
-                        prefix: input.schedule.signature.prefix,
-                      },
+                    : input.schedule.signature.scheme === "standard_webhooks"
+                      ? { scheme: "standard_webhooks" }
+                      : {
+                          scheme: "hmac_sha256",
+                          header: input.schedule.signature.header.toLowerCase(),
+                          encoding: input.schedule.signature.encoding,
+                          prefix: input.schedule.signature.prefix,
+                        },
                 maxDeliveryAgeMinutes: input.schedule.maxDeliveryAgeMinutes ?? null,
               }
             : input.schedule;
@@ -1106,6 +1113,18 @@ export const layer = Layer.effect(
                   return yield* taskError("A webhook signature check needs a signing secret.", {
                     taskId: id,
                   });
+                }
+                // Also catches switching an HMAC task to Standard Webhooks
+                // while keeping its old, arbitrary secret.
+                if (
+                  signature?.scheme === "standard_webhooks" &&
+                  secret !== null &&
+                  standardWebhooksKey(secret) === null
+                ) {
+                  return yield* taskError(
+                    "A Standard Webhooks signing secret must be base64 (optionally prefixed with whsec_) and at least 24 bytes.",
+                    { taskId: id },
+                  );
                 }
                 return { token, secret, secretChanged };
               })
@@ -1585,7 +1604,8 @@ export const layer = Layer.effect(
                   secret: row.webhook_secret,
                   headers: request.headers,
                   body: request.body,
-                });
+                  receivedAtMs: DateTime.toEpochMillis(receivedAt),
+                }).verified;
               if (!verified) {
                 yield* log("rejected_signature");
                 yield* observe("rejected_signature");

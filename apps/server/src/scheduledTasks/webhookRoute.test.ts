@@ -130,6 +130,9 @@ describe("webhook route", () => {
         post("/api/hooks/scheduled-task%3Ahook/tok?x=1", '{"a":1}', {
           "Content-Type": "application/json",
           "X-GitHub-Event": "push",
+          "Webhook-Id": "msg_1",
+          "Webhook-Timestamp": "1614265330",
+          "Webhook-Signature": "v1,abc= v1,def=",
         }),
       );
       expect(response.status).toBe(202);
@@ -138,6 +141,10 @@ describe("webhook route", () => {
       expect(received?.token).toBe("tok");
       expect(received?.query).toBe("x=1");
       expect(received?.headers["x-github-event"]).toBe("push");
+      // Standard Webhooks senders sign with these.
+      expect(received?.headers["webhook-id"]).toBe("msg_1");
+      expect(received?.headers["webhook-timestamp"]).toBe("1614265330");
+      expect(received?.headers["webhook-signature"]).toBe("v1,abc= v1,def=");
       expect(received?.bodyText).toBe('{"a":1}');
     } finally {
       await dispose();

@@ -170,7 +170,12 @@ describe("editing scheduled task branch settings", () => {
 });
 
 describe("webhook scheduled tasks", () => {
-  const signature = { header: "x-signature", encoding: "base64", prefix: "" } as const;
+  const signature = {
+    scheme: "hmac_sha256",
+    header: "x-signature",
+    encoding: "base64",
+    prefix: "",
+  } as const;
   const webhookTask: ScheduledTask = {
     ...legacyTask,
     schedule: { type: "webhook", signature },
@@ -190,6 +195,28 @@ describe("webhook scheduled tasks", () => {
       type: "webhook",
       signature: { ...signature, secret: "new" },
       maxDeliveryAgeMinutes: null,
+    });
+  });
+
+  it("round-trips a Standard Webhooks signature, which has no header settings", () => {
+    const draft = taskToDraft({
+      ...webhookTask,
+      schedule: { type: "webhook", signature: { scheme: "standard_webhooks" } },
+    });
+    expect(draft.signatureScheme).toBe("standard_webhooks");
+    expect(scheduleFromDraft(draft)).toEqual({
+      type: "webhook",
+      signature: { scheme: "standard_webhooks" },
+      maxDeliveryAgeMinutes: null,
+    });
+    expect(scheduleFromDraft({ ...draft, signatureSecret: "whsec_abc" })).toEqual({
+      type: "webhook",
+      signature: { scheme: "standard_webhooks", secret: "whsec_abc" },
+      maxDeliveryAgeMinutes: null,
+    });
+    // Switching back to HMAC offers GitHub's settings.
+    expect(scheduleFromDraft({ ...draft, signatureScheme: "hmac_sha256" })).toMatchObject({
+      signature: { scheme: "hmac_sha256", header: "x-hub-signature-256", prefix: "sha256=" },
     });
   });
 

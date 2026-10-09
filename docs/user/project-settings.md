@@ -94,9 +94,19 @@ pull request link. A placeholder with no value is left empty.
 For GitHub, turn on **Require signature**, keep the header
 `x-hub-signature-256`, hex encoding and the `sha256=` prefix, and enter the
 same secret in the repository's webhook settings with content type
-`application/json`. Requests without a valid signature are rejected. Set this
-up on desktop or web; mobile keeps an existing signature check but can't turn
-one on.
+`application/json`.
+
+For PostHog, Svix and other senders that follow
+[Standard Webhooks](https://www.standardwebhooks.com/), turn on **Require
+signature**, choose the **Standard Webhooks** scheme, and enter the same
+signing secret here and in the sender. The secret is base64 of at least 24
+bytes, optionally starting with `whsec_`. Svix gives you one; for a PostHog
+HTTP Webhook destination, make one with `openssl rand -base64 32` and enter it
+in the destination's settings. Requests signed more than 5 minutes before they
+arrive are rejected.
+
+Requests without a valid signature are rejected. Set this up on desktop or
+web; mobile keeps an existing signature check but can't turn one on.
 
 On desktop and web, pick **Deliveries** from a task's menu to see recent
 requests and the prompt each one produced.

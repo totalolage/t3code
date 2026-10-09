@@ -91,19 +91,8 @@ export function scheduleFromDraft(draft: ScheduleDraft): ScheduledTaskUpsertSche
   if (draft.mode === "webhook") {
     const maxDeliveryAgeMinutes = parseMaxDeliveryAge(draft.maxDeliveryAgeMinutes);
     if (maxDeliveryAgeMinutes === undefined) return null;
-    // No secret is sent, so the server keeps the stored one.
-    return {
-      type: "webhook",
-      signature:
-        draft.signature === null
-          ? null
-          : {
-              header: draft.signature.header,
-              encoding: draft.signature.encoding,
-              prefix: draft.signature.prefix,
-            },
-      maxDeliveryAgeMinutes,
-    };
+    // A stored signature never carries its secret, so the server keeps the stored one.
+    return { type: "webhook", signature: draft.signature, maxDeliveryAgeMinutes };
   }
   if (draft.mode === "interval") {
     const minutes = Number(draft.intervalMinutes);

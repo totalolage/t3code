@@ -338,7 +338,12 @@ it.effect("checks the configured signature and keeps the secret write-only", () 
       );
       assert.deepEqual(task.schedule, {
         type: "webhook",
-        signature: { header: "x-hub-signature-256", encoding: "hex", prefix: "sha256=" },
+        signature: {
+          scheme: "hmac_sha256",
+          header: "x-hub-signature-256",
+          encoding: "hex",
+          prefix: "sha256=",
+        },
         maxDeliveryAgeMinutes: null,
       });
       assert.isTrue(task.webhook?.hasSecret);
@@ -949,6 +954,116 @@ it.effect("a signature without any secret is refused", () =>
         )
         .pipe(Effect.flip);
       assert.include(failure.message, "needs a signing secret");
+    }),
+  ),
+);
+
+const standardWebhooksSecret = `whsec_${Buffer.alloc(32, 7).toString("base64")}`;
+
+/** Standard Webhooks headers for `pullRequestBody`, signed as PostHog and Svix do. */
+const standardWebhooksHeaders = (input: { readonly id: string; readonly timestampMs: number }) => {
+  const timestamp = Math.floor(input.timestampMs / 1000);
+  const key = Buffer.from(standardWebhooksSecret.slice("whsec_".length), "base64");
+  const digest = NodeCrypto.createHmac("sha256", key)
+    .update(`${input.id}.${timestamp}.`)
+    .update(pullRequestBody)
+    .digest("base64");
+  return {
+    "content-type": "application/json",
+    "webhook-id": input.id,
+    "webhook-timestamp": String(timestamp),
+    "webhook-signature": `v1,${digest}`,
+  };
+};
+
+it.effect("checks Standard Webhooks signatures against when the request arrived", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      // Room for a held request received before the 5-minute tolerance.
+      yield* TestClock.adjust("10 minutes");
+      const { task } = yield* service.upsert(
+        yield* webhookTaskInput({
+          schedule: {
+            type: "webhook",
+            signature: { scheme: "standard_webhooks", secret: standardWebhooksSecret },
+          },
+        }),
+      );
+      assert.deepEqual(task.schedule, {
+        type: "webhook",
+        signature: { scheme: "standard_webhooks" },
+        maxDeliveryAgeMinutes: null,
+      });
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+
+      const signed = yield* service.triggerWebhook(
+        requestFor(task, { headers: standardWebhooksHeaders({ id: "msg_1", timestampMs: now }) }),
+      );
+      assert.equal(signed._tag, "accepted");
+      yield* Queue.take(launches);
+
+      // Signed more than 5 minutes before it reached T3.
+      const stale = yield* service.triggerWebhook(
+        requestFor(task, {
+          headers: standardWebhooksHeaders({ id: "msg_2", timestampMs: now - 6 * 60_000 }),
+        }),
+      );
+      assert.equal(stale._tag, "rejected_signature");
+
+      // The same age is fine when the relay received it on time and held it.
+      const held = yield* service.triggerWebhook(
+        requestFor(task, {
+          relayDeliveryId: "relay-held",
+          receivedAt: DateTime.formatIso(DateTime.makeUnsafe(now - 6 * 60_000 + 1_000)),
+          headers: standardWebhooksHeaders({ id: "msg_3", timestampMs: now - 6 * 60_000 }),
+        }),
+      );
+      assert.equal(held._tag, "accepted");
+      yield* Queue.take(launches);
+
+      const unsigned = yield* service.triggerWebhook(requestFor(task));
+      assert.equal(unsigned._tag, "rejected_signature");
+    }),
+  ),
+);
+
+it.effect("a Standard Webhooks signature needs a base64 secret of at least 24 bytes", () =>
+  withService(({ service }) =>
+    Effect.gen(function* () {
+      const invalid = yield* service
+        .upsert(
+          yield* webhookTaskInput({
+            schedule: {
+              type: "webhook",
+              signature: { scheme: "standard_webhooks", secret: "shared-secret" },
+            },
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.include(invalid.message, "Standard Webhooks signing secret");
+
+      // Switching an HMAC task over without a new secret would keep the old one.
+      yield* service.upsert(
+        yield* webhookTaskInput({
+          schedule: {
+            type: "webhook",
+            signature: {
+              header: "x-hub-signature-256",
+              encoding: "hex",
+              prefix: "sha256=",
+              secret: "github-secret",
+            },
+          },
+        }),
+      );
+      const switched = yield* service
+        .upsert(
+          yield* webhookTaskInput({
+            schedule: { type: "webhook", signature: { scheme: "standard_webhooks" } },
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.include(switched.message, "Standard Webhooks signing secret");
     }),
   ),
 );
