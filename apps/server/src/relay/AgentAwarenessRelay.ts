@@ -555,7 +555,8 @@ export const make = Effect.gen(function* () {
       project,
     });
     // A run that finished before the thread was unhidden clears the activity
-    // instead of alerting.
+    // instead of alerting. A same-millisecond tie counts as hidden: the user
+    // was touching that thread right then, so a missed push costs nothing.
     const unhiddenAt = unhiddenAtByThread.get(threadId);
     const snapshot =
       (projected.state?.phase === "completed" || projected.state?.phase === "failed") &&
