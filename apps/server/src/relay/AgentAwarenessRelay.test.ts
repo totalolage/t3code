@@ -672,34 +672,59 @@ describe("AgentAwarenessRelay", () => {
     }),
   );
 
-  it.effect("clears a hidden thread's activity and never alerts on its completion", () =>
-    Effect.gen(function* () {
-      const { relay, currentShell, publications } = yield* makeTestRelay();
-      yield* relay.publishThread(THREAD_ID);
-      assert.equal(publications[0]?.state?.phase, "running");
-      const hiddenAt = yield* DateTime.now;
-      yield* Ref.set(currentShell, shell({ hiddenAt }));
-      yield* relay.publishThread(THREAD_ID);
-      yield* TestClock.adjust("5 seconds");
-      yield* relay.drain;
-      assert.equal(publications.length, 2);
-      assert.equal(publications[1]?.state, null);
-      yield* Ref.set(
-        currentShell,
-        shell({
-          hiddenAt,
-          status: "completed",
-          latestRunCompletedAt: DateTime.add(yield* DateTime.now, { seconds: 1 }),
-        }),
-      );
-      yield* relay.publishThread(THREAD_ID);
-      yield* TestClock.adjust("5 seconds");
-      yield* relay.drain;
-      assert.deepStrictEqual(
-        publications.slice(1).map((publication) => publication.state),
-        publications.slice(1).map(() => null),
-      );
-    }),
+  it.effect(
+    "clears a hidden thread's activity and stays quiet about runs it finished while hidden",
+    () =>
+      Effect.gen(function* () {
+        const { relay, currentShell, publications } = yield* makeTestRelay();
+        yield* relay.publishThread(THREAD_ID);
+        assert.equal(publications[0]?.state?.phase, "running");
+        const hiddenAt = yield* DateTime.now;
+        yield* Ref.set(currentShell, shell({ hiddenAt }));
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
+        assert.equal(publications.length, 2);
+        assert.equal(publications[1]?.state, null);
+        yield* Ref.set(
+          currentShell,
+          shell({
+            hiddenAt,
+            status: "completed",
+            latestRunCompletedAt: DateTime.add(yield* DateTime.now, { seconds: 1 }),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
+        assert.deepStrictEqual(
+          publications.slice(1).map((publication) => publication.state),
+          publications.slice(1).map(() => null),
+        );
+        const count = publications.length;
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status: "completed",
+            latestRunCompletedAt: DateTime.add(yield* DateTime.now, { seconds: -1 }),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
+        assert.equal(publications.length, count);
+        yield* Ref.set(currentShell, shell());
+        yield* relay.publishThread(THREAD_ID);
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status: "completed",
+            latestRunCompletedAt: DateTime.add(yield* DateTime.now, { seconds: 1 }),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        assert.equal(publications.at(-1)?.state?.phase, "completed");
+      }),
   );
 
   it.effect.each([

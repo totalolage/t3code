@@ -423,6 +423,9 @@ export const make = Effect.gen(function* () {
   // tombstone can never race an in-flight live update; a recovered state
   // clears the deadline. Assigned after the worker exists.
   const publishConfirmDeadlines = new Map<ThreadId, number>();
+  // Threads seen hidden since their last live publish. A run that finished
+  // while hidden stays quiet after unhiding, like history at startup.
+  const hiddenSinceLastPublish = new Set<ThreadId>();
   let schedulePublishConfirm: (threadId: ThreadId) => Effect.Effect<void> = () => Effect.void;
   const publishRetries = new Map<
     ThreadId,
@@ -536,6 +539,7 @@ export const make = Effect.gen(function* () {
       // filter so archiving one stays quiet too.
       return;
     }
+    if (threadShell?.hiddenAt != null) hiddenSinceLastPublish.add(threadId);
     // Archived and hidden threads publish a tombstone, so they never alert.
     const thread =
       threadShell === null || threadShell.archivedAt !== null || threadShell.hiddenAt !== null
@@ -558,7 +562,13 @@ export const make = Effect.gen(function* () {
     ) {
       // Startup has no publish history. Only work from this server process may
       // produce an initial terminal alert; historical threads remain quiet.
-      if (Option.isNone(thread) || !terminalWorkSinceStart(thread.value, startedAt)) return;
+      if (
+        Option.isNone(thread) ||
+        hiddenSinceLastPublish.has(threadId) ||
+        !terminalWorkSinceStart(thread.value, startedAt)
+      ) {
+        return;
+      }
     }
     if (publishedStateByThread.get(threadId) === publishIdentity) {
       // The projection is back at (or never left) the last published state, so
@@ -645,6 +655,7 @@ export const make = Effect.gen(function* () {
       }
       return nextPublishedStates;
     });
+    if (snapshot.state !== null) hiddenSinceLastPublish.delete(threadId);
   });
 
   const processThreadPublish = Effect.fnUntraced(function* (threadId: ThreadId) {
