@@ -367,7 +367,7 @@ describe("remote watch transport", () => {
       assert.equal(snapshot.activeRunId, turnId);
       const request = requests[0]!;
       assert.equal(new URL(request.url).pathname, `/api/orchestration/threads/${threadId}`);
-      assert.equal(new URL(request.url).searchParams.get("route"), "blue");
+      assert.isNull(new URL(request.url).searchParams.get("route"));
       assert.equal(request.headers.get("authorization"), `Bearer ${accessToken}`);
       const metadataRequest = requests[1]!;
       assert.equal(new URL(metadataRequest.url).pathname, "/api/orchestration/snapshot");
@@ -400,7 +400,7 @@ describe("remote watch transport", () => {
   });
 
   it.effect(
-    "subscribeThread mints a fresh ticket per attempt and builds the /ws URL with routing pairs and no bearer",
+    "subscribeThread mints a fresh ticket per attempt and builds the /ws URL with only the ticket",
     () => {
       const requests: Array<Request> = [];
       return Effect.gen(function* () {
@@ -411,16 +411,14 @@ describe("remote watch transport", () => {
         const socket = FakeWebSocket.instances[0]!;
         yield* waitFor(() => socket.requestFrame() !== undefined, "rpc request");
 
-        const expectedUrl = new URL("wss://remote.example/ws?route=blue&route=green");
-        expectedUrl.searchParams.set("wsTicket", "ticket-1");
-        assert.equal(socket.url, expectedUrl.toString());
+        assert.equal(socket.url, "wss://remote.example/ws?wsTicket=ticket-1");
         assert.isFalse(socket.url.includes(accessToken));
 
         const ticketRequest = requests.find(
           (request) => new URL(request.url).pathname === "/api/auth/websocket-ticket",
         )!;
         assert.equal(ticketRequest.headers.get("authorization"), `Bearer ${accessToken}`);
-        assert.equal(new URL(ticketRequest.url).searchParams.get("route"), "blue");
+        assert.isNull(new URL(ticketRequest.url).searchParams.get("route"));
 
         yield* Fiber.interrupt(fiber);
         yield* waitFor(() => socket.closed, "socket release");

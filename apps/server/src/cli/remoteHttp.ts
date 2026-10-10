@@ -9,7 +9,6 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { HttpClient, HttpClientRequest } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
 export const RemoteCliErrorReason = Schema.Literals([
@@ -80,10 +79,7 @@ const isRemoteCliError = Schema.is(RemoteCliError);
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
 const isAuthEnvironmentScope = Schema.is(AuthEnvironmentScope);
 
-/**
- * Normalizes a remote endpoint without discarding explicit routing parameters.
- * The origin-only form intentionally preserves the legacy token filename key.
- */
+/** Normalizes a remote endpoint to its origin, which also keys the stored token. */
 export const normalizeRemoteHttpBaseUrl = Effect.fn("normalizeRemoteHttpBaseUrl")(function* (
   host: string,
 ) {
@@ -100,23 +96,15 @@ export const normalizeRemoteHttpBaseUrl = Effect.fn("normalizeRemoteHttpBaseUrl"
     return yield* new RemoteCliError({ reason: "invalid-host" });
   }
 
-  return url.search.length === 0 ? url.origin : `${url.origin}${url.search}`;
+  return url.origin;
 });
 
 /**
  * Builds the native EnvironmentHttpApi client. Authentication is deliberately
  * not installed here: callers provide endpoint headers for authenticated calls.
  */
-export const makeRemoteCliApi = (httpBaseUrl: string) => {
-  const url = new URL(httpBaseUrl);
-  const routingParams = new URLSearchParams(url.searchParams);
-
-  return HttpApiClient.make(EnvironmentHttpApi, {
-    baseUrl: url.origin,
-    transformClient: (client) =>
-      client.pipe(HttpClient.mapRequest(HttpClientRequest.appendUrlParams(routingParams))),
-  });
-};
+export const makeRemoteCliApi = (httpBaseUrl: string) =>
+  HttpApiClient.make(EnvironmentHttpApi, { baseUrl: new URL(httpBaseUrl).origin });
 
 const normalizeRemoteCliRequestError = (
   error: unknown,

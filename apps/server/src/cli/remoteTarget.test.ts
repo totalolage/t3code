@@ -104,14 +104,11 @@ describe("remote CLI target resolution", () => {
           });
 
           assert.equal(target.kind, "remote");
-          assert.equal(target.httpBaseUrl, "https://remote.example?route=blue");
+          assert.equal(target.httpBaseUrl, "https://remote.example");
           assert.equal(target.tokenStateDirectory, `${baseDir}/remote-cli`);
           assert.equal(target.tokenKey, "https://remote.example");
           assert.deepEqual(target.environment, descriptor);
-          assert.equal(
-            requests[0]?.url,
-            "https://remote.example/.well-known/t3/environment?route=blue",
-          );
+          assert.equal(requests[0]?.url, "https://remote.example/.well-known/t3/environment");
         }),
       ).pipe(
         Effect.provide(

@@ -55,13 +55,13 @@ const descriptor = {
 };
 
 describe("remote HTTP CLI seam", () => {
-  it.effect("normalizes HTTP hosts while preserving explicit routing search parameters", () =>
+  it.effect("normalizes HTTP hosts to their origin", () =>
     Effect.gen(function* () {
       assert.equal(
         yield* normalizeRemoteHttpBaseUrl(
           "https://remote.example/project?route=blue&route=green#ignored",
         ),
-        "https://remote.example?route=blue&route=green",
+        "https://remote.example",
       );
       assert.equal(
         yield* normalizeRemoteHttpBaseUrl("http://remote.example/project#ignored"),
@@ -80,7 +80,7 @@ describe("remote HTTP CLI seam", () => {
     }),
   );
 
-  it.effect("parses a typed descriptor with routing retained and no implicit auth", () => {
+  it.effect("parses a typed descriptor at the origin with no implicit auth", () => {
     const requests: Array<Request> = [];
     return Effect.gen(function* () {
       const client = yield* makeRemoteCliApi("https://remote.example/ignored?route=blue");
@@ -88,7 +88,7 @@ describe("remote HTTP CLI seam", () => {
       const request = requests[0];
 
       assert.deepEqual(result, descriptor);
-      assert.equal(request?.url, "https://remote.example/.well-known/t3/environment?route=blue");
+      assert.equal(request?.url, "https://remote.example/.well-known/t3/environment");
       assert.isNull(request?.headers.get("authorization"));
     }).pipe(Effect.provide(fetchLayer(recordingFetch(requests, jsonResponse(descriptor)))));
   });
@@ -113,7 +113,7 @@ describe("remote HTTP CLI seam", () => {
       const form = new URLSearchParams(body);
 
       assert.equal(result.access_token, "access-secret");
-      assert.equal(request?.url, "https://remote.example/oauth/token?route=blue");
+      assert.equal(request?.url, "https://remote.example/oauth/token");
       assert.equal(request?.headers.get("content-type"), "application/x-www-form-urlencoded");
       assert.isNull(request?.headers.get("authorization"));
       assert.equal(form.get("grant_type"), AuthTokenExchangeGrantType);
@@ -137,7 +137,7 @@ describe("remote HTTP CLI seam", () => {
     );
   });
 
-  it.effect("retains routing and endpoint query parameters together", () => {
+  it.effect("drops host query parameters but keeps endpoint query parameters", () => {
     const requests: Array<Request> = [];
     return Effect.gen(function* () {
       const client = yield* makeRemoteCliApi("https://remote.example?route=blue");
@@ -152,7 +152,7 @@ describe("remote HTTP CLI seam", () => {
       const requestUrl = new URL(requests[0]!.url);
 
       assert.equal(requestUrl.pathname, "/api/orchestration/threads/thread-1/history");
-      assert.equal(requestUrl.searchParams.get("route"), "blue");
+      assert.isNull(requestUrl.searchParams.get("route"));
       assert.equal(requestUrl.searchParams.get("cursor"), "next-page");
     }).pipe(
       Effect.provide(fetchLayer(recordingFetch(requests, new Response(null, { status: 200 })))),
