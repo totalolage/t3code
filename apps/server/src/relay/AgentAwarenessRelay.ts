@@ -560,6 +560,8 @@ export const make = Effect.gen(function* () {
       hiddenSinceLastPublish.has(threadId)
         ? { ...projected, state: null }
         : projected;
+    // A live visible state means any run that finished while hidden is over.
+    if (snapshot.state !== null) hiddenSinceLastPublish.delete(threadId);
     const publishIdentity = agentAwarenessPublishIdentity(snapshot.state);
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
     if (
@@ -655,7 +657,6 @@ export const make = Effect.gen(function* () {
       }
       return nextPublishedStates;
     });
-    if (snapshot.state !== null) hiddenSinceLastPublish.delete(threadId);
   });
 
   const processThreadPublish = Effect.fnUntraced(function* (threadId: ThreadId) {

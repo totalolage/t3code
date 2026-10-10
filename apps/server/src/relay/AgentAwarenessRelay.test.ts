@@ -749,6 +749,29 @@ describe("AgentAwarenessRelay", () => {
     }),
   );
 
+  it.effect(
+    "alerts on a visible completion after unhiding mid-run before the tombstone lands",
+    () =>
+      Effect.gen(function* () {
+        const { relay, currentShell, publications } = yield* makeTestRelay();
+        yield* relay.publishThread(THREAD_ID);
+        yield* Ref.set(currentShell, shell({ hiddenAt: yield* DateTime.now }));
+        yield* relay.publishThread(THREAD_ID);
+        yield* Ref.set(currentShell, shell());
+        yield* relay.publishThread(THREAD_ID);
+        assert.equal(publications.length, 1);
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status: "completed",
+            latestRunCompletedAt: DateTime.add(yield* DateTime.now, { seconds: 1 }),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        assert.equal(publications.at(-1)?.state?.phase, "completed");
+      }),
+  );
+
   it.effect.each([
     { label: "live", archived: false },
     { label: "archived", archived: true },
