@@ -95,6 +95,8 @@ export function shouldPublishAgentAwarenessEvent(
     case "thread.created":
     case "thread.archived":
     case "thread.unarchived":
+    case "thread.hidden":
+    case "thread.unhidden":
     case "thread.deleted":
     case "thread.metadata-updated":
     case "thread.pull-request-synced":
@@ -107,8 +109,6 @@ export function shouldPublishAgentAwarenessEvent(
     case "provider-thread.updated":
       return true;
     case "thread.settled":
-    case "thread.hidden":
-    case "thread.unhidden":
     case "thread.unsettled":
     case "thread.snoozed":
     case "thread.unsnoozed":
@@ -348,7 +348,7 @@ export function resolveAgentAwarenessRelayActiveThreadIds(input: {
   return input.threads
     .filter((thread) => {
       const project = projectById.get(thread.projectId);
-      if (!project) {
+      if (!project || thread.hiddenAt !== null) {
         return false;
       }
       const state = projectThreadAwarenessV2({
@@ -536,8 +536,9 @@ export const make = Effect.gen(function* () {
       // filter so archiving one stays quiet too.
       return;
     }
+    // Archived and hidden threads publish a tombstone, so they never alert.
     const thread =
-      threadShell === null || threadShell.archivedAt !== null
+      threadShell === null || threadShell.archivedAt !== null || threadShell.hiddenAt !== null
         ? Option.none<OrchestrationV2ThreadShell>()
         : Option.some(threadShell);
     const project = Option.isSome(thread)
