@@ -105,13 +105,60 @@ const WebhookMaxDeliveryAgeMinutes = Schema.Int.check(
     "Skip requests the relay held longer than this many minutes while the environment was offline. Null runs every request.",
 });
 
+/**
+ * Where the sender's own delivery id is read from. A request whose id this
+ * task already accepted is answered as a duplicate and does not run again.
+ */
+export const ScheduledTaskWebhookDeliveryIdSource = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("header"),
+    name: TrimmedNonEmptyString.annotate({
+      description: "Request header carrying the delivery id, such as x-github-delivery.",
+    }),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("body"),
+    path: TrimmedNonEmptyString.annotate({
+      description:
+        "Dotted path to the id in the JSON body, without the 'body.' prefix, such as 'event.id'.",
+    }),
+  }),
+]).annotate({
+  description:
+    "Where the sender's delivery id is read. A repeated id within 48 hours is answered as a duplicate without running. An id in a header the signature does not cover (GitHub's x-github-delivery) only deduplicates honest retries, because a captured request can be replayed with a new header value; an id the signature covers (Standard Webhooks' webhook-id, or a JSON body field under the raw-body HMAC) also stops replays for those 48 hours. Standard Webhooks already refuses requests more than 5 minutes old; with an HMAC signature, add deliveryTimestamp to refuse older replays.",
+});
+export type ScheduledTaskWebhookDeliveryIdSource = typeof ScheduledTaskWebhookDeliveryIdSource.Type;
+
+/** Longest clock difference a delivery timestamp may have; kept well inside how long delivery ids are remembered. */
+export const MAX_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS = 60 * 60;
+
+/** Refuses requests whose signed body timestamp is too far from when they arrived. */
+export const ScheduledTaskWebhookDeliveryTimestamp = Schema.Struct({
+  path: TrimmedNonEmptyString.annotate({
+    description:
+      "Dotted path to the send time in the JSON body, without the 'body.' prefix. Unix seconds, Unix milliseconds or an ISO 8601 string.",
+  }),
+  toleranceSeconds: Schema.Int.check(
+    Schema.isBetween({ minimum: 1, maximum: MAX_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS }),
+  ).annotate({
+    description: "How far the send time may be from the receive time, in seconds (at most 3600).",
+  }),
+}).annotate({
+  description:
+    "Refuse requests whose body timestamp is older or newer than the tolerance. Meaningful only with a signature, which makes the timestamp unforgeable.",
+});
+export type ScheduledTaskWebhookDeliveryTimestamp =
+  typeof ScheduledTaskWebhookDeliveryTimestamp.Type;
+
 const ScheduledTaskWebhookSchedule = Schema.Struct({
   type: Schema.Literal("webhook").annotate({
     description: "Run when the task's webhook URL receives a request.",
   }),
   signature: Schema.NullOr(ScheduledTaskWebhookSignature),
-  // Optional so rows saved before this setting existed still decode.
+  // Optional so rows saved before these settings existed still decode.
   maxDeliveryAgeMinutes: Schema.optional(Schema.NullOr(WebhookMaxDeliveryAgeMinutes)),
+  deliveryId: Schema.optional(Schema.NullOr(ScheduledTaskWebhookDeliveryIdSource)),
+  deliveryTimestamp: Schema.optional(Schema.NullOr(ScheduledTaskWebhookDeliveryTimestamp)),
 }).annotate({
   description:
     "Run on each request to the task's webhook URL. The prompt may use {{body.path}}, {{headers.name}}, {{query.name}}, {{body}} and {{request}} placeholders.",
@@ -145,6 +192,15 @@ const ScheduledTaskUpsertWebhookSchedule = Schema.Struct({
     description: "Signature check; omit or null to accept requests by URL token only.",
   }),
   maxDeliveryAgeMinutes: Schema.optional(Schema.NullOr(WebhookMaxDeliveryAgeMinutes)),
+  deliveryId: Schema.optional(Schema.NullOr(ScheduledTaskWebhookDeliveryIdSource)).annotate({
+    description:
+      "Delivery id source for deduplication. Omit to keep the stored one; null turns it off.",
+  }),
+  deliveryTimestamp: Schema.optional(Schema.NullOr(ScheduledTaskWebhookDeliveryTimestamp)).annotate(
+    {
+      description: "Freshness check. Omit to keep the stored one; null turns it off.",
+    },
+  ),
 }).annotate({
   description:
     "Run on each request to the task's webhook URL. The prompt may use {{body.path}}, {{headers.name}}, {{query.name}}, {{body}} and {{request}} placeholders.",
@@ -290,6 +346,8 @@ export const ScheduledTaskWebhookDeliveryOutcome = Schema.Literals([
   "disabled",
   "rate_limited",
   "expired",
+  "duplicate",
+  "invalid_request",
 ]);
 export type ScheduledTaskWebhookDeliveryOutcome = typeof ScheduledTaskWebhookDeliveryOutcome.Type;
 
@@ -327,7 +385,9 @@ export type ScheduledTaskListWebhookDeliveriesInput =
   typeof ScheduledTaskListWebhookDeliveriesInput.Type;
 
 export const ScheduledTaskListWebhookDeliveriesResult = Schema.Struct({
-  deliveries: Schema.Array(ScheduledTaskWebhookDeliverySummary),
+  // Outcomes grow over time; one row an older client cannot read must not
+  // cost it the whole log.
+  deliveries: ForwardCompatibleArray(ScheduledTaskWebhookDeliverySummary),
 });
 export type ScheduledTaskListWebhookDeliveriesResult =
   typeof ScheduledTaskListWebhookDeliveriesResult.Type;

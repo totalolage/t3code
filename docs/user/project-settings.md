@@ -108,6 +108,27 @@ arrive are rejected.
 Requests without a valid signature are rejected. Set this up on desktop or
 web; mobile keeps an existing signature check but can't turn one on.
 
+Senders retry, so a task can run twice for one event. To run each delivery
+once, set **Delivery id** to where the sender puts its delivery id: for GitHub,
+**Request header** `x-github-delivery`; for Standard Webhooks, **Request
+header** `webhook-id`; for a sender that puts the id in its JSON body, **Body
+field** with a path such as `event.id`. An id seen in the last 48 hours is
+answered as a duplicate and does not run. How much this protects depends on
+whether the signature covers the id:
+
+- An id in a header the signature doesn't cover, as with GitHub, only stops
+  honest retries. Someone who captured a request can replay it with a new id.
+- Standard Webhooks' `webhook-id` and an id in a signed body field also stop
+  replayed requests for 48 hours, because changing them breaks the signature.
+  Standard Webhooks already refuses requests older than 5 minutes, so with
+  `webhook-id` a captured request can't be replayed at all.
+
+For an HMAC signature, if the signed body carries the send time, set **Timestamp field** to its path
+and a **Tolerance** in seconds (up to an hour). Requests whose time is further
+than that from when they arrive are refused, so together with a signed id a
+captured request can't be replayed later either. Unix seconds, milliseconds
+and ISO 8601 times work. Set these on desktop or web; mobile keeps them as they are.
+
 On desktop and web, pick **Deliveries** from a task's menu to see recent
 requests and the prompt each one produced.
 

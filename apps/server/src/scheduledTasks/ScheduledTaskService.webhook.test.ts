@@ -345,6 +345,8 @@ it.effect("checks the configured signature and keeps the secret write-only", () 
           prefix: "sha256=",
         },
         maxDeliveryAgeMinutes: null,
+        deliveryId: null,
+        deliveryTimestamp: null,
       });
       assert.isTrue(task.webhook?.hasSecret);
 
@@ -993,6 +995,8 @@ it.effect("checks Standard Webhooks signatures against when the request arrived"
         type: "webhook",
         signature: { scheme: "standard_webhooks" },
         maxDeliveryAgeMinutes: null,
+        deliveryId: null,
+        deliveryTimestamp: null,
       });
       const now = DateTime.toEpochMillis(yield* DateTime.now);
 
@@ -1127,6 +1131,265 @@ it.effect("counts each handled request by what happened to it", () =>
       assert.equal((yield* deliveriesCounted("not_found", "direct")) - before.notFound, 1);
       assert.equal((yield* deliveriesCounted("accepted", "relay")) - before.relayAccepted, 1);
       assert.equal((yield* deliveriesCounted("duplicate", "relay")) - before.duplicate, 1);
+    }),
+  ),
+);
+
+/** A JSON request, signed with `secret` over its raw body when one is given. */
+const jsonRequestFor = (
+  task: Parameters<typeof requestFor>[0],
+  value: unknown,
+  options: { readonly secret?: string; readonly headers?: Record<string, string> } = {},
+) => {
+  const bodyText = JSON.stringify(value);
+  const body = new TextEncoder().encode(bodyText);
+  const signature =
+    options.secret === undefined
+      ? {}
+      : {
+          "x-hub-signature-256": `sha256=${NodeCrypto.createHmac("sha256", options.secret).update(body).digest("hex")}`,
+        };
+  return requestFor(task, {
+    body,
+    bodyText,
+    headers: { "content-type": "application/json", ...signature, ...options.headers },
+  });
+};
+
+const signedWebhook = {
+  type: "webhook",
+  signature: {
+    header: "x-hub-signature-256",
+    encoding: "hex",
+    prefix: "sha256=",
+    secret: "s3cret",
+  },
+} as const;
+
+it.effect("a sender's retry of the same delivery id runs once and is logged as a duplicate", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(
+        yield* webhookTaskInput({
+          schedule: { type: "webhook", deliveryId: { type: "header", name: "X-GitHub-Delivery" } },
+        }),
+      );
+      assert.deepEqual(task.schedule.type === "webhook" ? task.schedule.deliveryId : null, {
+        type: "header",
+        name: "x-github-delivery",
+      });
+      const withId = (id: string) =>
+        requestFor(task, {
+          headers: { "content-type": "application/json", "x-github-delivery": id },
+        });
+      const first = yield* service.triggerWebhook(withId("abc"));
+      assert.equal(first._tag === "accepted" && first.outcome, "accepted");
+      yield* Queue.take(launches);
+      const retry = yield* service.triggerWebhook(withId("abc"));
+      assert.equal(retry._tag === "accepted" && retry.outcome, "duplicate");
+      const other = yield* service.triggerWebhook(withId("def"));
+      assert.equal(other._tag === "accepted" && other.outcome, "accepted");
+      yield* Queue.take(launches);
+      assert.equal(yield* Queue.size(launches), 0);
+
+      const logged = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
+      assert.deepEqual(logged.map((delivery) => delivery.outcome).toSorted(), [
+        "accepted",
+        "accepted",
+        "duplicate",
+      ]);
+      // The duplicate has its own entry; the original stays as it was.
+      assert.equal(
+        logged.find(
+          (delivery) => delivery.id === (first._tag === "accepted" ? first.deliveryId : ""),
+        )?.outcome,
+        "accepted",
+      );
+    }),
+  ),
+);
+
+it.effect(
+  "a signed body delivery id stops replays, and only an authenticated request claims it",
+  () =>
+    withService(({ service, launches }) =>
+      Effect.gen(function* () {
+        const { task } = yield* service.upsert(
+          yield* webhookTaskInput({
+            schedule: { ...signedWebhook, deliveryId: { type: "body", path: "delivery.id" } },
+          }),
+        );
+        const value = { delivery: { id: 42 }, pull_request: { url: "https://example.com/pr/1" } };
+        // A forged request carrying the id must not burn it for the real one.
+        const forged = yield* service.triggerWebhook(
+          jsonRequestFor(task, value, { secret: "wrong" }),
+        );
+        assert.equal(forged._tag, "rejected_signature");
+        const signed = yield* service.triggerWebhook(
+          jsonRequestFor(task, value, { secret: "s3cret" }),
+        );
+        assert.equal(signed._tag === "accepted" && signed.outcome, "accepted");
+        yield* Queue.take(launches);
+        const replayed = yield* service.triggerWebhook(
+          jsonRequestFor(task, value, { secret: "s3cret" }),
+        );
+        assert.equal(replayed._tag === "accepted" && replayed.outcome, "duplicate");
+        // The content type is not signed, so changing it must not change the id read.
+        const relabeled = yield* service.triggerWebhook(
+          jsonRequestFor(task, value, {
+            secret: "s3cret",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+          }),
+        );
+        assert.equal(relabeled._tag === "accepted" && relabeled.outcome, "duplicate");
+        assert.equal(yield* Queue.size(launches), 0);
+      }),
+    ),
+);
+
+it.effect("a Standard Webhooks webhook-id is the signed delivery id", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(
+        yield* webhookTaskInput({
+          schedule: {
+            type: "webhook",
+            signature: { scheme: "standard_webhooks", secret: standardWebhooksSecret },
+            deliveryId: { type: "header", name: "webhook-id" },
+          },
+        }),
+      );
+      const headers = standardWebhooksHeaders({
+        id: "msg_1",
+        timestampMs: DateTime.toEpochMillis(yield* DateTime.now),
+      });
+      const first = yield* service.triggerWebhook(requestFor(task, { headers }));
+      assert.equal(first._tag === "accepted" && first.outcome, "accepted");
+      yield* Queue.take(launches);
+      const replayed = yield* service.triggerWebhook(requestFor(task, { headers }));
+      assert.equal(replayed._tag === "accepted" && replayed.outcome, "duplicate");
+      // The signature covers the trimmed id, so padding it must not dodge the claim.
+      const padded = yield* service.triggerWebhook(
+        requestFor(task, { headers: { ...headers, "webhook-id": " msg_1 " } }),
+      );
+      assert.equal(padded._tag === "accepted" && padded.outcome, "duplicate");
+      assert.equal(yield* Queue.size(launches), 0);
+    }),
+  ),
+);
+
+it.effect("refuses a request without the configured delivery id", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(
+        yield* webhookTaskInput({
+          schedule: { type: "webhook", deliveryId: { type: "body", path: "delivery.id" } },
+        }),
+      );
+      for (const value of [{}, { delivery: { id: "  " } }, { delivery: { id: { nested: 1 } } }]) {
+        assert.equal(
+          (yield* service.triggerWebhook(jsonRequestFor(task, value)))._tag,
+          "invalid_request",
+        );
+      }
+      assert.equal(yield* Queue.size(launches), 0);
+      const [delivery] = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
+      assert.equal(delivery?.outcome, "invalid_request");
+      assert.equal(delivery?.error, "The body has no delivery id at delivery.id.");
+    }),
+  ),
+);
+
+it.effect("a delivery refused for a full queue gives its id back for the retry", () =>
+  Effect.gen(function* () {
+    const gate = yield* Deferred.make<void>();
+    yield* withService(
+      ({ service, launches }) =>
+        Effect.gen(function* () {
+          const { task } = yield* service.upsert(
+            yield* webhookTaskInput({
+              schedule: { type: "webhook", deliveryId: { type: "header", name: "x-id" } },
+            }),
+          );
+          const withId = (id: string) =>
+            requestFor(task, { headers: { "content-type": "application/json", "x-id": id } });
+          yield* service.triggerWebhook(withId("running"));
+          yield* Queue.take(launches);
+          yield* Effect.forEach(
+            Array.from({ length: 19 }, (_, index) => index),
+            (index) => service.triggerWebhook(withId(`waiting-${index}`)),
+          );
+          const refused = yield* service.triggerWebhook(withId("late"));
+          assert.deepEqual(refused, { _tag: "rate_limited", outcome: "queue_full" });
+          // Still refused for the full queue, not answered as already delivered.
+          const retried = yield* service.triggerWebhook(withId("late"));
+          assert.deepEqual(retried, { _tag: "rate_limited", outcome: "queue_full" });
+          yield* Deferred.succeed(gate, undefined);
+        }),
+      { gate },
+    );
+  }),
+);
+
+it.effect("refuses a request whose body timestamp is outside the tolerance", () =>
+  Effect.gen(function* () {
+    // Before the service starts, so its schedulers do not replay 56 years.
+    yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-09T12:00:00Z")));
+    yield* withService(({ service, launches }) =>
+      Effect.gen(function* () {
+        const { task } = yield* service.upsert(
+          yield* webhookTaskInput({
+            schedule: {
+              ...signedWebhook,
+              deliveryTimestamp: { path: "sent_at", toleranceSeconds: 300 },
+            },
+          }),
+        );
+        const send = (sentAt: unknown) =>
+          service.triggerWebhook(jsonRequestFor(task, { sent_at: sentAt }, { secret: "s3cret" }));
+        const nowSeconds = Math.floor(DateTime.toEpochMillis(yield* DateTime.now) / 1000);
+
+        assert.equal((yield* send(nowSeconds - 600))._tag, "expired");
+        assert.equal((yield* send(String((nowSeconds + 600) * 1000)))._tag, "expired");
+        assert.equal((yield* send("not a time"))._tag, "invalid_request");
+        assert.equal((yield* send(undefined))._tag, "invalid_request");
+        assert.equal(yield* Queue.size(launches), 0);
+
+        assert.equal((yield* send(nowSeconds - 60))._tag, "accepted");
+        assert.equal((yield* send("2026-10-09T11:58:00Z"))._tag, "accepted");
+        assert.equal((yield* send(`${(nowSeconds + 60) * 1000}`))._tag, "accepted");
+        yield* Queue.take(launches);
+
+        const expired = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries.find(
+          (delivery) => delivery.outcome === "expired",
+        );
+        assert.equal(
+          expired?.error,
+          "The delivery timestamp is more than 300 seconds from when it arrived.",
+        );
+      }),
+    );
+  }),
+);
+
+it.effect("a save that omits replay protection keeps it, and null turns it off", () =>
+  withService(({ service }) =>
+    Effect.gen(function* () {
+      const deliveryId = { type: "body", path: "id" } as const;
+      const deliveryTimestamp = { path: "sent_at", toleranceSeconds: 60 };
+      yield* service.upsert(
+        yield* webhookTaskInput({ schedule: { type: "webhook", deliveryId, deliveryTimestamp } }),
+      );
+      const kept = yield* service.upsert(
+        yield* webhookTaskInput({ schedule: { type: "webhook", maxDeliveryAgeMinutes: 5 } }),
+      );
+      assert.deepInclude(kept.task.schedule, { deliveryId, deliveryTimestamp });
+      const cleared = yield* service.upsert(
+        yield* webhookTaskInput({
+          schedule: { type: "webhook", deliveryId: null, deliveryTimestamp: null },
+        }),
+      );
+      assert.deepInclude(cleared.task.schedule, { deliveryId: null, deliveryTimestamp: null });
     }),
   ),
 );

@@ -95,6 +95,19 @@ function lookup(root: unknown, segments: ReadonlyArray<string>): unknown {
   return current;
 }
 
+/**
+ * The value at a dotted path (`a.b.0`) in a JSON body. Unlike `{{body.path}}`
+ * it ignores the content type: the signature covers the body but not that
+ * header, so a field read for replay protection must not depend on it.
+ */
+export function webhookJsonField(request: WebhookRequest, path: string): unknown {
+  try {
+    return lookup(JSON.parse(request.bodyText) as unknown, path.split("."));
+  } catch {
+    return undefined;
+  }
+}
+
 function stringify(value: unknown): string {
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);

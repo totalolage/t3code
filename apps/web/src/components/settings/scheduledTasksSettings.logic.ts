@@ -3,6 +3,7 @@ import {
   type ProjectId,
   ScheduledTaskId,
   type ScheduledTask,
+  MAX_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS,
   type ScheduledTaskUpsertSchedule,
   type ScheduledTaskWebhookSignature,
   type ModelSelection,
@@ -48,6 +49,7 @@ export function validateScheduledTasksSearch(raw: Record<string, unknown>) {
 
 export type ScheduleMode = "fixed" | "interval" | "webhook";
 export type WorkspaceMode = "root" | "worktree" | "existing_worktree";
+export type DeliveryIdMode = "off" | "header" | "body";
 
 export interface DraftState {
   readonly editingId: string | null;
@@ -84,6 +86,13 @@ export interface DraftState {
   readonly signatureSecret: string;
   /** Minutes as typed; empty runs every held request regardless of age. */
   readonly maxDeliveryAgeMinutes: string;
+  /** Where the sender puts its delivery id; a repeated id does not run again. */
+  readonly deliveryIdMode: DeliveryIdMode;
+  readonly deliveryIdHeader: string;
+  readonly deliveryIdPath: string;
+  /** Body path of the sender's send time; empty turns the freshness check off. */
+  readonly deliveryTimestampPath: string;
+  readonly deliveryTimestampToleranceSeconds: string;
 }
 
 /** GitHub's signature settings, the most common sender. */
@@ -94,11 +103,81 @@ export const WEBHOOK_SIGNATURE_DEFAULTS = {
   signaturePrefix: "sha256=",
 } as const;
 
-/** Null when the draft's webhook age limit is invalid; the caller reports it and does not save. */
+/** Replay protection starts off; GitHub's delivery header is the most common id. */
+export const WEBHOOK_REPLAY_DEFAULTS = {
+  deliveryIdMode: "off",
+  deliveryIdHeader: "x-github-delivery",
+  deliveryIdPath: "",
+  deliveryTimestampPath: "",
+  deliveryTimestampToleranceSeconds: "300",
+} as const;
+
+/** Standard Webhooks signs its `webhook-id`; other senders default to GitHub's header. */
+export function defaultDeliveryIdHeader(draft: DraftState): string {
+  return draft.signatureEnabled && draft.signatureScheme === "standard_webhooks"
+    ? "webhook-id"
+    : WEBHOOK_REPLAY_DEFAULTS.deliveryIdHeader;
+}
+
+/**
+ * Switches where the delivery id comes from. Choosing a header fills in the
+ * signature scheme's usual one unless the user already typed their own.
+ */
+export function withDeliveryIdMode(draft: DraftState, value: string | null): DraftState {
+  const deliveryIdMode: DeliveryIdMode = value === "header" || value === "body" ? value : "off";
+  const untouched = ["", WEBHOOK_REPLAY_DEFAULTS.deliveryIdHeader, "webhook-id"].includes(
+    draft.deliveryIdHeader.trim(),
+  );
+  return {
+    ...draft,
+    deliveryIdMode,
+    ...(deliveryIdMode === "header" && untouched
+      ? { deliveryIdHeader: defaultDeliveryIdHeader(draft) }
+      : {}),
+  };
+}
+
+function parseTimestampTolerance(value: string): number | undefined {
+  const seconds = Number(value.trim());
+  return value.trim() !== "" &&
+    Number.isInteger(seconds) &&
+    seconds > 0 &&
+    seconds <= MAX_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS
+    ? seconds
+    : undefined;
+}
+
+/** Why the draft's replay settings cannot be saved, or null when they can. */
+export function webhookReplayDraftProblem(draft: DraftState): string | null {
+  if (draft.scheduleMode !== "webhook") return null;
+  if (draft.deliveryIdMode === "header" && !draft.deliveryIdHeader.trim()) {
+    return "Enter the header that carries the delivery id.";
+  }
+  if (draft.deliveryIdMode === "body" && !draft.deliveryIdPath.trim()) {
+    return "Enter the body field that carries the delivery id.";
+  }
+  if (
+    draft.deliveryTimestampPath.trim() &&
+    parseTimestampTolerance(draft.deliveryTimestampToleranceSeconds) === undefined
+  ) {
+    return `Enter a tolerance of whole seconds from 1 to ${MAX_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS}.`;
+  }
+  return null;
+}
+
+/**
+ * Null when the draft's webhook age limit or replay settings are invalid; the
+ * caller reports them and does not save. Replay settings are always sent,
+ * null when off, because the server keeps stored ones on omission.
+ */
 export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedule | null {
   if (draft.scheduleMode === "webhook") {
     const maxDeliveryAgeMinutes = parseMaxDeliveryAge(draft.maxDeliveryAgeMinutes);
-    if (maxDeliveryAgeMinutes === undefined) return null;
+    if (maxDeliveryAgeMinutes === undefined || webhookReplayDraftProblem(draft) !== null) {
+      return null;
+    }
+    const timestampPath = draft.deliveryTimestampPath.trim();
+    const toleranceSeconds = parseTimestampTolerance(draft.deliveryTimestampToleranceSeconds);
     const secret = draft.signatureSecret.trim();
     return {
       type: "webhook",
@@ -114,6 +193,16 @@ export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedul
               ...(secret ? { secret } : {}),
             },
       maxDeliveryAgeMinutes,
+      deliveryId:
+        draft.deliveryIdMode === "header"
+          ? { type: "header", name: draft.deliveryIdHeader.trim().toLowerCase() }
+          : draft.deliveryIdMode === "body"
+            ? { type: "body", path: draft.deliveryIdPath.trim() }
+            : null,
+      deliveryTimestamp:
+        timestampPath && toleranceSeconds !== undefined
+          ? { path: timestampPath, toleranceSeconds }
+          : null,
     };
   }
   if (draft.scheduleMode === "interval") {
@@ -181,6 +270,18 @@ export function taskToDraft(task: ScheduledTask): DraftState {
       schedule.type === "webhook" && schedule.maxDeliveryAgeMinutes != null
         ? String(schedule.maxDeliveryAgeMinutes)
         : "",
+    ...WEBHOOK_REPLAY_DEFAULTS,
+    ...(schedule.type === "webhook" && schedule.deliveryId
+      ? schedule.deliveryId.type === "header"
+        ? { deliveryIdMode: "header", deliveryIdHeader: schedule.deliveryId.name }
+        : { deliveryIdMode: "body", deliveryIdPath: schedule.deliveryId.path }
+      : {}),
+    ...(schedule.type === "webhook" && schedule.deliveryTimestamp
+      ? {
+          deliveryTimestampPath: schedule.deliveryTimestamp.path,
+          deliveryTimestampToleranceSeconds: String(schedule.deliveryTimestamp.toleranceSeconds),
+        }
+      : {}),
   };
 }
 

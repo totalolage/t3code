@@ -18,6 +18,8 @@ import { resolveSettingsScope, type SettingsScopeSearch } from "./settingsScope"
 import { deriveProviderInstanceEntries } from "../../providerInstances";
 import {
   scheduledTaskDefaultModel,
+  webhookReplayDraftProblem,
+  withDeliveryIdMode,
   matchesScheduledTaskScope,
   scheduleFromDraft,
   taskToDraft,
@@ -190,11 +192,15 @@ describe("webhook scheduled tasks", () => {
       type: "webhook",
       signature,
       maxDeliveryAgeMinutes: null,
+      deliveryId: null,
+      deliveryTimestamp: null,
     });
     expect(scheduleFromDraft({ ...draft, signatureSecret: " new " })).toEqual({
       type: "webhook",
       signature: { ...signature, secret: "new" },
       maxDeliveryAgeMinutes: null,
+      deliveryId: null,
+      deliveryTimestamp: null,
     });
   });
 
@@ -208,11 +214,15 @@ describe("webhook scheduled tasks", () => {
       type: "webhook",
       signature: { scheme: "standard_webhooks" },
       maxDeliveryAgeMinutes: null,
+      deliveryId: null,
+      deliveryTimestamp: null,
     });
     expect(scheduleFromDraft({ ...draft, signatureSecret: "whsec_abc" })).toEqual({
       type: "webhook",
       signature: { scheme: "standard_webhooks", secret: "whsec_abc" },
       maxDeliveryAgeMinutes: null,
+      deliveryId: null,
+      deliveryTimestamp: null,
     });
     // Switching back to HMAC offers GitHub's settings.
     expect(scheduleFromDraft({ ...draft, signatureScheme: "hmac_sha256" })).toMatchObject({
@@ -228,6 +238,8 @@ describe("webhook scheduled tasks", () => {
       type: "webhook",
       signature: null,
       maxDeliveryAgeMinutes: null,
+      deliveryId: null,
+      deliveryTimestamp: null,
     });
   });
 
@@ -246,6 +258,65 @@ describe("webhook scheduled tasks", () => {
     for (const invalid of ["0", "-5", "1.5", "abc", "1441"]) {
       expect(scheduleFromDraft({ ...draft, maxDeliveryAgeMinutes: invalid })).toBeNull();
     }
+  });
+
+  it("round-trips replay settings and always sends null when they are off", () => {
+    const draft = taskToDraft({
+      ...webhookTask,
+      schedule: {
+        type: "webhook",
+        signature,
+        deliveryId: { type: "body", path: "event.id" },
+        deliveryTimestamp: { path: "sent_at", toleranceSeconds: 120 },
+      },
+    });
+    expect(scheduleFromDraft(draft)).toMatchObject({
+      deliveryId: { type: "body", path: "event.id" },
+      deliveryTimestamp: { path: "sent_at", toleranceSeconds: 120 },
+    });
+    expect(
+      scheduleFromDraft({
+        ...draft,
+        deliveryIdMode: "header",
+        deliveryIdHeader: " X-GitHub-Delivery ",
+      }),
+    ).toMatchObject({ deliveryId: { type: "header", name: "x-github-delivery" } });
+    expect(
+      scheduleFromDraft({ ...draft, deliveryIdMode: "off", deliveryTimestampPath: " " }),
+    ).toMatchObject({ deliveryId: null, deliveryTimestamp: null });
+  });
+
+  it("refuses incomplete replay settings", () => {
+    const draft = taskToDraft(webhookTask);
+    expect(draft.deliveryIdMode).toBe("off");
+    expect(webhookReplayDraftProblem(draft)).toBeNull();
+    for (const invalid of [
+      { deliveryIdMode: "header", deliveryIdHeader: " " },
+      { deliveryIdMode: "body", deliveryIdPath: "" },
+      { deliveryTimestampPath: "sent_at", deliveryTimestampToleranceSeconds: "3601" },
+      { deliveryTimestampPath: "sent_at", deliveryTimestampToleranceSeconds: "" },
+    ] as const) {
+      expect(webhookReplayDraftProblem({ ...draft, ...invalid })).toBeTypeOf("string");
+      expect(scheduleFromDraft({ ...draft, ...invalid })).toBeNull();
+    }
+  });
+
+  it("suggests the signed webhook-id header for Standard Webhooks without overwriting a typed one", () => {
+    const hmac = taskToDraft(webhookTask);
+    expect(withDeliveryIdMode(hmac, "header").deliveryIdHeader).toBe("x-github-delivery");
+    const standard = taskToDraft({
+      ...webhookTask,
+      schedule: { type: "webhook", signature: { scheme: "standard_webhooks" } },
+    });
+    expect(withDeliveryIdMode(standard, "header")).toMatchObject({
+      deliveryIdMode: "header",
+      deliveryIdHeader: "webhook-id",
+    });
+    expect(
+      withDeliveryIdMode({ ...standard, deliveryIdHeader: "x-request-id" }, "header")
+        .deliveryIdHeader,
+    ).toBe("x-request-id");
+    expect(withDeliveryIdMode(standard, "unknown").deliveryIdMode).toBe("off");
   });
 });
 
