@@ -29,7 +29,7 @@ concurrency:
 jobs:
   build:
     name: Build preview JS bundle
-    if: github.event.label.name == 'preview:mac'
+    if: github.repository == 'pingdotgg/t3code' && github.event.label.name == 'preview:mac'
     runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-32vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 30
     steps:
