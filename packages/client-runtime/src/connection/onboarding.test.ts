@@ -46,9 +46,8 @@ function layerPairingHttp(
   const fetchFn = ((input, init = {}) => {
     const url = String(input);
     calls.push({ url, init });
-    const requestUrl = new URL(url);
 
-    if (requestUrl.pathname === "/.well-known/t3/environment") {
+    if (url.endsWith("/.well-known/t3/environment")) {
       if (options?.failDescriptor === true) {
         return Promise.resolve(
           Response.json({ message: "descriptor unavailable" }, { status: 503 }),
@@ -72,7 +71,7 @@ function layerPairingHttp(
       );
     }
 
-    if (requestUrl.pathname === "/oauth/token") {
+    if (url.endsWith("/oauth/token")) {
       const body =
         init.body instanceof Uint8Array ? new TextDecoder().decode(init.body) : String(init.body);
       const requestedScope = new URLSearchParams(body).get("scope");
@@ -155,7 +154,7 @@ describe("connection onboarding", () => {
         "https://remote.example.test/oauth/token",
       ]);
 
-      const tokenRequest = calls.find((call) => new URL(call.url).pathname === "/oauth/token");
+      const tokenRequest = calls.find((call) => call.url.endsWith("/oauth/token"));
       const tokenBody =
         tokenRequest?.init.body instanceof Uint8Array
           ? new TextDecoder().decode(tokenRequest.init.body)
@@ -276,73 +275,6 @@ describe("connection onboarding", () => {
     }),
   );
 
-  it.effect("preserves ordered pairing query parameters in discovery and token requests", () =>
-    Effect.gen(function* () {
-      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
-      const registration = yield* preparePairingRegistration({
-        pairingUrl: "https://remote.example.test/pair?route=a&route=b&token=pairing-token",
-      }).pipe(Effect.provide(Layer.mergeAll(layerClientPresentation, layerPairingHttp(calls))));
-
-      expect(calls.map((call) => call.url)).toEqual([
-        "https://remote.example.test/.well-known/t3/environment?route=a&route=b",
-        "https://remote.example.test/oauth/token?route=a&route=b",
-      ]);
-      expect(registration.profile).toMatchObject({
-        httpBaseUrl: "https://remote.example.test/",
-        wsBaseUrl: "wss://remote.example.test/",
-        queryParameters: [
-          { key: "route", value: "a" },
-          { key: "route", value: "b" },
-        ],
-      });
-      expect(calls.every((call) => !new URL(call.url).searchParams.has("token"))).toBe(true);
-      const tokenRequest = calls.find((call) => new URL(call.url).pathname === "/oauth/token");
-      const tokenBody =
-        tokenRequest?.init.body instanceof Uint8Array
-          ? new TextDecoder().decode(tokenRequest.init.body)
-          : String(tokenRequest?.init.body);
-      expect(new URLSearchParams(tokenBody).get("subject_token")).toBe("pairing-token");
-    }),
-  );
-
-  it.effect("uses explicit pairing query parameters instead of URL parameters", () =>
-    Effect.gen(function* () {
-      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
-      const registration = yield* preparePairingRegistration({
-        pairingUrl: "https://remote.example.test/pair?route=url-a&route=url-b&token=pairing-token",
-        queryParameters: [
-          { key: "route", value: "override-a" },
-          { key: "route", value: "override-b" },
-        ],
-      }).pipe(Effect.provide(Layer.mergeAll(layerClientPresentation, layerPairingHttp(calls))));
-
-      expect(calls.map((call) => call.url)).toEqual([
-        "https://remote.example.test/.well-known/t3/environment?route=override-a&route=override-b",
-        "https://remote.example.test/oauth/token?route=override-a&route=override-b",
-      ]);
-      expect(registration.profile.queryParameters).toEqual([
-        { key: "route", value: "override-a" },
-        { key: "route", value: "override-b" },
-      ]);
-    }),
-  );
-
-  it.effect("clears pairing URL query parameters with an explicit empty override", () =>
-    Effect.gen(function* () {
-      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
-      const registration = yield* preparePairingRegistration({
-        pairingUrl: "https://remote.example.test/pair?route=url-a&route=url-b&token=pairing-token",
-        queryParameters: [],
-      }).pipe(Effect.provide(Layer.mergeAll(layerClientPresentation, layerPairingHttp(calls))));
-
-      expect(calls.map((call) => call.url)).toEqual([
-        "https://remote.example.test/.well-known/t3/environment",
-        "https://remote.example.test/oauth/token",
-      ]);
-      expect(registration.profile.queryParameters).toEqual([]);
-    }),
-  );
-
   it.effect("does not consume a pairing credential when descriptor discovery fails", () =>
     Effect.gen(function* () {
       const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
@@ -386,30 +318,9 @@ describe("connection onboarding", () => {
     }),
   );
 
-  it.effect("does not expose malformed pairing URL details", () =>
-    Effect.gen(function* () {
-      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
-      const pairingUrl = "not a url?route=secret&token=pairing-token";
-      const error = yield* preparePairingRegistration({ pairingUrl }).pipe(
-        Effect.provide(Layer.mergeAll(layerClientPresentation, layerPairingHttp(calls))),
-        Effect.flip,
-      );
-
-      expect(error).toMatchObject({
-        _tag: "ConnectionBlockedError",
-        reason: "configuration",
-        detail: "Pairing URL is invalid.",
-      });
-      expect(error.detail).not.toContain(pairingUrl);
-      expect(error.detail).not.toContain("route=secret");
-      expect(calls).toEqual([]);
-    }),
-  );
-
   it.effect("updates bearer metadata while preserving the credential and identity", () =>
     Effect.gen(function* () {
       const environmentId = EnvironmentId.make("environment-paired");
-      const credential = new BearerConnectionCredential({ token: "bearer-token" });
       const registration = yield* prepareBearerConnectionUpdate({
         input: {
           environmentId,
@@ -429,15 +340,11 @@ describe("connection onboarding", () => {
               label: "Old label",
               httpBaseUrl: "http://old.example.test/",
               wsBaseUrl: "ws://old.example.test/",
-              queryParameters: [
-                { key: "route", value: "one" },
-                { key: "route", value: "two" },
-              ],
             }),
           ),
           enabled: true,
         }),
-        credential: Option.some(credential),
+        credential: Option.some(new BearerConnectionCredential({ token: "bearer-token" })),
       });
 
       expect(registration).toMatchObject({
@@ -451,103 +358,9 @@ describe("connection onboarding", () => {
           label: "Renamed environment",
           httpBaseUrl: "http://100.65.180.100:3773/",
           wsBaseUrl: "ws://100.65.180.100:3773/",
-          queryParameters: [
-            { key: "route", value: "one" },
-            { key: "route", value: "two" },
-          ],
         },
         credential: { token: "bearer-token" },
       });
-      expect(registration.credential).toBe(credential);
-      expect(registration.target.environmentId).toBe(environmentId);
-      expect(registration.target.connectionId).toBe("bearer:environment-paired");
-      expect(registration.profile.environmentId).toBe(environmentId);
-      expect(registration.profile.connectionId).toBe("bearer:environment-paired");
-    }),
-  );
-
-  it.effect("clears saved bearer query parameters when explicitly given an empty list", () =>
-    Effect.gen(function* () {
-      const environmentId = EnvironmentId.make("environment-paired");
-      const credential = new BearerConnectionCredential({ token: "bearer-token" });
-      const registration = yield* prepareBearerConnectionUpdate({
-        input: {
-          environmentId,
-          label: "Renamed environment",
-          httpBaseUrl: "https://remote.example.test",
-          queryParameters: [],
-        },
-        entry: Option.some({
-          target: new BearerConnectionTarget({
-            environmentId,
-            label: "Old label",
-            connectionId: "bearer:environment-paired",
-          }),
-          profile: Option.some(
-            new BearerConnectionProfile({
-              connectionId: "bearer:environment-paired",
-              environmentId,
-              label: "Old label",
-              httpBaseUrl: "https://old.example.test/",
-              wsBaseUrl: "wss://old.example.test/",
-              queryParameters: [{ key: "route", value: "saved" }],
-            }),
-          ),
-          enabled: true,
-        }),
-        credential: Option.some(credential),
-      });
-
-      expect(registration.profile.queryParameters).toEqual([]);
-      expect(registration.credential).toBe(credential);
-      expect(registration.target.environmentId).toBe(environmentId);
-      expect(registration.target.connectionId).toBe("bearer:environment-paired");
-    }),
-  );
-
-  it.effect("normalizes explicit bearer query parameter replacements", () =>
-    Effect.gen(function* () {
-      const environmentId = EnvironmentId.make("environment-paired");
-      const credential = new BearerConnectionCredential({ token: "bearer-token" });
-      const registration = yield* prepareBearerConnectionUpdate({
-        input: {
-          environmentId,
-          label: "Renamed environment",
-          httpBaseUrl: "https://remote.example.test",
-          queryParameters: [
-            { key: "  route  ", value: "first" },
-            { key: "route", value: "second" },
-            { key: " ", value: "" },
-          ],
-        },
-        entry: Option.some({
-          target: new BearerConnectionTarget({
-            environmentId,
-            label: "Old label",
-            connectionId: "bearer:environment-paired",
-          }),
-          profile: Option.some(
-            new BearerConnectionProfile({
-              connectionId: "bearer:environment-paired",
-              environmentId,
-              label: "Old label",
-              httpBaseUrl: "https://old.example.test/",
-              wsBaseUrl: "wss://old.example.test/",
-              queryParameters: [{ key: "saved", value: "value" }],
-            }),
-          ),
-          enabled: true,
-        }),
-        credential: Option.some(credential),
-      });
-
-      expect(registration.profile.queryParameters).toEqual([
-        { key: "route", value: "first" },
-        { key: "route", value: "second" },
-      ]);
-      expect(registration.credential).toBe(credential);
-      expect(registration.target.environmentId).toBe(environmentId);
-      expect(registration.target.connectionId).toBe("bearer:environment-paired");
     }),
   );
 

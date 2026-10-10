@@ -133,7 +133,7 @@ const makeLocalTarget = Effect.fn("remoteAuth.test.makeLocalTarget")(function* (
 
 const makeRemoteTarget = (baseDir: string): RemoteCliTarget => ({
   kind: "remote",
-  httpBaseUrl: "https://remote.example?route=blue",
+  httpBaseUrl: "https://remote.example",
   environment: descriptor,
   tokenStateDirectory: `${baseDir}/remote-cli`,
   tokenKey: "https://remote.example",
@@ -165,7 +165,7 @@ describe("remote CLI authentication", () => {
               accessToken: "issued-access-token",
               expiresAtEpochMs: result.expiresAtEpochMs,
             });
-            assert.equal(requests[0]?.url, "https://remote.example/oauth/token?route=blue");
+            assert.equal(requests[0]?.url, "https://remote.example/oauth/token");
             assert.equal(form.get("grant_type"), AuthTokenExchangeGrantType);
             assert.equal(form.get("subject_token"), "bootstrap-secret");
             assert.equal(form.get("subject_token_type"), AuthEnvironmentBootstrapTokenType);
@@ -173,7 +173,7 @@ describe("remote CLI authentication", () => {
               form.get("scope"),
               `${AuthOrchestrationReadScope} ${AuthOrchestrationOperateScope}`,
             );
-            assert.equal(requests[1]?.url, "https://remote.example/api/auth/session?route=blue");
+            assert.equal(requests[1]?.url, "https://remote.example/api/auth/session");
             assert.equal(requests[1]?.headers.get("authorization"), "Bearer issued-access-token");
             assert.isNull(requests[0]?.headers.get("authorization"));
           }).pipe(

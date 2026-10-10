@@ -1,20 +1,21 @@
 import { useAtomValue } from "@effect/atom-react";
-import { type AssetUrlState, EMPTY_ASSET_URL_ATOM } from "@t3tools/client-runtime/state/assets";
+import {
+  type AssetUrlState,
+  assetUrlStateFromResult,
+  EMPTY_ASSET_URL_ATOM,
+  resolveAssetUrl,
+} from "@t3tools/client-runtime/state/assets";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { AssetResource, EnvironmentId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import { useCallback, useMemo } from "react";
 
-import {
-  assetUrlStateFromPreparedResult,
-  resolvePreparedAssetUrl,
-} from "~/assets/preparedAssetUrl";
 import { assetEnvironment } from "~/state/assets";
 import { useFilesystemReadAccess } from "~/state/filesystem";
 import { usePreparedConnection } from "~/state/session";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
-export { type AssetUrlState } from "@t3tools/client-runtime/state/assets";
+export { resolveAssetUrl, type AssetUrlState } from "@t3tools/client-runtime/state/assets";
 
 export function useAssetUrlState(
   environmentId: EnvironmentId | null,
@@ -33,9 +34,9 @@ export function useAssetUrlState(
       : assetEnvironment.createUrl({ environmentId, input: { resource } }),
   );
   if (!canReadResource) return { _tag: fileAccess.isPending ? "Loading" : "Failure" };
-  return assetUrlStateFromPreparedResult(
+  return assetUrlStateFromResult(
     result,
-    preparedConnection._tag === "Some" ? preparedConnection.value : null,
+    preparedConnection._tag === "Some" ? preparedConnection.value.httpBaseUrl : null,
   );
 }
 
@@ -44,16 +45,17 @@ export function useAssetUrlRefresh(
   resource: AssetResource | null,
 ): () => Promise<string | null> {
   const connection = usePreparedConnection(environmentId);
+  const httpBaseUrl = connection._tag === "Some" ? connection.value.httpBaseUrl : null;
   const refresh = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
     refresh: true,
   });
   return useCallback(async () => {
-    if (environmentId === null || resource === null || connection._tag === "None") return null;
+    if (environmentId === null || resource === null || httpBaseUrl === null) return null;
     const result = await refresh({ environmentId, input: { resource } });
     if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-    return resolvePreparedAssetUrl(connection.value, result.value.relativeUrl);
-  }, [environmentId, resource, refresh, connection]);
+    return resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
+  }, [environmentId, resource, refresh, httpBaseUrl]);
 }
 
 export function useAssetUrls(
@@ -93,7 +95,7 @@ export function useAssetUrls(
         return null;
       const result = results[resultIndex++];
       return result && AsyncResult.isSuccess(result)
-        ? resolvePreparedAssetUrl(preparedConnection.value, result.value.relativeUrl)
+        ? resolveAssetUrl(preparedConnection.value.httpBaseUrl, result.value.relativeUrl)
         : null;
     });
   }, [canReadFiles, preparedConnection, resources, results]);

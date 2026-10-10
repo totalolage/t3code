@@ -7,7 +7,6 @@ import {
   type AuthEnvironmentScope,
 } from "@t3tools/contracts";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
-import { mergeRemoteQueryParameters, type RemoteQueryParameter } from "@t3tools/shared/remote";
 import * as Effect from "effect/Effect";
 import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import {
@@ -120,14 +119,9 @@ export const bootstrapRemoteBearerSession = Effect.fn(
   readonly credential: string;
   readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
   readonly clientMetadata?: AuthClientPresentationMetadata;
-  readonly queryParameters?: readonly RemoteQueryParameter[];
   readonly timeoutMs?: number;
 }) {
-  const client = yield* makeEnvironmentHttpApiGroupClient(
-    input.httpBaseUrl,
-    "auth",
-    input.queryParameters,
-  );
+  const client = yield* makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "auth");
   return yield* executeEnvironmentHttpRequest(
     environmentEndpointUrl(input.httpBaseUrl, "/oauth/token"),
     input.timeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS,
@@ -150,14 +144,9 @@ export const fetchRemoteSessionState = Effect.fn(
 )(function* (input: {
   readonly httpBaseUrl: string;
   readonly bearerToken: string;
-  readonly queryParameters?: readonly RemoteQueryParameter[];
   readonly timeoutMs?: number;
 }) {
-  const client = yield* makeEnvironmentHttpApiGroupClient(
-    input.httpBaseUrl,
-    "auth",
-    input.queryParameters,
-  );
+  const client = yield* makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "auth");
   return yield* executeEnvironmentHttpRequest(
     environmentEndpointUrl(input.httpBaseUrl, "/api/auth/session"),
     input.timeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS,
@@ -174,14 +163,9 @@ export const issueRemoteWebSocketTicket = Effect.fn(
 )(function* (input: {
   readonly httpBaseUrl: string;
   readonly bearerToken: string;
-  readonly queryParameters?: readonly RemoteQueryParameter[];
   readonly timeoutMs?: number;
 }) {
-  const client = yield* makeEnvironmentHttpApiGroupClient(
-    input.httpBaseUrl,
-    "auth",
-    input.queryParameters,
-  );
+  const client = yield* makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "auth");
   return yield* executeEnvironmentHttpRequest(
     environmentEndpointUrl(input.httpBaseUrl, "/api/auth/websocket-ticket"),
     input.timeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS,
@@ -222,13 +206,11 @@ export const resolveRemoteWebSocketConnectionUrl = Effect.fn(
   readonly bearerToken: string;
   readonly clientMetadata?: AuthClientPresentationMetadata;
   readonly connectionMethod?: ClientConnectionMethod;
-  readonly queryParameters?: readonly RemoteQueryParameter[];
   readonly timeoutMs?: number;
 }) {
   const issued = yield* issueRemoteWebSocketTicket({
     httpBaseUrl: input.httpBaseUrl,
     bearerToken: input.bearerToken,
-    ...(input.queryParameters ? { queryParameters: input.queryParameters } : {}),
     ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
   });
 
@@ -238,7 +220,7 @@ export const resolveRemoteWebSocketConnectionUrl = Effect.fn(
   }
   url.searchParams.set("wsTicket", issued.ticket);
   appendClientConnectionParams(url, input.clientMetadata, input.connectionMethod);
-  return mergeRemoteQueryParameters(url.toString(), input.queryParameters ?? []);
+  return url.toString();
 });
 
 export const resolveRemoteDpopWebSocketConnectionUrl = Effect.fn(

@@ -11,13 +11,10 @@ import type {
 import { videoMimeType } from "@t3tools/shared/video";
 import { resolveMediaSource } from "@t3tools/client-runtime/media-source";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
-import type { PreparedConnection } from "@t3tools/client-runtime/connection";
 import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
-
-import { resolvePreparedAssetUrl } from "~/assets/preparedAssetUrl";
 import { resolveExternalWebLinkHost } from "./externalLinkContextMenu";
 import type { MediaActionSource } from "../media/MediaActions";
 import { resolveProtocolRelativeMediaUrl } from "../media/mediaContent";
@@ -52,7 +49,6 @@ export async function resolveMarkdownMediaPreview(input: {
   cwd?: string | undefined;
   threadRef?: ScopedThreadRef | undefined;
   httpBaseUrl?: string | undefined;
-  connection?: Pick<PreparedConnection, "httpBaseUrl" | "queryParameters"> | undefined;
   onOpenFile?: ((relativePath: string) => void) | undefined;
   createAssetUrl: (input: {
     environmentId: EnvironmentId;
@@ -82,9 +78,7 @@ export async function resolveMarkdownMediaPreview(input: {
       input: { resource: asset.resource },
     });
     if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-    const assetUrl = input.connection
-      ? resolvePreparedAssetUrl(input.connection, result.value.relativeUrl)
-      : resolveAssetUrl(input.httpBaseUrl, result.value.relativeUrl);
+    const assetUrl = resolveAssetUrl(input.httpBaseUrl, result.value.relativeUrl);
     if (assetUrl === null) throw new Error("The environment returned an invalid media URL.");
     src = assetUrl + media.srcFragment;
   }

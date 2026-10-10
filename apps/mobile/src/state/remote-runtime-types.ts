@@ -1,6 +1,5 @@
 import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import { EnvironmentId, ThreadId, type ServerConfig } from "@t3tools/contracts";
-import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 
 export interface EnvironmentRuntimeState {
   readonly connectionState: EnvironmentConnectionPhase;
@@ -19,7 +18,6 @@ export interface ConnectedEnvironmentSummary {
   readonly connectionState: EnvironmentConnectionPhase;
   readonly connectionError: string | null;
   readonly connectionErrorTraceId: string | null;
-  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
 }
 
 export interface SelectedThreadRef {

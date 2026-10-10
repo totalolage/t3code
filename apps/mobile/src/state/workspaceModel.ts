@@ -1,6 +1,5 @@
 import { type EnvironmentShellSummary } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId, ServerConfig } from "@t3tools/contracts";
-import type { SavedRemoteConnection } from "../lib/connection";
 
 import {
   type EnvironmentConnectionPhase,
@@ -8,22 +7,9 @@ import {
 } from "@t3tools/client-runtime/connection";
 
 import type { EnvironmentConnectionSummary as WorkspaceEnvironment } from "@t3tools/client-runtime/state/presentation";
-import type { ConnectedEnvironmentSummary } from "./remote-runtime-types";
 
 export { projectEnvironmentConnectionSummary as projectWorkspaceEnvironment } from "@t3tools/client-runtime/state/presentation";
 export type { EnvironmentConnectionSummary as WorkspaceEnvironment } from "@t3tools/client-runtime/state/presentation";
-
-export function includeSavedConnectionQueryParameters(
-  environments: ReadonlyArray<WorkspaceEnvironment>,
-  savedConnectionsById: Readonly<
-    Record<EnvironmentId, Pick<SavedRemoteConnection, "queryParameters">>
-  >,
-): ReadonlyArray<ConnectedEnvironmentSummary> {
-  return environments.map((environment) => {
-    const queryParameters = savedConnectionsById[environment.environmentId]?.queryParameters;
-    return queryParameters === undefined ? environment : { ...environment, queryParameters };
-  });
-}
 
 export interface WorkspaceConnectionState {
   readonly isLoadingConnections: boolean;

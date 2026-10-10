@@ -1,6 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
-  type ConnectionOnboarding,
   RelayConnectionRegistration,
   RelayConnectionTarget,
 } from "@t3tools/client-runtime/connection";
@@ -9,13 +8,12 @@ import type {
   RelayClientEnvironmentRecord,
   RelayEnvironmentStatusResponse,
 } from "@t3tools/contracts/relay";
-import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import * as Option from "effect/Option";
 import { useCallback, useMemo } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
 import {
-  connectPairing as connectPairingAtom,
+  connectPairingUrl as connectPairingUrlAtom,
   updateBearerConnection,
 } from "../../connection/onboarding";
 import { useWorkspaceEnvironments } from "../../state/workspace";
@@ -34,7 +32,7 @@ export interface RelayEnvironmentView {
 export function useConnectionController() {
   const connectedEnvironments = useWorkspaceEnvironments();
   const discovery = useAtomValue(relayEnvironmentDiscovery.stateValueAtom);
-  const connectPairingMutation = useAtomCommand(connectPairingAtom, {
+  const connectPairingUrlMutation = useAtomCommand(connectPairingUrlAtom, {
     reportFailure: false,
   });
   const updateBearer = useAtomCommand(updateBearerConnection, { reportFailure: false });
@@ -70,9 +68,13 @@ export function useConnectionController() {
     [registeredIds, relayEnvironments],
   );
 
-  const connectPairing = useCallback(
-    (input: ConnectionOnboarding.PairingConnectionInput) => connectPairingMutation(input),
-    [connectPairingMutation],
+  const connectPairingUrl = useCallback(
+    (pairingUrl: string, expectedEnvironmentId?: EnvironmentId) =>
+      connectPairingUrlMutation({
+        pairingUrl,
+        ...(expectedEnvironmentId === undefined ? {} : { expectedEnvironmentId }),
+      }),
+    [connectPairingUrlMutation],
   );
   const connectRelayEnvironment = useCallback(
     (environment: RelayClientEnvironmentRecord) =>
@@ -102,19 +104,12 @@ export function useConnectionController() {
   const updateEnvironment = useCallback(
     (
       environmentId: EnvironmentId,
-      updates: {
-        readonly label: string;
-        readonly displayUrl: string;
-        readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
-      },
+      updates: { readonly label: string; readonly displayUrl: string },
     ) =>
       updateBearer({
         environmentId,
         label: updates.label,
         httpBaseUrl: updates.displayUrl,
-        ...(updates.queryParameters === undefined
-          ? {}
-          : { queryParameters: updates.queryParameters }),
       }),
     [updateBearer],
   );
@@ -129,7 +124,7 @@ export function useConnectionController() {
       error: Option.getOrNull(discovery.error)?.message ?? null,
       errorTraceId: Option.getOrNull(discovery.error)?.traceId ?? null,
     },
-    connectPairing,
+    connectPairingUrl,
     connectRelayEnvironment,
     removeEnvironment,
     retryEnvironment,

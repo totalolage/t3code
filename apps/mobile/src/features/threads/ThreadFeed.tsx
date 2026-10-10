@@ -33,7 +33,6 @@ import {
 } from "@t3tools/shared/composerContextReferences";
 import { ComposerContextSheet } from "../../components/ComposerContextSheet";
 import { writeComposerContextClipboard } from "../../lib/composerContextClipboard";
-import { resolveNativeAssetUrl } from "../../lib/nativeAssetUrl";
 import {
   codexArtifactTemplatePresentationLabel,
   type CodexArtifactTemplate,
@@ -507,7 +506,6 @@ function MessageAttachmentFile(props: {
   const httpBaseUrl = Option.isSome(preparedConnection)
     ? preparedConnection.value.httpBaseUrl
     : null;
-  const connection = Option.isSome(preparedConnection) ? preparedConnection.value : null;
   const openingRef = useRef<AbortController | null>(null);
   const [opening, setOpening] = useState(false);
 
@@ -522,7 +520,7 @@ function MessageAttachmentFile(props: {
   );
 
   const shareFile = (sourceIdentifier?: string) => {
-    if (connection === null || openingRef.current) return;
+    if (httpBaseUrl === null || openingRef.current) return;
     const controller = new AbortController();
     openingRef.current = controller;
     setOpening(true);
@@ -543,7 +541,7 @@ function MessageAttachmentFile(props: {
         if (result._tag === "Failure") {
           throw squashAtomCommandFailure(result);
         }
-        const url = resolveNativeAssetUrl(connection, result.value.relativeUrl);
+        const url = resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
         if (url === null) {
           throw new Error("The attachment could not be opened.");
         }

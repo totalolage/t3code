@@ -145,13 +145,15 @@ const sanitizeStreamDefects = <E, R>(
 
 /**
  * Derives the native `/ws` socket URL: swaps the protocol, replaces the path,
- * preserves the explicit routing query pairs in order, and appends the fresh
- * `wsTicket`. The bearer token never travels in the URL.
+ * and sets the fresh `wsTicket` as the only query parameter. The bearer token
+ * never travels in the URL.
  */
 const webSocketUrl = (httpBaseUrl: string, ticket: string): string => {
   const url = new URL(httpBaseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.pathname = "/ws";
+  url.search = "";
+  url.hash = "";
   url.searchParams.set("wsTicket", ticket);
   return url.toString();
 };

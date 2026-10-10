@@ -13,97 +13,15 @@ describe("hostedPairing", () => {
     vi.unstubAllEnvs();
   });
 
-  it("does not classify direct backend host routing URLs as hosted pairing", () => {
-    vi.stubEnv("VITE_HOSTED_APP_URL", "https://app.t3.codes");
-
-    const directBackendUrl = new URL(
-      "https://backend.example.com/pair?host=router&host=second#token=ABCD1234",
-    );
-    const wrongPathUrl = new URL("https://app.t3.codes/connect?host=router&token=ABCD1234");
-
-    expect(readHostedPairingRequest(directBackendUrl)).toBeNull();
-    expect(hasHostedPairingRequest(directBackendUrl)).toBe(false);
-    expect(readHostedPairingRequest(wrongPathUrl)).toBeNull();
-    expect(hasHostedPairingRequest(wrongPathUrl)).toBe(false);
-  });
-
-  it("extracts nested pairs from the configured hosted origin and exact pair path", () => {
-    vi.stubEnv("VITE_HOSTED_APP_URL", "https://preview.t3.codes");
-
-    const url = new URL(
-      "https://preview.t3.codes/pair?host=https%3A%2F%2Fbackend.example.com%2F%3Fproxy%3Done%26proxy%3Dtwo#token=ABCD1234",
-    );
+  it("reads hosted pairing host and query token parameters", () => {
+    const url = new URL("https://app.t3.codes/pair?host=100.64.1.2:3773&token=ABCD1234");
 
     expect(readHostedPairingRequest(url)).toEqual({
-      host: "https://backend.example.com",
+      host: "100.64.1.2:3773",
       token: "ABCD1234",
       label: "",
-      queryParameters: [
-        { key: "proxy", value: "one" },
-        { key: "proxy", value: "two" },
-      ],
-    });
-  });
-
-  it("reads a normalized hosted host and repeated nested query parameters", () => {
-    vi.stubEnv("VITE_HOSTED_APP_URL", "https://app.t3.codes");
-
-    const url = new URL(
-      "https://app.t3.codes/pair?host=https%3A%2F%2F100.64.1.2%3A3773%2F%3Fproxy%3Done%26proxy%3Dtwo&token=ABCD1234",
-    );
-
-    expect(readHostedPairingRequest(url)).toEqual({
-      host: "https://100.64.1.2:3773",
-      token: "ABCD1234",
-      label: "",
-      queryParameters: [
-        { key: "proxy", value: "one" },
-        { key: "proxy", value: "two" },
-      ],
     });
     expect(hasHostedPairingRequest(url)).toBe(true);
-  });
-
-  it("excludes outer hosted-page metadata from backend query parameters", () => {
-    vi.stubEnv("VITE_HOSTED_APP_URL", "https://app.t3.codes");
-
-    const url = new URL(
-      "https://app.t3.codes/pair?host=https%3A%2F%2Fbackend.example.com%2F%3Fproxy%3Done%26proxy%3Dtwo&label=Workstation&outer=ignored&token=search-token#token=ABCD1234",
-    );
-
-    expect(readHostedPairingRequest(url)).toEqual({
-      host: "https://backend.example.com",
-      token: "ABCD1234",
-      label: "Workstation",
-      queryParameters: [
-        { key: "proxy", value: "one" },
-        { key: "proxy", value: "two" },
-      ],
-    });
-  });
-
-  it("keeps legacy hosted links without backend query parameters", () => {
-    vi.stubEnv("VITE_HOSTED_APP_URL", "https://app.t3.codes");
-
-    const url = new URL("https://app.t3.codes/pair?host=backend.example.com%3A3773#token=ABCD1234");
-
-    expect(readHostedPairingRequest(url)).toEqual({
-      host: "https://backend.example.com:3773",
-      token: "ABCD1234",
-      label: "",
-      queryParameters: [],
-    });
-  });
-
-  it("rejects hosted links with an invalid nested backend host", () => {
-    vi.stubEnv("VITE_HOSTED_APP_URL", "https://app.t3.codes");
-
-    const url = new URL(
-      "https://app.t3.codes/pair?host=https%3A%2F%2F%5Binvalid&label=Workstation&outer=ignored#token=ABCD1234",
-    );
-
-    expect(readHostedPairingRequest(url)).toBeNull();
-    expect(hasHostedPairingRequest(url)).toBe(false);
   });
 
   it("prefers hash tokens so generated hosted links do not put credentials in search params", () => {
@@ -141,8 +59,6 @@ describe("hostedPairing", () => {
   });
 
   it("ignores incomplete hosted pairing requests", () => {
-    vi.stubEnv("VITE_HOSTED_APP_URL", "https://app.t3.codes");
-
     expect(
       hasHostedPairingRequest(new URL("https://app.t3.codes/pair?host=backend.example.com")),
     ).toBe(false);

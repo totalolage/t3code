@@ -567,7 +567,7 @@ describe("remote command registration", () => {
     );
   });
 
-  it.effect("watch with --host targets that host with routing query, not local discovery", () => {
+  it.effect("watch with --host targets that host, not local discovery", () => {
     const requests: Array<Request> = [];
     return Effect.gen(function* () {
       const home = yield* makeTokenedHome();
@@ -576,7 +576,7 @@ describe("remote command registration", () => {
         "watch",
         "thread-1",
         "--host",
-        "https://fake.test?route=blue",
+        "https://fake.test",
         "--base-dir",
         home,
       ]).pipe(Effect.flip);
@@ -586,7 +586,6 @@ describe("remote command registration", () => {
       const errorLines = (yield* TestConsole.errorLines).map((line) => String(line));
       assert.equal(errorLines.filter((line) => line.includes("watch-no-turn")).length, 1);
       assert.isTrue(requests.every((request) => request.url.includes("fake.test")));
-      assert.isTrue(requests.some((request) => request.url.includes("route=blue")));
       assert.isFalse(requests.some((request) => request.url.includes("127.0.0.1")));
     }).pipe(
       Effect.provide(

@@ -247,7 +247,7 @@ import { readThreadShell, useThreadShells } from "~/state/entities";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
 import type { ComposerContextClipboardFragment, ComposerContextRecord } from "@t3tools/contracts";
-import { resolvePreparedAssetUrl } from "~/assets/preparedAssetUrl";
+import { resolveAssetUrl } from "~/assets/assetUrls";
 import { assetEnvironment } from "~/state/assets";
 import { readPreparedConnection } from "~/state/session";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
@@ -3186,7 +3186,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       const url =
         result._tag === "Success"
-          ? resolvePreparedAssetUrl(sourceConnection, result.value.relativeUrl)
+          ? resolveAssetUrl(sourceConnection.httpBaseUrl, result.value.relativeUrl)
           : null;
       if (!url) {
         fail("The original attachment is no longer available.");
