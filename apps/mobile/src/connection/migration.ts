@@ -12,7 +12,6 @@ import {
   registerConnectionInCatalog,
 } from "@t3tools/client-runtime/platform";
 import { EnvironmentId } from "@t3tools/contracts";
-import { RemoteQueryParameter } from "@t3tools/shared/remote";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -23,7 +22,6 @@ const LegacySavedRemoteConnection = Schema.Struct({
   displayUrl: Schema.String,
   httpBaseUrl: Schema.String,
   wsBaseUrl: Schema.String,
-  queryParameters: Schema.optionalKey(Schema.Array(RemoteQueryParameter)),
   bearerToken: Schema.NullOr(Schema.String),
   authenticationMethod: Schema.optionalKey(Schema.Literals(["bearer", "dpop"])),
   dpopAccessToken: Schema.optionalKey(Schema.String),
@@ -46,10 +44,10 @@ function isRelayManaged(connection: typeof LegacySavedRemoteConnection.Type): bo
   return connection.relayManaged === true || connection.authenticationMethod === "dpop";
 }
 
-const migrateConnection = Effect.fn("mobile.connectionMigration.migrateConnection")(function* (
+function migrateConnection(
   document: ConnectionCatalogDocument,
   connection: typeof LegacySavedRemoteConnection.Type,
-): Effect.fn.Return<ConnectionCatalogDocument, LegacyConnectionMigrationError> {
+): ConnectionCatalogDocument {
   if (isRelayManaged(connection)) {
     return registerConnectionInCatalog(
       document,
@@ -62,13 +60,8 @@ const migrateConnection = Effect.fn("mobile.connectionMigration.migrateConnectio
     );
   }
 
-  const bearerToken = connection.bearerToken;
-  if (bearerToken === null || bearerToken.trim() === "") {
-    return yield* Effect.fail(
-      new LegacyConnectionMigrationError({
-        message: `Could not migrate legacy connection ${connection.environmentId}: missing bearer credential.`,
-      }),
-    );
+  if (connection.bearerToken === null || connection.bearerToken.trim() === "") {
+    return document;
   }
 
   const connectionId = `bearer:${connection.environmentId}`;
@@ -86,14 +79,13 @@ const migrateConnection = Effect.fn("mobile.connectionMigration.migrateConnectio
         label: connection.environmentLabel,
         httpBaseUrl: connection.httpBaseUrl,
         wsBaseUrl: connection.wsBaseUrl,
-        queryParameters: connection.queryParameters,
       }),
       credential: new BearerConnectionCredential({
-        token: bearerToken,
+        token: connection.bearerToken,
       }),
     }),
   );
-});
+}
 
 export const migrateLegacyConnectionCatalog = Effect.fn(
   "mobile.connectionMigration.migrateCatalog",
@@ -114,9 +106,5 @@ export const migrateLegacyConnectionCatalog = Effect.fn(
     ),
   );
 
-  let catalog = EMPTY_CONNECTION_CATALOG_DOCUMENT;
-  for (const connection of legacy.connections ?? []) {
-    catalog = yield* migrateConnection(catalog, connection);
-  }
-  return catalog;
+  return (legacy.connections ?? []).reduce(migrateConnection, EMPTY_CONNECTION_CATALOG_DOCUMENT);
 });

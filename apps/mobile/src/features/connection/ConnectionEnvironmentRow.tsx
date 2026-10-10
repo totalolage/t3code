@@ -3,7 +3,6 @@ import { SymbolView } from "../../components/AppSymbol";
 import { connectionStatusText } from "@t3tools/client-runtime/connection";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { type EnvironmentId, resolveEnvironmentMachineKind } from "@t3tools/contracts";
-import { normalizeRemoteQueryParameters, type RemoteQueryParameter } from "@t3tools/shared/remote";
 import { useAtomValue } from "@effect/atom-react";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
@@ -21,8 +20,6 @@ import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-typ
 import { serverEnvironment } from "../../state/server";
 import { ConnectionFormField } from "./ConnectionFormField";
 import { ConnectionStatusDot } from "./ConnectionStatusDot";
-import { QueryParameterFields } from "./QueryParameterFields";
-import { parsePairingUrl } from "./pairing";
 
 function connectionStatusLabel(environment: ConnectedEnvironmentSummary): string | null {
   if (!environment.isEnabled && environment.connectionState !== "unsupported") {
@@ -45,18 +42,11 @@ export function ConnectionEnvironmentRow(props: {
   readonly onSetEnabled: (environmentId: EnvironmentId, enabled: boolean) => void;
   readonly onUpdate: (
     environmentId: EnvironmentId,
-    updates: {
-      readonly label: string;
-      readonly displayUrl: string;
-      readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
-    },
+    updates: { readonly label: string; readonly displayUrl: string },
   ) => Promise<AtomCommandResult<unknown, unknown>>;
 }) {
   const [label, setLabel] = useState(props.environment.environmentLabel);
   const [url, setUrl] = useState(props.environment.displayUrl);
-  const [queryParameters, setQueryParameters] = useState<ReadonlyArray<RemoteQueryParameter>>(
-    () => props.environment.queryParameters ?? [],
-  );
   const serverConfig = useAtomValue(
     serverEnvironment.configValueAtom(props.environment.environmentId),
   );
@@ -70,44 +60,21 @@ export function ConnectionEnvironmentRow(props: {
     enabled &&
     (props.environment.connectionState === "connecting" ||
       props.environment.connectionState === "reconnecting");
-  const handleUrlChange = useCallback((value: string) => {
-    const parsed = parsePairingUrl(value);
-    if (
-      parsed.code.length > 0 ||
-      parsed.queryParameters.length > 0 ||
-      /[?#][^?#=]*=/u.test(value)
-    ) {
-      setUrl(parsed.host);
-      setQueryParameters(parsed.queryParameters);
+  const handleSave = useCallback(async () => {
+    const result = await props.onUpdate(props.environment.environmentId, {
+      label: label.trim(),
+      displayUrl: url.trim(),
+    });
+    if (AsyncResult.isSuccess(result)) {
+      props.onToggle();
       return;
     }
-
-    setUrl(value);
-  }, []);
-  const handleSave = useCallback(async () => {
-    try {
-      const normalizedQueryParameters = normalizeRemoteQueryParameters(queryParameters);
-      const result = await props.onUpdate(props.environment.environmentId, {
-        label: label.trim(),
-        displayUrl: url.trim(),
-        queryParameters: normalizedQueryParameters,
-      });
-      if (AsyncResult.isSuccess(result)) {
-        props.onToggle();
-        return;
-      }
-      const error = Cause.squash(result.cause);
-      Alert.alert(
-        "Could not update environment",
-        error instanceof Error ? error.message : "The environment could not be updated.",
-      );
-    } catch (error) {
-      Alert.alert(
-        "Could not update environment",
-        error instanceof Error ? error.message : "The environment could not be updated.",
-      );
-    }
-  }, [label, props, queryParameters, url]);
+    const error = Cause.squash(result.cause);
+    Alert.alert(
+      "Could not update environment",
+      error instanceof Error ? error.message : "The environment could not be updated.",
+    );
+  }, [label, url, props]);
 
   return (
     <Animated.View layout={LinearTransition.duration(250)} className="bg-grouped-card">
@@ -209,10 +176,8 @@ export function ConnectionEnvironmentRow(props: {
                 keyboardType="url"
                 placeholder="192.168.1.100:8080"
                 value={url}
-                onChangeText={handleUrlChange}
+                onChangeText={setUrl}
               />
-
-              <QueryParameterFields value={queryParameters} onChange={setQueryParameters} />
             </>
           )}
 

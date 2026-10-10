@@ -2298,7 +2298,7 @@ describe("waitForRevertedMessage", () => {
         ],
       },
       environmentId,
-      connection: { httpBaseUrl: "https://server.test" },
+      httpBaseUrl: "https://server.test",
       createAssetUrl: async () =>
         AsyncResult.success({ relativeUrl: "/asset/signed", expiresAt: Date.now() + 60_000 }),
     });
@@ -2306,37 +2306,6 @@ describe("waitForRevertedMessage", () => {
     expect(files[0]?.name).toBe("notes.txt");
     expect(await files[0]?.text()).toBe("original bytes");
     expect(fetchMock.mock.calls[0]?.[0]).toBe("https://server.test/asset/signed");
-  });
-
-  it("merges prepared-connection routing parameters into restored attachment URLs", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("original bytes"));
-    vi.stubGlobal("fetch", fetchMock);
-    await prepareRevertedMessageAttachments({
-      message: {
-        ...message,
-        attachments: [
-          {
-            type: "file",
-            id: "old-attachment",
-            name: "notes.txt",
-            mimeType: "text/plain",
-            sizeBytes: 14,
-          },
-        ],
-      },
-      environmentId,
-      connection: {
-        httpBaseUrl: "https://server.test",
-        queryParameters: [
-          { key: "proxy", value: "a" },
-          { key: "proxy", value: "b" },
-          { key: "token", value: "must-not-leak" },
-        ],
-      },
-      createAssetUrl: async () =>
-        AsyncResult.success({ relativeUrl: "/asset/signed", expiresAt: Date.now() + 60_000 }),
-    });
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://server.test/asset/signed?proxy=a&proxy=b");
   });
 });
 

@@ -1,10 +1,10 @@
+import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { Alert } from "react-native";
 
 import { downloadAndShareAttachment } from "../../lib/attachmentDownload";
-import { resolveNativeAssetUrl } from "../../lib/nativeAssetUrl";
 import { assetEnvironment } from "../../state/assets";
 import { usePreparedConnection } from "../../state/session";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
@@ -17,15 +17,15 @@ export function useFileChipShare(
   sourceIdentifier: string,
 ) {
   const connection = usePreparedConnection(environmentId);
-  const prepared = Option.isSome(connection) ? connection.value : null;
+  const httpBaseUrl = Option.isSome(connection) ? connection.value.httpBaseUrl : null;
   const createUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     refresh: true,
     reportFailure: false,
   });
-  const connectionRef = useRef(prepared);
+  const connectionRef = useRef(httpBaseUrl);
   useLayoutEffect(() => {
-    connectionRef.current = prepared;
-  }, [prepared]);
+    connectionRef.current = httpBaseUrl;
+  }, [httpBaseUrl]);
   const requestRef = useRef<AbortController | null>(null);
   useEffect(() => () => requestRef.current?.abort(), []);
 
@@ -35,16 +35,13 @@ export function useFileChipShare(
       if (!source || requestRef.current) return;
       const request = new AbortController();
       requestRef.current = request;
-      const preparedConnection = connectionRef.current;
+      const httpBaseUrl = connectionRef.current;
       void (async () => {
-        if (preparedConnection === null)
-          throw new Error("Reconnect to the environment and try again.");
+        if (httpBaseUrl === null) throw new Error("Reconnect to the environment and try again.");
         const result = await createUrl({ environmentId, input: { resource: source.resource } });
         if (request.signal.aborted) return;
         const url =
-          result._tag === "Success"
-            ? resolveNativeAssetUrl(preparedConnection, result.value.relativeUrl)
-            : null;
+          result._tag === "Success" ? resolveAssetUrl(httpBaseUrl, result.value.relativeUrl) : null;
         if (url === null) throw new Error("The file could not be loaded. Reconnect and try again.");
         await downloadAndShareAttachment({
           url,

@@ -13,7 +13,6 @@ import {
   getProjectFaviconResourceKey,
   isProjectFaviconFallbackUrl,
 } from "@t3tools/shared/projectFavicon";
-import { mergeRemoteQueryParameters, type RemoteQueryParameter } from "@t3tools/shared/remote";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
@@ -183,12 +182,9 @@ export function createProjectFaviconUrlAtomFamily(input: {
     readonly environmentId: EnvironmentId;
     readonly input: { readonly resource: AssetResource };
   }) => Atom.Atom<AsyncResult.AsyncResult<AssetCreateUrlResult, unknown>>;
-  readonly preparedConnection: (environmentId: EnvironmentId) => Atom.Atom<
-    Option.Option<{
-      readonly httpBaseUrl: string;
-      readonly queryParameters?: readonly RemoteQueryParameter[];
-    }>
-  >;
+  readonly preparedConnection: (
+    environmentId: EnvironmentId,
+  ) => Atom.Atom<Option.Option<{ readonly httpBaseUrl: string }>>;
   /** The environment's tracked clones, empty when it reports none. */
   readonly projectClones?: (
     environmentId: EnvironmentId,
@@ -198,22 +194,6 @@ export function createProjectFaviconUrlAtomFamily(input: {
     Schema.Tuple([EnvironmentId, Schema.String, Schema.NullOr(Schema.String)]),
   );
   const projectClones = input.projectClones;
-  // Proxy pairs ride only on same-origin URLs, mirroring nativeAssetUrl: the
-  // signed-URL service keys already on the link win, duplicates append in
-  // order, and the reserved token key is never added.
-  const withConnectionQueryParameters = (
-    url: string,
-    httpBaseUrl: string,
-    queryParameters: readonly RemoteQueryParameter[] | undefined,
-  ): string => {
-    if (queryParameters === undefined || queryParameters.length === 0) return url;
-    try {
-      if (new URL(url).origin !== new URL(httpBaseUrl).origin) return url;
-    } catch {
-      return url;
-    }
-    return mergeRemoteQueryParameters(url, queryParameters);
-  };
   const family = Atom.family((key: string) => {
     const [environmentId, cwd, path] = decodeKey(JSON.parse(key));
     const resource = { _tag: "project-favicon" as const, cwd, ...(path ? { path } : {}) };
@@ -235,11 +215,11 @@ export function createProjectFaviconUrlAtomFamily(input: {
     const resolvedUrl = Atom.make((get): string | null => {
       const result = get(request);
       const connection = get(input.preparedConnection(environmentId));
-      if (Option.isNone(connection)) return Option.getOrNull(get.self<string | null>());
-      const { httpBaseUrl, queryParameters } = connection.value;
-      const state = assetUrlStateFromResult(result, httpBaseUrl);
-      if (state._tag !== "Success") return Option.getOrNull(get.self<string | null>());
-      return withConnectionQueryParameters(state.url, httpBaseUrl, queryParameters);
+      const state = assetUrlStateFromResult(
+        result,
+        Option.isSome(connection) ? connection.value.httpBaseUrl : null,
+      );
+      return state._tag === "Success" ? state.url : Option.getOrNull(get.self<string | null>());
     }).pipe(Atom.setIdleTTL(ASSET_URL_IDLE_TTL_MS));
     const cache = input.imageCache;
     if (!cache) return resolvedUrl;

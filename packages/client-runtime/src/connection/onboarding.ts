@@ -1,10 +1,5 @@
 import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
-import {
-  normalizeRemoteQueryParameters,
-  RemotePairingTargetError,
-  resolveRemotePairingTarget,
-  type RemoteQueryParameter,
-} from "@t3tools/shared/remote";
+import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -48,7 +43,6 @@ export interface PairingConnectionInput {
    * environment, or nothing is saved.
    */
   readonly expectedEnvironmentId?: EnvironmentId;
-  readonly queryParameters?: readonly RemoteQueryParameter[];
 }
 
 export interface SshConnectionInput {
@@ -62,7 +56,6 @@ export interface BearerConnectionUpdateInput {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly httpBaseUrl: string;
-  readonly queryParameters?: readonly RemoteQueryParameter[];
 }
 
 export class ConnectionOnboarding extends Context.Service<
@@ -86,11 +79,6 @@ export class ConnectionOnboarding extends Context.Service<
   }
 >()("@t3tools/client-runtime/connection/onboarding/ConnectionOnboarding") {}
 
-const isRemotePairingTargetError = Schema.is(RemotePairingTargetError);
-
-const safePairingTargetErrorDetail = (cause: unknown): string =>
-  isRemotePairingTargetError(cause) ? cause.message : "The pairing details are invalid.";
-
 const resolvePairingTarget = Effect.fn("clientRuntime.connection.onboarding.resolvePairingTarget")(
   function* (input: PairingConnectionInput) {
     return yield* Effect.try({
@@ -98,7 +86,7 @@ const resolvePairingTarget = Effect.fn("clientRuntime.connection.onboarding.reso
       catch: (cause) =>
         new ConnectionBlockedError({
           reason: "configuration",
-          detail: safePairingTargetErrorDetail(cause),
+          detail: cause instanceof Error ? cause.message : "The pairing details are invalid.",
         }),
     });
   },
@@ -127,7 +115,6 @@ export const preparePairingRegistration = Effect.fn(
   const presentation = yield* ClientCapabilities.ClientPresentation;
   const descriptor = yield* fetchRemoteEnvironmentDescriptor({
     httpBaseUrl: target.httpBaseUrl,
-    queryParameters: target.queryParameters,
   }).pipe(Effect.mapError(mapRemoteEnvironmentError));
   // Checked before redeeming the one-time code, so a wrong link is not spent.
   if (
@@ -144,7 +131,6 @@ export const preparePairingRegistration = Effect.fn(
   const access = yield* bootstrapRemoteBearerSession({
     httpBaseUrl: target.httpBaseUrl,
     credential: target.credential,
-    queryParameters: target.queryParameters,
     clientMetadata: presentation.metadata,
   }).pipe(Effect.mapError(mapRemoteEnvironmentError));
   const connectionId = bearerConnectionId(descriptor.environmentId, target.httpBaseUrl);
@@ -161,7 +147,6 @@ export const preparePairingRegistration = Effect.fn(
       label: descriptor.label,
       httpBaseUrl: target.httpBaseUrl,
       wsBaseUrl: target.wsBaseUrl,
-      queryParameters: target.queryParameters,
     }),
     credential: new BearerConnectionCredential({
       token: access.access_token,
@@ -215,13 +200,12 @@ export const prepareBearerConnectionUpdate = Effect.fn(
   readonly credential: Option.Option<ConnectionCredential>;
 }) {
   const entry = Option.getOrNull(options.entry);
-  const profile = entry === undefined || entry === null ? null : Option.getOrNull(entry.profile);
   if (
     entry === undefined ||
     entry === null ||
     entry.target._tag !== "BearerConnectionTarget" ||
-    profile === null ||
-    !isBearerProfile(profile)
+    Option.isNone(entry.profile) ||
+    !isBearerProfile(entry.profile.value)
   ) {
     return yield* new ConnectionBlockedError({
       reason: "configuration",
@@ -252,17 +236,6 @@ export const prepareBearerConnectionUpdate = Effect.fn(
         detail: cause instanceof Error ? cause.message : "The environment URL is invalid.",
       }),
   });
-  const queryParameters = yield* Effect.try({
-    try: () =>
-      options.input.queryParameters === undefined
-        ? profile.queryParameters
-        : normalizeRemoteQueryParameters(options.input.queryParameters),
-    catch: (cause) =>
-      new ConnectionBlockedError({
-        reason: "configuration",
-        detail: safePairingTargetErrorDetail(cause),
-      }),
-  });
   const connectionId = entry.target.connectionId;
   return new BearerConnectionRegistration({
     target: new BearerConnectionTarget({
@@ -276,7 +249,6 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       label,
       httpBaseUrl,
       wsBaseUrl: deriveWsBaseUrl(httpBaseUrl),
-      queryParameters,
     }),
     credential: credential.value,
   });

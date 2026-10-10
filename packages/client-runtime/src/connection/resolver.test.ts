@@ -51,10 +51,6 @@ const SSH_TARGET: DesktopSshEnvironmentTarget = {
   port: 22,
 };
 
-type AuthorizeBearerInput = Parameters<
-  RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]["authorizeBearer"]
->[0];
-
 function catalogEntry(
   target: ConnectionTarget,
   profile: Option.Option<ConnectionProfile> = Option.none(),
@@ -239,8 +235,7 @@ describe("ConnectionResolver", () => {
         wsBaseUrl: "ws://127.0.0.1:3777",
       });
 
-      const prepared = yield* broker.prepare(catalogEntry(target));
-      expect(prepared).toEqual({
+      expect(yield* broker.prepare(catalogEntry(target))).toEqual({
         environmentId: ENVIRONMENT_ID,
         label: "Primary",
         httpBaseUrl: "http://127.0.0.1:3777",
@@ -249,17 +244,19 @@ describe("ConnectionResolver", () => {
         httpAuthorization: null,
         target,
       });
-      expect(prepared).not.toHaveProperty("queryParameters");
     }),
   );
 
   it.effect("authorizes a desktop primary environment with its platform bearer token", () =>
     Effect.gen(function* () {
-      const bearerInputs = yield* Ref.make<ReadonlyArray<AuthorizeBearerInput>>([]);
+      const bearerInputs = yield* Ref.make<ReadonlyArray<{ token: string; method: string }>>([]);
       const layerBroker = yield* makeDependencies({
         primaryBearerToken: "desktop-bearer",
         authorizeBearer: (input) =>
-          Ref.update(bearerInputs, (values) => [...values, input]).pipe(
+          Ref.update(bearerInputs, (values) => [
+            ...values,
+            { token: input.bearerToken, method: input.connectionMethod },
+          ]).pipe(
             Effect.as({
               environmentId: input.expectedEnvironmentId,
               label: "Primary",
@@ -280,30 +277,18 @@ describe("ConnectionResolver", () => {
         wsBaseUrl: "ws://127.0.0.1:3777",
       });
 
-      const prepared = yield* broker.prepare(catalogEntry(target));
-      expect(prepared).toMatchObject({
+      expect(yield* broker.prepare(catalogEntry(target))).toMatchObject({
         socketUrl: "ws://127.0.0.1:3777/ws?wsTicket=desktop&orchestrationProtocol=2",
         httpAuthorization: { _tag: "Bearer", token: "desktop-bearer" },
         target,
       });
-      expect(prepared).not.toHaveProperty("queryParameters");
-      const inputs = yield* Ref.get(bearerInputs);
-      expect(inputs).toEqual([
-        {
-          expectedEnvironmentId: ENVIRONMENT_ID,
-          httpBaseUrl: "http://127.0.0.1:3777",
-          wsBaseUrl: "ws://127.0.0.1:3777",
-          bearerToken: "desktop-bearer",
-          connectionMethod: "direct",
-        },
-      ]);
-      expect(inputs[0]).not.toHaveProperty("queryParameters");
+      expect(yield* Ref.get(bearerInputs)).toEqual([{ token: "desktop-bearer", method: "direct" }]);
     }),
   );
 
-  it.effect("uses the registered bearer profile and preserves its query parameters", () =>
+  it.effect("uses the registered bearer profile without re-reading the profile store", () =>
     Effect.gen(function* () {
-      const bearerInputs = yield* Ref.make<ReadonlyArray<AuthorizeBearerInput>>([]);
+      const bearerInputs = yield* Ref.make<ReadonlyArray<{ token: string; method: string }>>([]);
       const target = new BearerConnectionTarget({
         environmentId: ENVIRONMENT_ID,
         label: "Saved",
@@ -315,22 +300,19 @@ describe("ConnectionResolver", () => {
         label: "Saved",
         httpBaseUrl: ENDPOINT.httpBaseUrl,
         wsBaseUrl: ENDPOINT.wsBaseUrl,
-        queryParameters: [
-          { key: "tenant", value: "first" },
-          { key: "tenant", value: "second" },
-          { key: "feature", value: "enabled" },
-        ],
       });
       const layerBroker = yield* makeDependencies({
         credentials: [["saved-1", new BearerConnectionCredential({ token: "secret-bearer" })]],
         authorizeBearer: (input) =>
-          Ref.update(bearerInputs, (values) => [...values, input]).pipe(
+          Ref.update(bearerInputs, (values) => [
+            ...values,
+            { token: input.bearerToken, method: input.connectionMethod },
+          ]).pipe(
             Effect.as({
               environmentId: input.expectedEnvironmentId,
               label: "Saved",
               httpBaseUrl: input.httpBaseUrl,
-              socketUrl:
-                "wss://environment.example.test/ws?wsTicket=ticket&orchestrationProtocol=2",
+              socketUrl: "wss://environment.example.test/ws?wsTicket=ticket",
               httpAuthorization: {
                 _tag: "Bearer" as const,
                 token: input.bearerToken,
@@ -340,34 +322,10 @@ describe("ConnectionResolver", () => {
       });
       const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layerBroker));
 
-      const prepared = yield* broker.prepare(catalogEntry(target, Option.some(profile)));
-      expect(prepared).toEqual({
-        environmentId: ENVIRONMENT_ID,
-        label: "Saved",
-        httpBaseUrl: ENDPOINT.httpBaseUrl,
-        socketUrl: "wss://environment.example.test/ws?wsTicket=ticket&orchestrationProtocol=2",
-        httpAuthorization: {
-          _tag: "Bearer",
-          token: "secret-bearer",
-        },
-        queryParameters: profile.queryParameters,
-        target,
-      });
-      const inputs = yield* Ref.get(bearerInputs);
-      expect(inputs).toEqual([
-        {
-          expectedEnvironmentId: ENVIRONMENT_ID,
-          httpBaseUrl: ENDPOINT.httpBaseUrl,
-          wsBaseUrl: ENDPOINT.wsBaseUrl,
-          bearerToken: "secret-bearer",
-          connectionMethod: "direct",
-          queryParameters: [
-            { key: "tenant", value: "first" },
-            { key: "tenant", value: "second" },
-            { key: "feature", value: "enabled" },
-          ],
-        },
-      ]);
+      expect(
+        (yield* broker.prepare(catalogEntry(target, Option.some(profile)))).socketUrl,
+      ).toContain("wsTicket=ticket");
+      expect(yield* Ref.get(bearerInputs)).toEqual([{ token: "secret-bearer", method: "direct" }]);
     }),
   );
 
@@ -380,8 +338,7 @@ describe("ConnectionResolver", () => {
       const layerBroker = yield* makeDependencies();
       const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layerBroker));
 
-      const prepared = yield* broker.prepare(catalogEntry(target));
-      expect(prepared).toEqual({
+      expect(yield* broker.prepare(catalogEntry(target))).toEqual({
         environmentId: ENVIRONMENT_ID,
         label: "Authorized relay environment",
         httpBaseUrl: ENDPOINT.httpBaseUrl,
@@ -393,7 +350,6 @@ describe("ConnectionResolver", () => {
         },
         target,
       });
-      expect(prepared).not.toHaveProperty("queryParameters");
     }),
   );
 
@@ -439,7 +395,6 @@ describe("ConnectionResolver", () => {
     Effect.gen(function* () {
       const preparedTargets = yield* Ref.make<ReadonlyArray<DesktopSshEnvironmentTarget>>([]);
       const connectionMethods = yield* Ref.make<ReadonlyArray<string>>([]);
-      const bearerInputs = yield* Ref.make<ReadonlyArray<AuthorizeBearerInput>>([]);
       const target = new SshConnectionTarget({
         environmentId: ENVIRONMENT_ID,
         label: "SSH",
@@ -465,10 +420,8 @@ describe("ConnectionResolver", () => {
             }),
           ),
         authorizeBearer: (input) =>
-          Effect.gen(function* () {
-            yield* Ref.update(connectionMethods, (methods) => [...methods, input.connectionMethod]);
-            yield* Ref.update(bearerInputs, (values) => [...values, input]);
-            return {
+          Ref.update(connectionMethods, (methods) => [...methods, input.connectionMethod]).pipe(
+            Effect.as({
               environmentId: input.expectedEnvironmentId,
               label: "SSH",
               httpBaseUrl: input.httpBaseUrl,
@@ -477,17 +430,16 @@ describe("ConnectionResolver", () => {
                 _tag: "Bearer" as const,
                 token: input.bearerToken,
               },
-            };
-          }),
+            }),
+          ),
       });
       const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layerBroker));
 
-      const prepared = yield* broker.prepare(catalogEntry(target, Option.some(profile)));
-      expect(prepared.socketUrl).toContain("wsTicket=bearer");
-      expect(prepared).not.toHaveProperty("queryParameters");
+      expect(
+        (yield* broker.prepare(catalogEntry(target, Option.some(profile)))).socketUrl,
+      ).toContain("wsTicket=bearer");
       expect(yield* Ref.get(preparedTargets)).toEqual([SSH_TARGET]);
       expect(yield* Ref.get(connectionMethods)).toEqual(["ssh"]);
-      expect((yield* Ref.get(bearerInputs))[0]).not.toHaveProperty("queryParameters");
     }),
   );
 

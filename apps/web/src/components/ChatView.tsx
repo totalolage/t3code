@@ -3721,7 +3721,7 @@ export default function ChatView(props: ChatViewProps) {
         const url = await resolveFileAttachmentUrl({
           attachment,
           environmentId,
-          connection,
+          httpBaseUrl: connection.httpBaseUrl,
           createAssetUrl: createAttachmentAssetUrl,
         });
         const anchor = document.createElement("a");
@@ -8362,7 +8362,7 @@ export default function ChatView(props: ChatViewProps) {
         const files = await prepareRevertedMessageAttachments({
           message,
           environmentId,
-          connection,
+          httpBaseUrl: connection.httpBaseUrl,
           createAssetUrl: createAttachmentAssetUrl,
         });
         const store = useComposerDraftStore.getState();

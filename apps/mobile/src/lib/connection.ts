@@ -1,14 +1,8 @@
+import { EnvironmentId } from "@t3tools/contracts";
 import type {
-  ConnectionOnboarding,
   EnvironmentConnectionPhase,
   EnvironmentPresentation,
 } from "@t3tools/client-runtime/connection";
-import { EnvironmentId } from "@t3tools/contracts";
-import {
-  normalizeRemoteQueryParameters,
-  parseRemotePairingUrlFields,
-  type RemoteQueryParameter,
-} from "@t3tools/shared/remote";
 
 export interface SavedRemoteConnection {
   readonly environmentId: EnvironmentId;
@@ -21,7 +15,6 @@ export interface SavedRemoteConnection {
   readonly authenticationMethod?: "bearer" | "dpop";
   readonly dpopAccessToken?: string;
   readonly relayManaged?: true;
-  readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
 }
 
 export type RemoteClientConnectionState = EnvironmentConnectionPhase;
@@ -42,39 +35,6 @@ export function threadHidingUnavailableReason(
   return presentation.serverConfig?.environment.capabilities.threadHiding === true
     ? null
     : UPDATE_ENVIRONMENT_SERVER_REASON;
-}
-
-export function isIpLiteral(host: string): boolean {
-  try {
-    const hostname = new URL(`http://${host}`).hostname.replace(/^\[|\]$/g, "");
-    if (hostname.includes(":")) return true;
-
-    const octets = hostname.split(".");
-    return (
-      octets.length === 4 &&
-      octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
-    );
-  } catch {
-    return false;
-  }
-}
-
-export function pairingUrlInput(input: string): string {
-  const hasScheme = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//u.test(input) || input.startsWith("//");
-  return hasScheme || !isIpLiteral(input) ? input : `http://${input}`;
-}
-
-export function pairingConnectionInputFromUrl(
-  value: string,
-): ConnectionOnboarding.PairingConnectionInput {
-  const input = value.trim();
-  const parsed = input === "" ? null : parseRemotePairingUrlFields(pairingUrlInput(input));
-
-  return {
-    host: parsed?.host ?? input,
-    pairingCode: parsed?.pairingCode ?? "",
-    queryParameters: normalizeRemoteQueryParameters(parsed?.queryParameters ?? []),
-  };
 }
 
 export function isRelayManagedConnection(

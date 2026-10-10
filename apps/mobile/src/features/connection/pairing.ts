@@ -1,16 +1,22 @@
-import type { ConnectionOnboarding } from "@t3tools/client-runtime/connection";
-import {
-  normalizeRemoteQueryParameters,
-  parseRemotePairingUrlFields,
-  type RemoteQueryParameter,
-} from "@t3tools/shared/remote";
+import { readHostedPairingRequest } from "@t3tools/shared/remote";
 import * as Schema from "effect/Schema";
 
-import { isIpLiteral, pairingUrlInput } from "../../lib/connection";
-
-export { pairingConnectionInputFromUrl } from "../../lib/connection";
-
 const MOBILE_PAIRING_URL_PARAM = "pairingUrl";
+
+function isIpLiteral(host: string): boolean {
+  try {
+    const hostname = new URL(`http://${host}`).hostname.replace(/^\[|\]$/g, "");
+    if (hostname.includes(":")) return true;
+
+    const octets = hostname.split(".");
+    return (
+      octets.length === 4 &&
+      octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+    );
+  } catch {
+    return false;
+  }
+}
 
 export class PairingQrPayloadEmptyError extends Schema.TaggedError<PairingQrPayloadEmptyError>()(
   "PairingQrPayloadEmptyError",
@@ -21,71 +27,47 @@ export class PairingQrPayloadEmptyError extends Schema.TaggedError<PairingQrPayl
   }
 }
 
-export function buildPairingUrl(
-  host: string,
-  code: string,
-  queryParameters?: ReadonlyArray<RemoteQueryParameter>,
-): string {
+export function buildPairingUrl(host: string, code: string): string {
   const h = host.trim();
   const c = code.trim();
   if (!h) return "";
-  const parsed = parseRemotePairingUrlFields(pairingUrlInput(h));
-  const normalizedQueryParameters =
-    queryParameters === undefined
-      ? (parsed?.queryParameters ?? [])
-      : normalizeRemoteQueryParameters(queryParameters);
-  const effectiveCode = c || parsed?.pairingCode || "";
-
-  if (!effectiveCode && queryParameters === undefined) return h;
+  if (!c) return h;
 
   try {
-    const url = new URL(
-      parsed?.host ?? (h.includes("://") ? h : `${isIpLiteral(h) ? "http" : "https"}://${h}`),
-    );
-    url.search = "";
-    for (const parameter of normalizedQueryParameters) {
-      url.searchParams.append(parameter.key, parameter.value);
-    }
-    url.hash =
-      effectiveCode === "" ? "" : new URLSearchParams([["token", effectiveCode]]).toString();
+    const url = new URL(h.includes("://") ? h : `${isIpLiteral(h) ? "http" : "https"}://${h}`);
+    url.hash = new URLSearchParams([["token", c]]).toString();
     return url.toString();
   } catch {
-    return effectiveCode === "" ? h : `${h}#token=${effectiveCode}`;
+    return `${h}#token=${c}`;
   }
 }
 
-export function parsePairingUrl(url: string): {
-  host: string;
-  code: string;
-  queryParameters: ReadonlyArray<RemoteQueryParameter>;
-} {
+export function parsePairingUrl(url: string): { host: string; code: string } {
   const trimmed = url.trim();
-  if (!trimmed) return { host: "", code: "", queryParameters: [] };
+  if (!trimmed) return { host: "", code: "" };
 
-  const parsed = parseRemotePairingUrlFields(pairingUrlInput(trimmed));
-  if (parsed) {
-    return {
-      host: parsed.host,
-      code: parsed.pairingCode,
-      queryParameters: parsed.queryParameters,
-    };
+  try {
+    const parsed = new URL(trimmed);
+    const hostedPairingRequest = readHostedPairingRequest(parsed);
+    if (hostedPairingRequest) {
+      return {
+        host: hostedPairingRequest.host.replace(/\/$/, ""),
+        code: hostedPairingRequest.token,
+      };
+    }
+
+    const hashParams = new URLSearchParams(parsed.hash.slice(1));
+    const hashToken = hashParams.get("token");
+    const queryToken = parsed.searchParams.get("token");
+    const code = hashToken || queryToken || "";
+
+    parsed.hash = "";
+    parsed.search = "";
+    parsed.pathname = "/";
+    return { host: parsed.toString().replace(/\/$/, ""), code };
+  } catch {
+    return { host: trimmed, code: "" };
   }
-  return { host: trimmed, code: "", queryParameters: [] };
-}
-
-export function buildPairingConnectionInput(
-  host: string,
-  code: string,
-  queryParameters?: ReadonlyArray<RemoteQueryParameter>,
-): ConnectionOnboarding.PairingConnectionInput {
-  const parsed = parsePairingUrl(host);
-  const selectedQueryParameters = queryParameters ?? parsed.queryParameters;
-
-  return {
-    host: parsed.host,
-    pairingCode: code.trim() || parsed.code,
-    queryParameters: normalizeRemoteQueryParameters(selectedQueryParameters),
-  };
 }
 
 export function extractPairingUrlFromQrPayload(payload: string): string {

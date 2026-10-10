@@ -5,7 +5,6 @@ import { managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useCallback, useRef, useState } from "react";
 import { Platform, RefreshControl } from "react-native";
-import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SettingsScreen } from "./components/SettingsScreen";
@@ -80,11 +79,7 @@ export function SettingsEnvironmentsRouteScreen() {
   const handleUpdateEnvironment = useCallback(
     (
       environmentId: EnvironmentId,
-      updates: {
-        readonly label: string;
-        readonly displayUrl: string;
-        readonly queryParameters?: ReadonlyArray<RemoteQueryParameter>;
-      },
+      updates: { readonly label: string; readonly displayUrl: string },
     ) => {
       if (!SHOWCASE_ENABLED) return onUpdateEnvironment(environmentId, updates);
       const actualEnvironment = environmentSections.localEnvironments.find(

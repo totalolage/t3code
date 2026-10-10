@@ -6,9 +6,7 @@ import {
   useRoute,
   type StaticScreenProps,
 } from "@react-navigation/native";
-import type { ConnectionOnboarding } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId } from "@t3tools/contracts";
-import type { RemoteQueryParameter } from "@t3tools/shared/remote";
 import { AsyncResult } from "effect/reactivity";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Linking, Platform, View } from "react-native";
@@ -19,14 +17,7 @@ import { AppText as Text } from "../../components/AppText";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { ConnectionFormField } from "./ConnectionFormField";
 import { ConnectionSheetButton } from "./ConnectionSheetButton";
-import { QueryParameterFields } from "./QueryParameterFields";
-import {
-  buildPairingConnectionInput,
-  extractPairingUrlFromQrPayload,
-  pairingConnectionInputFromUrl,
-  parsePairingUrl,
-} from "./pairing";
-import { applyPairingHostInput } from "./pairingHostInput";
+import { buildPairingUrl, extractPairingUrlFromQrPayload, parsePairingUrl } from "./pairing";
 import { useRemoteConnections } from "../../state/use-remote-environment-registry";
 
 type ConnectionsNewRouteParams = {
@@ -59,8 +50,6 @@ export function ConnectionsNewRouteScreen({
   const insets = useSafeAreaInsets();
   const [hostInput, setHostInput] = useState("");
   const [codeInput, setCodeInput] = useState("");
-  const [queryParameters, setQueryParameters] = useState<ReadonlyArray<RemoteQueryParameter>>([]);
-  const [pairingFormError, setPairingFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showScanner, setShowScanner] = useState(params.mode === "scan_qr");
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
@@ -70,17 +59,11 @@ export function ConnectionsNewRouteScreen({
   const headerIconColor = useUniwindTheme()["--color-icon"];
 
   const connectDisabled = isSubmitting || hostInput.trim().length === 0;
-  const pairingError = pairingFormError ?? pairingConnectionError;
 
   useEffect(() => {
-    const {
-      host,
-      code,
-      queryParameters: nextQueryParameters,
-    } = parsePairingUrl(connectionPairingUrl);
+    const { host, code } = parsePairingUrl(connectionPairingUrl);
     setHostInput(host);
     setCodeInput(code);
-    setQueryParameters(nextQueryParameters);
   }, [connectionPairingUrl]);
 
   useEffect(() => {
@@ -88,10 +71,9 @@ export function ConnectionsNewRouteScreen({
       return;
     }
 
-    const { host, code, queryParameters: nextQueryParameters } = parsePairingUrl(routePairingUrl);
+    const { host, code } = parsePairingUrl(routePairingUrl);
     setHostInput(host);
     setCodeInput(code);
-    setQueryParameters(nextQueryParameters);
   }, [routePairingUrl]);
 
   useEffect(() => {
@@ -100,28 +82,12 @@ export function ConnectionsNewRouteScreen({
     }
   }, [pairingConnectionError]);
 
-  const handleHostChange = useCallback(
-    (value: string) => {
-      const next = applyPairingHostInput(
-        { host: hostInput, code: codeInput, queryParameters },
-        value,
-      );
-      setHostInput(next.host);
-      setCodeInput(next.code);
-      setQueryParameters(next.queryParameters);
-      setPairingFormError(null);
-    },
-    [hostInput, codeInput, queryParameters],
-  );
+  const handleHostChange = useCallback((value: string) => {
+    setHostInput(value);
+  }, []);
 
   const handleCodeChange = useCallback((value: string) => {
     setCodeInput(value);
-    setPairingFormError(null);
-  }, []);
-
-  const handleQueryParametersChange = useCallback((value: ReadonlyArray<RemoteQueryParameter>) => {
-    setQueryParameters(value);
-    setPairingFormError(null);
   }, []);
 
   const openScanner = useCallback(async () => {
@@ -171,11 +137,9 @@ export function ConnectionsNewRouteScreen({
 
       try {
         const pairingUrl = extractPairingUrlFromQrPayload(data);
-        const { host, code, queryParameters: nextQueryParameters } = parsePairingUrl(pairingUrl);
+        const { host, code } = parsePairingUrl(pairingUrl);
         setHostInput(host);
         setCodeInput(code);
-        setQueryParameters(nextQueryParameters);
-        setPairingFormError(null);
         onChangeConnectionPairingUrl(pairingUrl);
         setShowScanner(false);
       } catch (error) {
@@ -193,40 +157,28 @@ export function ConnectionsNewRouteScreen({
   );
 
   const connectAndClose = useCallback(
-    async (pairingInput: ConnectionOnboarding.PairingConnectionInput, replaceWithHome: boolean) => {
+    async (pairingUrl: string, replaceWithHome: boolean) => {
       setIsSubmitting(true);
-      // The React-Compiler-powered memo-dependencies lint misreports deps of
-      // async callbacks that use try/finally, so settle the flag via .finally.
-      const result = await onConnectPress({
-        ...pairingInput,
-        ...(params.routeFor === undefined ? {} : { expectedEnvironmentId: params.routeFor }),
-      }).finally(() => setIsSubmitting(false));
-      if (AsyncResult.isSuccess(result)) {
-        if (replaceWithHome || !navigation.canGoBack()) {
-          navigation.dispatch(StackActions.replace("Home"));
-        } else {
-          navigation.goBack();
+      onChangeConnectionPairingUrl(pairingUrl);
+      try {
+        const result = await onConnectPress(pairingUrl, params.routeFor);
+        if (AsyncResult.isSuccess(result)) {
+          if (replaceWithHome || !navigation.canGoBack()) {
+            navigation.dispatch(StackActions.replace("Home"));
+          } else {
+            navigation.goBack();
+          }
         }
+      } finally {
+        setIsSubmitting(false);
       }
     },
-    [navigation, onConnectPress, params.routeFor],
+    [navigation, onChangeConnectionPairingUrl, onConnectPress, params.routeFor],
   );
 
   const handleSubmit = useCallback(async () => {
-    setPairingFormError(null);
-
-    let pairingInput: ConnectionOnboarding.PairingConnectionInput;
-    try {
-      pairingInput = buildPairingConnectionInput(hostInput, codeInput, queryParameters);
-    } catch (error) {
-      setPairingFormError(
-        error instanceof Error ? error.message : "The pairing details are invalid.",
-      );
-      return;
-    }
-
-    await connectAndClose(pairingInput, false);
-  }, [codeInput, connectAndClose, hostInput, queryParameters]);
+    await connectAndClose(buildPairingUrl(hostInput, codeInput), false);
+  }, [codeInput, connectAndClose, hostInput]);
 
   useEffect(() => {
     if (!shouldAutoConnect || attemptedAutoConnectRef.current === routePairingUrl) {
@@ -234,7 +186,7 @@ export function ConnectionsNewRouteScreen({
     }
 
     attemptedAutoConnectRef.current = routePairingUrl;
-    void connectAndClose(pairingConnectionInputFromUrl(routePairingUrl), true);
+    void connectAndClose(routePairingUrl, true);
   }, [connectAndClose, routePairingUrl, shouldAutoConnect]);
 
   return (
@@ -313,12 +265,7 @@ export function ConnectionsNewRouteScreen({
                 onChangeText={handleCodeChange}
               />
 
-              <QueryParameterFields
-                value={queryParameters}
-                onChange={handleQueryParametersChange}
-              />
-
-              {pairingError ? <ErrorBanner message={pairingError} /> : null}
+              {pairingConnectionError ? <ErrorBanner message={pairingConnectionError} /> : null}
 
               <View className="android:flex-row android:justify-end">
                 <ConnectionSheetButton

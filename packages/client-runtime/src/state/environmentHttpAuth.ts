@@ -180,13 +180,7 @@ const executeEnvironmentRequest = Effect.fnUntraced(function* <
       }
 
       const requestUrl = input.url(httpBaseUrl);
-      const client = yield* makeEnvironmentHttpApiGroupClient(
-        httpBaseUrl,
-        input.group,
-        input.prepared.target._tag === "BearerConnectionTarget"
-          ? input.prepared.queryParameters
-          : undefined,
-      );
+      const client = yield* makeEnvironmentHttpApiGroupClient(httpBaseUrl, input.group);
       const headers = yield* buildEnvironmentAuthHeaders(
         authorization,
         input.method,
