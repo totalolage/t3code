@@ -95,6 +95,8 @@ export function shouldPublishAgentAwarenessEvent(
     case "thread.created":
     case "thread.archived":
     case "thread.unarchived":
+    case "thread.hidden":
+    case "thread.unhidden":
     case "thread.deleted":
     case "thread.metadata-updated":
     case "thread.pull-request-synced":
@@ -107,8 +109,6 @@ export function shouldPublishAgentAwarenessEvent(
     case "provider-thread.updated":
       return true;
     case "thread.settled":
-    case "thread.hidden":
-    case "thread.unhidden":
     case "thread.unsettled":
     case "thread.snoozed":
     case "thread.unsnoozed":
@@ -348,7 +348,7 @@ export function resolveAgentAwarenessRelayActiveThreadIds(input: {
   return input.threads
     .filter((thread) => {
       const project = projectById.get(thread.projectId);
-      if (!project) {
+      if (!project || thread.hiddenAt !== null) {
         return false;
       }
       const state = projectThreadAwarenessV2({
@@ -423,6 +423,10 @@ export const make = Effect.gen(function* () {
   // tombstone can never race an in-flight live update; a recovered state
   // clears the deadline. Assigned after the worker exists.
   const publishConfirmDeadlines = new Map<ThreadId, number>();
+  // When each thread was last unhidden, recorded as the event arrives so a
+  // queued publish cannot miss it. A run that finished before that publishes a
+  // tombstone instead of a terminal alert.
+  const unhiddenAtByThread = new Map<ThreadId, number>();
   let schedulePublishConfirm: (threadId: ThreadId) => Effect.Effect<void> = () => Effect.void;
   const publishRetries = new Map<
     ThreadId,
@@ -536,19 +540,32 @@ export const make = Effect.gen(function* () {
       // filter so archiving one stays quiet too.
       return;
     }
+    // Archived and hidden threads publish a tombstone, so they never alert.
     const thread =
-      threadShell === null || threadShell.archivedAt !== null
+      threadShell === null || threadShell.archivedAt !== null || threadShell.hiddenAt !== null
         ? Option.none<OrchestrationV2ThreadShell>()
         : Option.some(threadShell);
     const project = Option.isSome(thread)
       ? yield* projects.getById(thread.value.projectId)
       : Option.none<Project>();
-    const snapshot = resolveAgentAwarenessRelayPublishSnapshot({
+    const projected = resolveAgentAwarenessRelayPublishSnapshot({
       environmentId,
       threadId,
       thread,
       project,
     });
+    // A run that finished before the thread was unhidden clears the activity
+    // instead of alerting. A same-millisecond tie counts as hidden: the user
+    // was touching that thread right then, so a missed push costs nothing.
+    const unhiddenAt = unhiddenAtByThread.get(threadId);
+    const snapshot =
+      (projected.state?.phase === "completed" || projected.state?.phase === "failed") &&
+      Option.isSome(thread) &&
+      unhiddenAt !== undefined &&
+      thread.value.latestRunCompletedAt != null &&
+      DateTime.toEpochMillis(thread.value.latestRunCompletedAt) <= unhiddenAt
+        ? { ...projected, state: null }
+        : projected;
     const publishIdentity = agentAwarenessPublishIdentity(snapshot.state);
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
     if (
@@ -828,6 +845,9 @@ export const make = Effect.gen(function* () {
       yield* forkParked(
         Stream.runForEach(threads.streamDomainEvents, (event) => {
           const threadId = eventThreadId(event);
+          if (event.type === "thread.unhidden") {
+            unhiddenAtByThread.set(threadId, DateTime.toEpochMillis(event.occurredAt));
+          }
           if (!shouldPublishAgentAwarenessEvent(event)) {
             return Effect.void;
           }

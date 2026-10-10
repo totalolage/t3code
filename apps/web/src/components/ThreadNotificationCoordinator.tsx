@@ -146,7 +146,7 @@ function EnvironmentNotifications({
           ? completedAt
           : (prior?.completion ?? null);
       next.set(thread.id, { raw: rawThread, attention, completion });
-      if (!prior || thread.archivedAt !== null) continue;
+      if (!prior || thread.archivedAt !== null || thread.hiddenAt !== null) continue;
       const kind =
         attention && attention !== prior.attention
           ? "input"

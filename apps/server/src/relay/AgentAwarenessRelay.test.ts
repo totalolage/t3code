@@ -130,6 +130,12 @@ describe("startup agent activity", () => {
         }),
         shell({ id: ThreadId.make("idle"), status: "idle" }),
         shell({ id: ThreadId.make("missing-project"), projectId: ProjectId.make("missing") }),
+        shell({
+          id: ThreadId.make("hidden"),
+          status: "completed",
+          latestRunCompletedAt: DateTime.makeUnsafe("2026-09-04T12:00:01.000Z"),
+          hiddenAt: DateTime.makeUnsafe(NOW),
+        }),
       ],
     });
     assert.deepStrictEqual(ids, [THREAD_ID, newCompleted, newFailed]);
@@ -279,6 +285,58 @@ const makeTestRelay = Effect.fnUntraced(function* (
   return { relay, secrets, secretReads, currentShell, shellReads, publications, catchUp };
 });
 
+// Delivers thread.unhidden through the relay's event stream, as the server does.
+const makeUnhidingTestRelay = Effect.fnUntraced(function* () {
+  const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+  // The relay pulls the next event only after it has handled the previous one.
+  const pulls = yield* Queue.unbounded<void>();
+  const testRelay = yield* makeTestRelay({
+    domainEvents: Stream.fromEffectRepeat(
+      Queue.offer(pulls, undefined).pipe(Effect.andThen(Queue.take(events))),
+    ),
+  });
+  yield* testRelay.relay.start();
+  yield* Queue.take(pulls);
+  const unhide = Effect.fnUntraced(function* (thread: OrchestrationV2ThreadShell) {
+    yield* Ref.set(testRelay.currentShell, thread);
+    const now = yield* DateTime.now;
+    yield* Queue.offer(events, {
+      id: EventId.make(`event:unhidden:${DateTime.toEpochMillis(now)}`),
+      type: "thread.unhidden",
+      threadId: THREAD_ID,
+      occurredAt: now,
+      payload: {
+        createdBy: thread.createdBy,
+        creationSource: thread.creationSource,
+        id: thread.id,
+        projectId: thread.projectId,
+        title: thread.title,
+        providerInstanceId: thread.providerInstanceId,
+        modelSelection: thread.modelSelection,
+        runtimeMode: thread.runtimeMode,
+        interactionMode: thread.interactionMode,
+        branch: thread.branch,
+        worktreePath: thread.worktreePath,
+        activeProviderThreadId: thread.activeProviderThreadId,
+        lineage: thread.lineage,
+        forkedFrom: thread.forkedFrom,
+        createdAt: thread.createdAt,
+        updatedAt: thread.updatedAt,
+        archivedAt: null,
+        hiddenAt: null,
+        settledOverride: thread.settledOverride,
+        settledAt: thread.settledAt,
+        lastVisitedAt: thread.lastVisitedAt ?? null,
+        deletedAt: thread.deletedAt,
+      },
+    });
+    yield* Queue.take(pulls);
+    yield* TestClock.adjust("5 seconds");
+    yield* testRelay.relay.drain;
+  });
+  return { ...testRelay, unhide };
+});
+
 describe("AgentAwarenessRelay", () => {
   it("ignores transcript and tool updates but retains activity and metadata changes", () => {
     for (const type of [
@@ -287,8 +345,6 @@ describe("AgentAwarenessRelay", () => {
       "provider-turn.updated",
       "thread.visited",
       "thread.pinned",
-      "thread.hidden",
-      "thread.unhidden",
     ] as const) {
       assert.isFalse(AgentAwarenessRelay.shouldPublishAgentAwarenessEvent({ type }));
     }
@@ -304,6 +360,8 @@ describe("AgentAwarenessRelay", () => {
       "thread.provider-switched",
       "thread.archived",
       "thread.unarchived",
+      "thread.hidden",
+      "thread.unhidden",
       "thread.deleted",
     ] as const) {
       assert.isTrue(AgentAwarenessRelay.shouldPublishAgentAwarenessEvent({ type }));
@@ -663,6 +721,87 @@ describe("AgentAwarenessRelay", () => {
       yield* relay.drain;
       assert.equal(publications.length, 2);
       assert.equal(publications[1]?.state, null);
+    }),
+  );
+
+  it.effect(
+    "clears a hidden thread's activity and stays quiet about runs it finished while hidden",
+    () =>
+      Effect.gen(function* () {
+        const { relay, currentShell, publications, unhide } = yield* makeUnhidingTestRelay();
+        yield* relay.publishThread(THREAD_ID);
+        assert.equal(publications[0]?.state?.phase, "running");
+        const hiddenAt = yield* DateTime.now;
+        yield* Ref.set(currentShell, shell({ hiddenAt }));
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
+        assert.equal(publications.at(-1)?.state, null);
+        const completed = shell({
+          status: "completed",
+          latestRunCompletedAt: yield* DateTime.now,
+        });
+        yield* Ref.set(currentShell, { ...completed, hiddenAt });
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
+        yield* unhide(completed);
+        assert.deepStrictEqual(
+          publications.slice(1).map((publication) => publication.state),
+          publications.slice(1).map(() => null),
+        );
+        yield* Ref.set(currentShell, shell());
+        yield* relay.publishThread(THREAD_ID);
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status: "completed",
+            latestRunCompletedAt: DateTime.add(yield* DateTime.now, { seconds: 1 }),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        assert.equal(publications.at(-1)?.state?.phase, "completed");
+      }),
+  );
+
+  it.effect("stays quiet when a thread completes and is unhidden before its tombstone lands", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, publications, unhide } = yield* makeUnhidingTestRelay();
+      yield* relay.publishThread(THREAD_ID);
+      yield* Ref.set(currentShell, shell({ hiddenAt: yield* DateTime.now }));
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(publications.length, 1);
+      yield* unhide(shell({ status: "completed", latestRunCompletedAt: yield* DateTime.now }));
+      assert.isAbove(publications.length, 1);
+      assert.isTrue(publications.slice(1).every((publication) => publication.state === null));
+    }),
+  );
+
+  it.effect("stays quiet when the publish worker never saw the thread hidden", () =>
+    Effect.gen(function* () {
+      const { relay, publications, unhide } = yield* makeUnhidingTestRelay();
+      yield* relay.publishThread(THREAD_ID);
+      const completedAt = yield* DateTime.now;
+      yield* TestClock.adjust("1 second");
+      yield* unhide(shell({ status: "completed", latestRunCompletedAt: completedAt }));
+      assert.isAbove(publications.length, 1);
+      assert.isTrue(publications.slice(1).every((publication) => publication.state === null));
+    }),
+  );
+
+  it.effect("alerts on a visible completion after unhiding mid-run", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, publications, unhide } = yield* makeUnhidingTestRelay();
+      yield* relay.publishThread(THREAD_ID);
+      yield* Ref.set(currentShell, shell({ hiddenAt: yield* DateTime.now }));
+      yield* relay.publishThread(THREAD_ID);
+      yield* unhide(
+        shell({
+          status: "completed",
+          latestRunCompletedAt: DateTime.add(yield* DateTime.now, { seconds: 1 }),
+        }),
+      );
+      assert.equal(publications.at(-1)?.state?.phase, "completed");
     }),
   );
 
