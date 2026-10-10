@@ -712,7 +712,7 @@ describe("AgentAwarenessRelay", () => {
         yield* relay.publishThread(THREAD_ID);
         yield* TestClock.adjust("5 seconds");
         yield* relay.drain;
-        assert.equal(publications.length, count);
+        assert.isTrue(publications.slice(count).every((publication) => publication.state === null));
         yield* Ref.set(currentShell, shell());
         yield* relay.publishThread(THREAD_ID);
         yield* Ref.set(
@@ -725,6 +725,28 @@ describe("AgentAwarenessRelay", () => {
         yield* relay.publishThread(THREAD_ID);
         assert.equal(publications.at(-1)?.state?.phase, "completed");
       }),
+  );
+
+  it.effect("stays quiet when a thread completes and is unhidden before its tombstone lands", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, publications } = yield* makeTestRelay();
+      yield* relay.publishThread(THREAD_ID);
+      yield* Ref.set(currentShell, shell({ hiddenAt: yield* DateTime.now }));
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(publications.length, 1);
+      yield* Ref.set(
+        currentShell,
+        shell({
+          status: "completed",
+          latestRunCompletedAt: DateTime.add(yield* DateTime.now, { seconds: 1 }),
+        }),
+      );
+      yield* relay.publishThread(THREAD_ID);
+      yield* TestClock.adjust("5 seconds");
+      yield* relay.drain;
+      assert.equal(publications.length, 2);
+      assert.equal(publications[1]?.state, null);
+    }),
   );
 
   it.effect.each([

@@ -424,7 +424,7 @@ export const make = Effect.gen(function* () {
   // clears the deadline. Assigned after the worker exists.
   const publishConfirmDeadlines = new Map<ThreadId, number>();
   // Threads seen hidden since their last live publish. A run that finished
-  // while hidden stays quiet after unhiding, like history at startup.
+  // while hidden publishes a tombstone after unhiding, never a terminal alert.
   const hiddenSinceLastPublish = new Set<ThreadId>();
   let schedulePublishConfirm: (threadId: ThreadId) => Effect.Effect<void> = () => Effect.void;
   const publishRetries = new Map<
@@ -548,12 +548,18 @@ export const make = Effect.gen(function* () {
     const project = Option.isSome(thread)
       ? yield* projects.getById(thread.value.projectId)
       : Option.none<Project>();
-    const snapshot = resolveAgentAwarenessRelayPublishSnapshot({
+    const projected = resolveAgentAwarenessRelayPublishSnapshot({
       environmentId,
       threadId,
       thread,
       project,
     });
+    // A run that finished while hidden clears the activity instead of alerting.
+    const snapshot =
+      (projected.state?.phase === "completed" || projected.state?.phase === "failed") &&
+      hiddenSinceLastPublish.has(threadId)
+        ? { ...projected, state: null }
+        : projected;
     const publishIdentity = agentAwarenessPublishIdentity(snapshot.state);
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
     if (
@@ -562,13 +568,7 @@ export const make = Effect.gen(function* () {
     ) {
       // Startup has no publish history. Only work from this server process may
       // produce an initial terminal alert; historical threads remain quiet.
-      if (
-        Option.isNone(thread) ||
-        hiddenSinceLastPublish.has(threadId) ||
-        !terminalWorkSinceStart(thread.value, startedAt)
-      ) {
-        return;
-      }
+      if (Option.isNone(thread) || !terminalWorkSinceStart(thread.value, startedAt)) return;
     }
     if (publishedStateByThread.get(threadId) === publishIdentity) {
       // The projection is back at (or never left) the last published state, so
