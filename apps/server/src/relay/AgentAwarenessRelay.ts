@@ -423,9 +423,10 @@ export const make = Effect.gen(function* () {
   // tombstone can never race an in-flight live update; a recovered state
   // clears the deadline. Assigned after the worker exists.
   const publishConfirmDeadlines = new Map<ThreadId, number>();
-  // Threads seen hidden since their last live publish. A run that finished
-  // while hidden publishes a tombstone after unhiding, never a terminal alert.
-  const hiddenSinceLastPublish = new Set<ThreadId>();
+  // When each thread was last unhidden, recorded as the event arrives so a
+  // queued publish cannot miss it. A run that finished before that publishes a
+  // tombstone instead of a terminal alert.
+  const unhiddenAtByThread = new Map<ThreadId, number>();
   let schedulePublishConfirm: (threadId: ThreadId) => Effect.Effect<void> = () => Effect.void;
   const publishRetries = new Map<
     ThreadId,
@@ -539,7 +540,6 @@ export const make = Effect.gen(function* () {
       // filter so archiving one stays quiet too.
       return;
     }
-    if (threadShell?.hiddenAt != null) hiddenSinceLastPublish.add(threadId);
     // Archived and hidden threads publish a tombstone, so they never alert.
     const thread =
       threadShell === null || threadShell.archivedAt !== null || threadShell.hiddenAt !== null
@@ -554,14 +554,17 @@ export const make = Effect.gen(function* () {
       thread,
       project,
     });
-    // A run that finished while hidden clears the activity instead of alerting.
+    // A run that finished before the thread was unhidden clears the activity
+    // instead of alerting.
+    const unhiddenAt = unhiddenAtByThread.get(threadId);
     const snapshot =
       (projected.state?.phase === "completed" || projected.state?.phase === "failed") &&
-      hiddenSinceLastPublish.has(threadId)
+      Option.isSome(thread) &&
+      unhiddenAt !== undefined &&
+      thread.value.latestRunCompletedAt != null &&
+      DateTime.toEpochMillis(thread.value.latestRunCompletedAt) <= unhiddenAt
         ? { ...projected, state: null }
         : projected;
-    // A live visible state means any run that finished while hidden is over.
-    if (snapshot.state !== null) hiddenSinceLastPublish.delete(threadId);
     const publishIdentity = agentAwarenessPublishIdentity(snapshot.state);
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
     if (
@@ -841,6 +844,9 @@ export const make = Effect.gen(function* () {
       yield* forkParked(
         Stream.runForEach(threads.streamDomainEvents, (event) => {
           const threadId = eventThreadId(event);
+          if (event.type === "thread.unhidden") {
+            unhiddenAtByThread.set(threadId, DateTime.toEpochMillis(event.occurredAt));
+          }
           if (!shouldPublishAgentAwarenessEvent(event)) {
             return Effect.void;
           }
