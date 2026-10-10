@@ -48,8 +48,10 @@ jobs:
   # triggering commit. Manual stable releases build the commit of the latest
   # published nightly, so stable only ever ships a build that nightly users
   # have already run. Scheduled runs also decide here whether a nightly is due.
+  # Forks skip the whole pipeline, since every later job needs this one.
   resolve_commit:
     name: Resolve release commit
+    if: ${{ github.repository == 'pingdotgg/t3code' }}
     runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 5
     outputs:
